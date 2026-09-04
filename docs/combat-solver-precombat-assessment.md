@@ -1,10 +1,10 @@
 # Combat Solver 战前预测接入评估与原型结果
 
-原始评估对象：Combat Solver `0.28.3`，对应当时 Workshop live DLL 与提交 `57574c9b12f24db3508cd578c12749ad85edcc4e`。当前原型已将 API 改动重放到作者 `v0.29.1`（`f63c57c`）之上，本地版本为 `0.29.4`，分支仍为 `feat/precombat-api`。
+原始评估对象：Combat Solver `0.28.3`，对应当时 Workshop live DLL 与提交 `57574c9b12f24db3508cd578c12749ad85edcc4e`。当前原型已将 API 改动重放到作者 `v0.29.1`（`f63c57c`）之上，本地版本为 `0.29.5`，分支仍为 `feat/precombat-api`。
 
 ## 结论
 
-作者 Workshop `0.29.1` 仍没有 Seed Oracle 所需的 public API，也不适合从地图 Hover 直接调用内部入口。现有原型没有放宽这一结论，而是在本地 Combat Solver `0.29.4` 中提供 public API v5：完整战斗初始化和搜索放入静音、可复用的独立 headless 游戏进程，主进程只捕获、校验并展示不可变结果。Seed Oracle 打开面板和 Hover 都不会启动计算；玩家逐项选择确定路线或纯模拟样本。
+作者 Workshop `0.29.1` 仍没有 Seed Oracle 所需的 public API，也不适合从地图 Hover 直接调用内部入口。现有原型没有放宽这一结论，而是在本地 Combat Solver `0.29.5` 中提供 public API v5：完整战斗初始化和搜索放入静音、可复用的独立 headless 游戏进程，主进程只捕获、校验并展示不可变结果。主进程初始化时钉住本次会话实际载入的 Mod 文件，避免运行中工坊更新改变 worker 环境。Seed Oracle 打开面板和 Hover 都不会启动计算；玩家逐项选择确定路线或纯模拟样本。
 
 ## 已确认的限制
 
@@ -64,4 +64,5 @@ Seed Oracle 枚举从当前位置出发的路线，并只保留每条路线上�
 - `SEEDORACLE-PRECOMBAT-V4-UI-011`（runId `505a961bceaf4e3ab8ffa74e347420b5`）：四 Mod 组合在 Seed Oracle UI 自检开启时成功构造新面板，验证 0～10 共 11 个次数选项、6 类模拟对象、两种后台保留策略、内存状态、关闭/重启控件，以及包含怪物生命、开局洗牌和战斗随机数的完整风险声明。
 - `PRECOMBAT-API-V5-UPSTREAM-0291-013`（runId `e2236a4ec85041dc95c0b3417ed0b688`）：API v5 重放到作者 `v0.29.1` 后通过四 Mod 回归；2/10/30 分钟和一直维持均生效，同一 worker `starts=1 / reuses=3`，内存与静音状态可见，确定预测、假设 RNG、自动关闭及 live 状态不变均通过。
 - `SEEDORACLE-PRECOMBAT-V5-LOCALIZATION-014`（runId `e15b744f36e84d85aa8771cf02328121`）：UI 自检验证五种后台策略，并逐一要求当前幕原生遭遇标题经 `LocString.GetFormattedText()` 解析，不再显示原始 `LocString … .title`。
+- `PRECOMBAT-MOD-PIN-015`（runId `8382cbd40ce74a44ac2cac7e444f6403`）：十 Mod 组合加载 Combat Solver `0.29.5`、Seed Oracle `0.1.18` 与 HowlFromBeyondBgm `1.1.5` 等主进程版本；工坊式原子替换后，启动期硬链接快照仍保留原文件。两次确定预测、一次假设样本、worker 复用、内存、静音、全部保活期限、自动关闭和 live 状态不变均通过。
 - Combat Solver 与 Seed Oracle Release 均为 `0` warning、`0` error；Windows 结构门禁通过。地图上的异步刷新、文字换行和真实鼠标悬停仍需可见游戏验收。

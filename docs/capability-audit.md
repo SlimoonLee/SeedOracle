@@ -8,7 +8,7 @@
 |---|---:|---|
 | Slay the Spire 2 | `0.111.0` / `41cef1ea` | live `sts2.dll`、`sts2.xml` 与 `release_info.json` |
 | Random Foreseer | `0.13.10` / `a2410e46f4d4386e0a2221cc2942479caa242d85` | Workshop `3747531952/lib/0.13.10`；仓库 HEAD 与 build-info 一致 |
-| Combat Solver | Workshop `0.29.1` / `f63c57c`；本地扩展版 `0.29.4` 在该版本上保留并扩展 API | Workshop `3790899961` 保持未修改；本地 `feat/precombat-api` 构建部署到游戏 `mods/CombatSolver` |
+| Combat Solver | Workshop `0.29.1` / `f63c57c`；本地扩展版 `0.29.5` 在该版本上保留并扩展 API | Workshop `3790899961` 保持未修改；本地 `feat/precombat-api` 构建部署到游戏 `mods/CombatSolver` |
 
 审计顺序采用 live 游戏程序集、live Mod 程序集、与 live 提交完全一致的源码。反编译仅用于确认当前 `sts2.dll` 的实际实现。
 
@@ -71,7 +71,7 @@ Workshop CS `0.28.3` 只有 `CombatSolver.Entry` 与 Mirror 描述类型是 publ
 
 本地 `feat/precombat-api` 原型现为 `CombatSolver.Api.PreCombatForecastApi` v5。它没有尝试从未来 Encounter 手工拼装不完整 Root，而是把规范化完整跑局、Encounter、目标楼层/列坐标、节点类型和已确定的连续非战斗地图历史交给独立游戏进程；worker 精确恢复跑局、补记结构性路径历史并应用可选入战 HP 后，通过原生入口建立战斗，再复用上述内部 Root 与搜索管线。独立的 `SimulateAsync` 在精确恢复校验后才替换隔离战斗 RNG；状态接口只读返回 worker 进程、内存信息和可空空闲期限。
 
-`CombatSolverAdapter` 直接依赖该编译期契约，并在启动时检查 `ApiVersion >= 5` 与 `IsAvailable`。在作者正式发布带 API 的版本前，当前 Seed Oracle 构建必须与本地 Combat Solver `0.29.4+` 成对使用；作者 Workshop `0.29.1` 本身不满足这个契约。
+`CombatSolverAdapter` 直接依赖该编译期契约，并在启动时检查 `ApiVersion >= 5` 与 `IsAvailable`。在作者正式发布带 API 的版本前，当前 Seed Oracle 构建必须与本地 Combat Solver `0.29.5+` 成对使用；作者 Workshop `0.29.1` 本身不满足这个契约。
 
 ## 已确认的游戏行为
 

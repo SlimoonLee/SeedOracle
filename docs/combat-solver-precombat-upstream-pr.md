@@ -1,6 +1,6 @@
 # PR 草案：Add a controllable isolated pre-combat forecast API for companion mods
 
-本地审阅分支：`feat/precombat-api`，当前以作者 `v0.29.1` 提交 `f63c57c` 为底座。重放后的基础 API 提交为 `9d2d029`，路线场景与可控取消的 API v2 提交为 `aeef63f`，版本同步提交为 `dbcd274`；本地 `0.29.2` 以 `f40c8dd` 增加 API v3 的静音可复用 worker，`0.29.3` 以 `9d3dd12` 扩展为 API v4，当前 `0.29.4` / API v5 提交为 `1ee45fe`。
+本地审阅分支：`feat/precombat-api`，当前以作者 `v0.29.1` 提交 `f63c57c` 为底座。重放后的基础 API 提交为 `9d2d029`，路线场景与可控取消的 API v2 提交为 `aeef63f`，版本同步提交为 `dbcd274`；本地 `0.29.2` 以 `f40c8dd` 增加 API v3 的静音可复用 worker，`0.29.3` 以 `9d3dd12` 扩展为 API v4，`0.29.4` 以 `1ee45fe` 增加 API v5 的可配置保活期限；当前 `0.29.5` 进一步钉住主进程实际载入的 Mod 文件，API 仍为 v5。
 
 ## Problem
 

@@ -28,6 +28,7 @@ Seed Oracle 是《Slay the Spire 2》`0.111.0` 的路线信息前瞻 Mod。它�
 - 地图顶部提供“战损与模拟”按钮和可见面板；打开面板与地图悬停都不会启动 worker。每个场景有独立“计算”按钮，未选择的路线不排队；相同跑局状态与搜索设置会直接恢复缓存结果；
 - 面板用与地图路线标记一致的彩色三角形、正方形、菱形等图形区分路线，悬停一行会在地图上高亮对应目标与路径；可选择单场搜索预算与并行度，并查看耗时、可信度和药水计划；
 - 面板实时显示隔离 Combat Solver worker 的 PID、工作集、私有内存和静音状态；可选择保活 2、10、30 分钟、一直维持或任务结束后自动关闭，也可手动关闭及重启/预热；
+- Combat Solver 在主游戏初始化时钉住本次会话实际载入的 Mod 文件；Steam 运行中更新工坊目录时，隔离 worker 仍以主进程版本为准，不会因磁盘版本先行更新而误报 Mod 集合不一致；
 - “咱俩碰一碰”页可手动运行 0～10 个假设样本，对象包括当前幕随机弱怪池、强怪池、精英池、指定普通/精英怪组和当前 Boss；指定怪组及样本结果使用游戏当前语言的本地化遭遇名称，逐样本显示战损、终局生命、回合和用药，并汇总最低、平均与最高战损；
 - 纯模拟明确使用假定的怪物组与怪物生命、开局洗牌、怪物行动和其他战斗随机数，只用当前牌组、遗物、药水与生命比较威胁，不把远处未确定战斗显示成预测事实；
 - 手动计算覆盖每条当前可行路线上的第一场确定战斗。目标前允许经过不会直接消耗战斗序列的篝火、宝箱或商店，目标坐标和中间楼层历史会传入隔离进程；未决事件和中间战斗不跳过计算；
@@ -42,7 +43,7 @@ Seed Oracle 是《Slay the Spire 2》`0.111.0` 的路线信息前瞻 Mod。它�
 
 ## 当前兼容性
 
-Seed Oracle `0.1.17` 需要 [SlimoonLee/CombatSolver](https://github.com/SlimoonLee/CombatSolver) 的 `upstream/precombat-api-rfc` 分支（本地 Mod 版本 `0.29.4`、public API v5）。[Torch1230/CombatSolver](https://github.com/Torch1230/CombatSolver) 的 `v0.29.1` 尚未包含该接口，不能直接替代这个扩展版本。
+Seed Oracle `0.1.18` 需要 [SlimoonLee/CombatSolver](https://github.com/SlimoonLee/CombatSolver) 的 `upstream/precombat-api-rfc` 分支（本地 Mod 版本 `0.29.5`、public API v5）。[Torch1230/CombatSolver](https://github.com/Torch1230/CombatSolver) 的 `v0.29.1` 尚未包含该接口，不能直接替代这个扩展版本。
 
 ## 构建
 
@@ -58,7 +59,7 @@ dotnet build .\SeedOracle.csproj -c Release
 
 - STS2-RitsuLib `0.5.13+`
 - Random Foreseer `0.13.10+`
-- Combat Solver 本地扩展版 `0.29.4+`（基于作者 `v0.29.1`，必须包含 public API v5；作者原版目前不提供此接口）
+- Combat Solver 本地扩展版 `0.29.5+`（基于作者 `v0.29.1`，必须包含 public API v5；作者原版目前不提供此接口）
 
 依赖能力审计见 [docs/capability-audit.md](docs/capability-audit.md)。
 
