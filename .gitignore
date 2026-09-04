@@ -1,0 +1,17 @@
+.idea/
+.vs/
+.vscode/
+.godot/
+.reference/
+.tools/
+.test-dependency-staging/
+artifacts/
+bin/
+obj/
+TestResults/
+coverage/
+local.props
+*.log
+*.trx
+*.user
+*.suo

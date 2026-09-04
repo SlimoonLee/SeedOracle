@@ -1,0 +1,9 @@
+<Project>
+  <PropertyGroup>
+    <Sts2Dir>C:\path\to\Steam\steamapps\common\Slay the Spire 2</Sts2Dir>
+    <Sts2DataDir>$(Sts2Dir)\data_sts2_windows_x86_64</Sts2DataDir>
+    <RitsuLibDir>$(Sts2Dir)\mods\STS2-RitsuLib</RitsuLibDir>
+    <RandomForeseerDir>$(Sts2Dir)\mods\RandomForeseer</RandomForeseerDir>
+    <CombatSolverDir>$(Sts2Dir)\mods\CombatSolver</CombatSolverDir>
+  </PropertyGroup>
+</Project>

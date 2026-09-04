@@ -1,0 +1,56 @@
+<Project Sdk="Godot.NET.Sdk/4.5.1">
+  <Import Project="./local.props" Condition="Exists('./local.props')" />
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>true</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <RootNamespace>SeedOracle</RootNamespace>
+    <Version>0.1.16</Version>
+    <Sts2Dir Condition="'$(Sts2Dir)' == ''">$(MSBuildProgramFiles32)\Steam\steamapps\common\Slay the Spire 2</Sts2Dir>
+    <Sts2DataDir Condition="'$(Sts2DataDir)' == ''">$(Sts2Dir)\data_sts2_windows_x86_64</Sts2DataDir>
+    <RitsuLibDir Condition="'$(RitsuLibDir)' == ''">$(Sts2Dir)\mods\STS2-RitsuLib</RitsuLibDir>
+    <RandomForeseerDir Condition="'$(RandomForeseerDir)' == ''">$(Sts2Dir)\mods\RandomForeseer</RandomForeseerDir>
+    <CombatSolverDir Condition="'$(CombatSolverDir)' == ''">$(Sts2Dir)\mods\CombatSolver</CombatSolverDir>
+    <ModOutputDir Condition="'$(ModOutputDir)' == ''">$(Sts2Dir)\mods\SeedOracle</ModOutputDir>
+    <CopyModOnBuild Condition="'$(CopyModOnBuild)' == ''">true</CopyModOnBuild>
+    <NoWarn>$(NoWarn);CS0436</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Krafs.Publicizer" Version="2.3.0" PrivateAssets="all" />
+    <Publicize Include="sts2" IncludeVirtualMembers="false" IncludeCompilerGeneratedMembers="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="sts2" HintPath="$(Sts2DataDir)\sts2.dll" Private="false" />
+    <Reference Include="0Harmony" HintPath="$(Sts2DataDir)\0Harmony.dll" Private="false" />
+    <Reference Include="GodotSharp" HintPath="$(Sts2DataDir)\GodotSharp.dll" Private="false" />
+    <Reference Include="STS2-RitsuLib" HintPath="$(RitsuLibDir)\STS2-RitsuLib.dll" Private="false" />
+    <Reference Include="RandomForeseer" HintPath="$(RandomForeseerDir)\RandomForeseer.dll" Private="false" />
+    <Reference Include="CombatSolver" HintPath="$(CombatSolverDir)\CombatSolver.dll" Private="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove=".reference/**;.tools/**;tests/**;TestResults/**" />
+    <EmbeddedResource Remove=".reference/**;.tools/**;tests/**;TestResults/**" />
+    <None Remove=".reference/**;.tools/**;tests/**;TestResults/**" />
+  </ItemGroup>
+
+  <Target Name="ValidateLocalDependencies" BeforeTargets="ResolveAssemblyReferences">
+    <Error Condition="!Exists('$(Sts2DataDir)\sts2.dll')" Text="Could not find sts2.dll under '$(Sts2DataDir)'." />
+    <Error Condition="!Exists('$(RitsuLibDir)\STS2-RitsuLib.dll')" Text="Could not find RitsuLib under '$(RitsuLibDir)'." />
+    <Error Condition="!Exists('$(RandomForeseerDir)\RandomForeseer.dll')" Text="Could not find Random Foreseer under '$(RandomForeseerDir)'." />
+    <Error Condition="!Exists('$(CombatSolverDir)\CombatSolver.dll')" Text="Could not find Combat Solver under '$(CombatSolverDir)'." />
+  </Target>
+
+  <Target Name="CopyMod" AfterTargets="Build" Condition="'$(CopyModOnBuild)' == 'true'">
+    <MakeDir Directories="$(ModOutputDir)" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(ModOutputDir)" />
+    <Copy SourceFiles="$(TargetDir)$(TargetName).pdb" DestinationFolder="$(ModOutputDir)" Condition="Exists('$(TargetDir)$(TargetName).pdb')" />
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\SeedOracle.json" DestinationFolder="$(ModOutputDir)" />
+  </Target>
+</Project>
