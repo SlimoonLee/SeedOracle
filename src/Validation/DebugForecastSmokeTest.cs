@@ -530,6 +530,24 @@ internal static class DebugForecastSmokeTest
                 $"Seed Oracle event-local-RNG self-test failed: {eventTransformContent?.Reason ?? "no transform results"}.");
         }
 
+        var slipperyBridgeContent = PredictionPurityGuard.Execute(
+            run,
+            "self-test:event-native-initial-content",
+            () => Entry.RandomForeseer.PredictEventContents(
+                player,
+                [RoomType.Event],
+                ModelDb.Event<SlipperyBridge>()));
+        var initialBridgeOption = slipperyBridgeContent is { HasValue: true }
+            ? slipperyBridgeContent.Value!.Options.FirstOrDefault(option =>
+                option.TextKey == "SLIPPERY_BRIDGE.pages.INITIAL.options.OVERCOME")
+            : null;
+        if (initialBridgeOption is null || initialBridgeOption.InitialItems.Count != 1)
+        {
+            throw new InvalidOperationException(
+                $"Seed Oracle native event-content self-test failed: "
+                + $"{slipperyBridgeContent?.Reason ?? "initial no-damage removal card was omitted"}.");
+        }
+
         var unknownPoint = points.FirstOrDefault(point => point.PointType == MapPointType.Unknown);
         if (unknownPoint is not null)
         {

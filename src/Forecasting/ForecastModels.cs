@@ -38,6 +38,7 @@ internal sealed record EventPredictionSetDetails(IReadOnlyList<string> Items);
 internal sealed record EventOptionPredictionDetails(
     string Option,
     string TextKey,
+    IReadOnlyList<string> InitialItems,
     IReadOnlyList<EventPredictionSetDetails> Sets);
 
 internal sealed record EventContentDetails(

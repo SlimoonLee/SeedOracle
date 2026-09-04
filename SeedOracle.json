@@ -3,7 +3,7 @@
   "name": "Seed Oracle / 种子先知",
   "author": "slimoon",
   "description": "在路线选择前显示由当前跑局状态能够确定的未来信息，并标注预测准确度。",
-  "version": "0.1.16",
+  "version": "0.1.17",
   "has_pck": false,
   "has_dll": true,
   "affects_gameplay": false,

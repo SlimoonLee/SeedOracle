@@ -644,26 +644,40 @@ internal static class MapForecastTooltipBuilder
 
         var details = forecast.Value!;
         lines.Add(chinese
-            ? $"{prefix}事件内随机内容  {Badge(forecast.Accuracy, true)}"
-            : $"{prefix}Random event contents  {Badge(forecast.Accuracy, false)}");
+            ? $"{prefix}事件选项内容  {Badge(forecast.Accuracy, true)}"
+            : $"{prefix}Event option contents  {Badge(forecast.Accuracy, false)}");
         foreach (var option in details.Options)
         {
-            if (option.Sets.Count == 1)
+            if (option.InitialItems.Count > 0 && option.Sets.Count == 0)
             {
                 lines.Add(chinese
-                    ? $"{prefix}  选项「{option.Option}」：{string.Join(" / ", option.Sets[0].Items)}"
-                    : $"{prefix}  Option \"{option.Option}\": {string.Join(" / ", option.Sets[0].Items)}");
+                    ? $"{prefix}  选项「{option.Option}」入场可见：{string.Join(" / ", option.InitialItems)}"
+                    : $"{prefix}  Option \"{option.Option}\" shown on entry: {string.Join(" / ", option.InitialItems)}");
+                continue;
+            }
+
+            if (option.InitialItems.Count == 0 && option.Sets.Count == 1)
+            {
+                lines.Add(chinese
+                    ? $"{prefix}  选项「{option.Option}」结果：{string.Join(" / ", option.Sets[0].Items)}"
+                    : $"{prefix}  Option \"{option.Option}\" result: {string.Join(" / ", option.Sets[0].Items)}");
                 continue;
             }
 
             lines.Add(chinese
                 ? $"{prefix}  选项「{option.Option}」："
                 : $"{prefix}  Option \"{option.Option}\":");
+            if (option.InitialItems.Count > 0)
+            {
+                lines.Add(chinese
+                    ? $"{prefix}    入场可见：{string.Join(" / ", option.InitialItems)}"
+                    : $"{prefix}    Shown on entry: {string.Join(" / ", option.InitialItems)}");
+            }
             for (var index = 0; index < option.Sets.Count; index++)
             {
                 lines.Add(chinese
-                    ? $"{prefix}    第 {index + 1} 组：{string.Join(" / ", option.Sets[index].Items)}"
-                    : $"{prefix}    Set {index + 1}: {string.Join(" / ", option.Sets[index].Items)}");
+                    ? $"{prefix}    结果第 {index + 1} 组：{string.Join(" / ", option.Sets[index].Items)}"
+                    : $"{prefix}    Result set {index + 1}: {string.Join(" / ", option.Sets[index].Items)}");
             }
         }
     }

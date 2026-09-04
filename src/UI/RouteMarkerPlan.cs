@@ -134,7 +134,10 @@ internal static class RouteMarkerPlanner
                + string.Join(
                    ";",
                    forecast.Value!.Options.Select(option =>
-                       option.TextKey + "=" + string.Join(
+                       option.TextKey + "=initial:"
+                       + string.Join(",", option.InitialItems)
+                       + ":predicted:"
+                       + string.Join(
                            "/",
                            option.Sets.Select(set => string.Join(",", set.Items)))));
     }

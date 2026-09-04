@@ -20,7 +20,7 @@ Seed Oracle 是《Slay the Spire 2》`0.111.0` 的路线信息前瞻 Mod。它�
 - 对当前可行路线上的首场战斗（包括隔着不会改变战斗状态的宝箱、休息点或商店）用克隆的 `Niche` RNG 预测怪物 HP；
 - 用克隆的 `UnknownMapPoint` RNG、赔率状态和 Hook 监听器预测路线上的连续 `?` 房间类型；
 - 用克隆的 Event 队列和 Hook 监听器预测路线上的事件身份；
-- 对 Random Foreseer 已支持的 31 类事件，在序列化影子跑局中初始化事件选项，并显示选项内的随机卡牌、遗物、药水和变形结果；远端事件会先推进沿途已建模的奖励状态；
+- 对 Random Foreseer 已支持的 31 类事件，在序列化影子跑局中初始化事件选项，并分别显示入场时原生选项已经生成的卡牌、遗物、药水与选择后的额外预测；滑脚木桥的首次无伤删牌、旺戈商店的精选遗物等不会因 Random Foreseer 只补充后续结果而遗漏；远端事件会先推进沿途已建模的奖励状态；
 - 通过 Random Foreseer Adapter 依次生成从当前起第 N 次进店的基准库存，包括卡牌、遗物、药水、价格和删牌价格；
 - 按可行路线推进克隆的 `Rewards`、`Shops`、卡牌/药水赔率和玩家遗物袋，显示战后金币、卡牌、药水与遗物；支持当前游戏内会改写基础奖励的遗物与自定义模式；
 - 使用克隆的 `TreasureRoomRelics` RNG 与共享遗物袋预测宝箱遗物和金币，并处理银坩埚空箱与首次教学宝箱；
@@ -42,7 +42,7 @@ Seed Oracle 是《Slay the Spire 2》`0.111.0` 的路线信息前瞻 Mod。它�
 
 ## 当前兼容性
 
-Seed Oracle `0.1.16` 需要 [SlimoonLee/CombatSolver](https://github.com/SlimoonLee/CombatSolver) 的 `upstream/precombat-api-rfc` 分支（本地 Mod 版本 `0.29.4`、public API v5）。[Torch1230/CombatSolver](https://github.com/Torch1230/CombatSolver) 的 `v0.29.1` 尚未包含该接口，不能直接替代这个扩展版本。
+Seed Oracle `0.1.17` 需要 [SlimoonLee/CombatSolver](https://github.com/SlimoonLee/CombatSolver) 的 `upstream/precombat-api-rfc` 分支（本地 Mod 版本 `0.29.4`、public API v5）。[Torch1230/CombatSolver](https://github.com/Torch1230/CombatSolver) 的 `v0.29.1` 尚未包含该接口，不能直接替代这个扩展版本。
 
 ## 构建
 

@@ -34,6 +34,8 @@ internal sealed partial class RandomForeseerAdapter
         .GetMethods(AnyInstance)
         .Single(method => method.Name == "SetEventState"
                           && method.GetParameters().Length == 2);
+    private static readonly FieldInfo? EventOptionHoverTipsField = typeof(EventOption)
+        .GetField("<HoverTips>k__BackingField", AnyInstance);
 
     public Forecast<EventContentDetails>? PredictEventContents(
         Player player,
@@ -44,7 +46,7 @@ internal sealed partial class RandomForeseerAdapter
             throw new ArgumentException("The resolved route must end in an event room.", nameof(resolvedRooms));
 
         var bridge = EventPredictionBridge.Value;
-        if (!SupportsRouteRewards || !bridge.IsAvailable || !bridge.Supports(eventModel.GetType()))
+        if (!SupportsRouteRewards || !bridge.IsAvailable)
             return null;
 
         try
@@ -141,11 +143,12 @@ internal sealed partial class RandomForeseerAdapter
         var predictions = new List<EventOptionPredictionDetails>();
         foreach (var option in options.Where(candidate => !candidate.IsLocked))
         {
-            if (!bridge.TryPredict(mutable, option, out var tips) || tips.Count == 0)
-                continue;
-
-            var sets = BuildPredictionSets(tips);
-            if (sets.Count == 0)
+            var initialItems = BuildInitialOptionItems(bridge, mutable, option);
+            var sets = bridge.Supports(mutable.GetType())
+                       && bridge.TryPredict(mutable, option, out var tips)
+                ? BuildPredictionSets(tips)
+                : [];
+            if (initialItems.Count == 0 && sets.Count == 0)
                 continue;
             var optionTitle = NormalizeText(option.Title.GetFormattedText());
             if (string.IsNullOrWhiteSpace(optionTitle))
@@ -153,11 +156,61 @@ internal sealed partial class RandomForeseerAdapter
             predictions.Add(new EventOptionPredictionDetails(
                 optionTitle,
                 option.TextKey,
+                initialItems,
                 sets));
         }
 
         return new EventContentDetails(predictions);
     }
+
+    private static IReadOnlyList<string> BuildInitialOptionItems(
+        EventBridge bridge,
+        EventModel eventModel,
+        EventOption option)
+    {
+        var items = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        if (bridge.GetRelicForOption(eventModel, option) is { } optionRelic)
+            AddItem(optionRelic.Title.GetFormattedText());
+
+        var nativeTips = EventOptionHoverTipsField?.GetValue(option) as IEnumerable<IHoverTip>
+                         ?? option.HoverTips.Where(static tip => !IsRandomForeseerPredictionTip(tip));
+        foreach (var tip in nativeTips)
+        {
+            switch (tip)
+            {
+                case CardHoverTip cardTip:
+                    AddItem(CardName(cardTip.Card));
+                    break;
+                case { CanonicalModel: CardModel card }:
+                    AddItem(CardName(card));
+                    break;
+                case { CanonicalModel: RelicModel relic }:
+                    AddItem(relic.Title.GetFormattedText());
+                    break;
+                case { CanonicalModel: PotionModel potion }:
+                    AddItem(potion.Title.GetFormattedText());
+                    break;
+                case { CanonicalModel: OrbModel orb }:
+                    AddItem(orb.Title.GetFormattedText());
+                    break;
+            }
+        }
+
+        return items;
+
+        void AddItem(string value)
+        {
+            var normalized = NormalizeText(value);
+            if (!string.IsNullOrWhiteSpace(normalized) && seen.Add(normalized))
+                items.Add(normalized);
+        }
+    }
+
+    private static bool IsRandomForeseerPredictionTip(IHoverTip tip) =>
+        tip.Id.StartsWith("RandomForeseer:Prediction", StringComparison.Ordinal)
+        || tip.GetType().Assembly == typeof(global::RandomForeseer.RandomForeseerCode.Entry).Assembly;
 
     private static IReadOnlyList<EventPredictionSetDetails> BuildPredictionSets(
         IReadOnlyList<IHoverTip> tips)
@@ -224,13 +277,15 @@ internal sealed partial class RandomForeseerAdapter
         var predictors = registryType?.GetField("_predictors", AnyInstance)?.GetValue(registry) as IDictionary;
         var tryPredict = registryType?.GetMethods(AnyInstance)
             .SingleOrDefault(method => method.Name == "TryPredict" && method.GetParameters().Length == 3);
-        return new EventBridge(registry, predictors, tryPredict);
+        var getRelicForOption = predictionType?.GetMethod("GetRelicForOption", AnyStatic);
+        return new EventBridge(registry, predictors, tryPredict, getRelicForOption);
     }
 
     private sealed class EventBridge(
         object? registry,
         IDictionary? predictors,
-        MethodInfo? tryPredict)
+        MethodInfo? tryPredict,
+        MethodInfo? getRelicForOption)
     {
         public bool IsAvailable => registry is not null && predictors is not null && tryPredict is not null;
 
@@ -257,5 +312,9 @@ internal sealed partial class RandomForeseerAdapter
             };
             return predicted;
         }
+
+        public RelicModel? GetRelicForOption(EventModel eventModel, EventOption option) =>
+            getRelicForOption?.Invoke(null, [eventModel, option]) as RelicModel
+            ?? option.Relic;
     }
 }
