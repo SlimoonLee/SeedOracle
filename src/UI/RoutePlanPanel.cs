@@ -583,24 +583,103 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                 Update(new RoutePlanChoice.Merchant(picks.ToArray(), on));
             choiceBox.AddChild(removal);
         }
-        else if (variant.Event is not null && variant.EventContents is { HasValue: true } eventContents)
+        else if (variant.Event is not null)
         {
-            var options = eventContents.Value!.Options;
-            var select = new OptionButton
+            var eventName = variant.Event.Id.Entry;
+            var isCrystalSphere = eventName.Contains("CrystalSphere", StringComparison.Ordinal);
+
+            if (isCrystalSphere && _planForecasts is not null)
             {
-                MouseFilter = MouseFilterEnum.Stop,
-                FocusMode = FocusModeEnum.None
-            };
-            select.AddThemeFontSizeOverride("font_size", 17);
-            select.ApplyLocaleFontSubstitution(FontType.Regular, "font");
-            select.AddItem(chinese ? "事件选项：未选" : "Event: not chosen");
-            foreach (var option in options)
-                select.AddItem(option.Option);
-            var eventChoice = entry.Choice as RoutePlanChoice.EventOption;
-            select.Select(eventChoice is null ? 0 : eventChoice.OptionIndex + 1);
-            select.ItemSelected += (OptionButton.ItemSelectedEventHandler)(index =>
-                Update(new RoutePlanChoice.EventOption((int)index - 1)));
-            choiceBox.AddChild(select);
+                // Crystal sphere: shadow-construct the minigame and show the
+                // full 11x11 layout — the real event stays fully player-driven.
+                var canonical = ResolveCanonicalEvent(eventName);
+                if (canonical is not null && player is not null)
+                {
+                    if (Entry.RandomForeseer is RandomForeseerAdapter execAdapter)
+                    {
+                        var layoutBox = new VBoxContainer { MouseFilter = MouseFilterEnum.Pass };
+                        choiceBox.AddChild(layoutBox);
+                        var eventChoice = entry.Choice as RoutePlanChoice.EventOption;
+                        var mode = eventChoice?.OptionIndex is 1 ? 6 : 3;
+                        int LayoutCost(int count) =>
+                            Math.Max(execAdapter.PredictCrystalSphereLayout(player, canonical, count).Cost, 0);
+
+                        void RenderLayout()
+                        {
+                            foreach (var child in layoutBox.GetChildren())
+                                child.QueueFree();
+                            var layout = execAdapter.PredictCrystalSphereLayout(player, canonical, mode);
+                            var text = layout.Error is not null
+                                ? $"[color=#FF6B5E]布局预测失败：{layout.Error}[/color]"
+                                : string.Join("\n", layout.Rows)
+                                  + "\n" + string.Join("  ", layout.Legend)
+                                  + (layout.Cost >= 0 && mode == 6
+                                      ? $"  [color=#FFA629]6次价格：{layout.Cost}金[/color]"
+                                      : string.Empty);
+                            var grid = new RichTextLabel
+                            {
+                                BbcodeEnabled = true,
+                                FitContent = true,
+                                MouseFilter = MouseFilterEnum.Ignore,
+                                ScrollActive = false,
+                                SizeFlagsHorizontal = SizeFlags.ExpandFill
+                            };
+                            grid.AddThemeFontSizeOverride(ThemeConstants.RichTextLabel.NormalFontSize, 15);
+                            var gridFont = GetThemeFont(ThemeConstants.Label.Font, "Label");
+                            if (gridFont is not null)
+                                grid.AddThemeFontOverride(ThemeConstants.RichTextLabel.NormalFont, gridFont);
+                            grid.Text = text;
+                            layoutBox.AddChild(grid);
+                        }
+
+                        RenderLayout();
+
+                        var modeSelect = new OptionButton
+                        {
+                            MouseFilter = MouseFilterEnum.Stop,
+                            FocusMode = FocusModeEnum.None
+                        };
+                        modeSelect.AddThemeFontSizeOverride("font_size", 17);
+                        modeSelect.ApplyLocaleFontSubstitution(FontType.Regular, "font");
+                        modeSelect.AddItem(chinese ? "占卜 3 次（免费）" : "Divine 3 times (free)");
+                        var cost6 = LayoutCost(6);
+                        modeSelect.AddItem(chinese ? $"占卜 6 次（{cost6} 金）" : $"Divine 6 times ({cost6} gold)");
+                        modeSelect.Select(eventChoice?.OptionIndex is 1 ? 1 : 0);
+                        modeSelect.ItemSelected += (OptionButton.ItemSelectedEventHandler)(index =>
+                        {
+                            Update(new RoutePlanChoice.EventOption((int)index - 1));
+                            RenderLayout();
+                        });
+                        choiceBox.AddChild(modeSelect);
+                    }
+                }
+            }
+            else if (variant.EventContents is { HasValue: true } eventContents)
+            {
+                var options = eventContents.Value!.Options;
+                var select = new OptionButton
+                {
+                    MouseFilter = MouseFilterEnum.Stop,
+                    FocusMode = FocusModeEnum.None
+                };
+                select.AddThemeFontSizeOverride("font_size", 17);
+                select.ApplyLocaleFontSubstitution(FontType.Regular, "font");
+                select.AddItem(chinese ? "事件选项：未选" : "Event: not chosen");
+                foreach (var option in options)
+                    select.AddItem(option.Option);
+                var eventChoice = entry.Choice as RoutePlanChoice.EventOption;
+                select.Select(eventChoice is null ? 0 : eventChoice.OptionIndex + 1);
+                select.ItemSelected += (OptionButton.ItemSelectedEventHandler)(index =>
+                    Update(new RoutePlanChoice.EventOption((int)index - 1)));
+                choiceBox.AddChild(select);
+
+                AddEventExecutionControls(
+                    choiceBox,
+                    variant.Event.Id.Entry,
+                    entry,
+                    player,
+                    chinese);
+            }
         }
         else if (variant.RoomType == RoomType.Treasure && variant.Treasure is { HasValue: true } treasure)
         {
@@ -696,6 +775,117 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                 choiceBox.AddChild(target);
             }
         }
+    }
+
+    private readonly Dictionary<MapCoord, RandomForeseerAdapter.EventExecutionOutcome> _eventOutcomes = new();
+
+    private static EventModel? ResolveCanonicalEvent(string entry)
+    {
+        return ModelDb.AllEvents.FirstOrDefault(candidate =>
+            string.Equals(candidate.Id.Entry, entry, StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// "执行预演" button + outcome label for whitelisted events: the option
+    /// really executes on a shadow run (worker task), yielding exact deltas
+    /// and the revealed follow-up options. Live state is never touched.
+    /// </summary>
+    private void AddEventExecutionControls(
+        VBoxContainer choiceBox,
+        string eventName,
+        RoutePlanEntry entry,
+        Player? player,
+        bool chinese)
+    {
+        if (ResolveCanonicalEvent(eventName) is not { } canonical
+            || Entry.RandomForeseer is not RandomForeseerAdapter adapter
+            || player is null)
+        {
+            return;
+        }
+
+        var choice = entry.Choice as RoutePlanChoice.EventOption;
+        var outcomeLabel = PreCombatPanelStyles.CreateLabel(
+            DescribeEventOutcome(entry.Coord, chinese),
+            15,
+            StsColors.cream);
+        outcomeLabel.AutowrapMode = TextServer.AutowrapMode.WordSmart;
+        outcomeLabel.SizeFlagsHorizontal = SizeFlags.ExpandFill;
+
+        var executeButton = PreCombatPanelStyles.CreateButton(
+            chinese ? "执行预演" : "Simulate choice", 160);
+        executeButton.TooltipText = chinese
+            ? "在影子跑局上真实执行该选项（不影响当前局），得到确切收益与后续选项"
+            : "Executes this option on a shadow run for exact outcomes";
+        executeButton.Pressed += () =>
+        {
+            if (choice is not { OptionIndex: >= 0 })
+            {
+                outcomeLabel.Text = chinese ? "先选择一个事件选项。" : "Choose an option first.";
+                return;
+            }
+
+            outcomeLabel.Text = chinese ? "执行中…" : "Simulating…";
+            _ = Task.Run(async () =>
+            {
+                var outcome = await adapter.ExecuteEventOptionAsync(
+                    player, canonical, choice.OptionIndex, null);
+                SeedOracleDispatcher.Post(() =>
+                {
+                    if (outcome.Ok)
+                    {
+                        _eventOutcomes[entry.Coord] = outcome;
+                    }
+
+                    outcomeLabel.Text = DescribeOutcomeText(outcome, chinese);
+                    RefreshLedgerOnly();
+                });
+            });
+        };
+        choiceBox.AddChild(executeButton);
+        choiceBox.AddChild(outcomeLabel);
+    }
+
+    private string DescribeEventOutcome(MapCoord coord, bool chinese)
+    {
+        return _eventOutcomes.TryGetValue(coord, out var outcome)
+            ? DescribeOutcomeText(outcome, chinese)
+            : string.Empty;
+    }
+
+    private static string DescribeOutcomeText(
+        RandomForeseerAdapter.EventExecutionOutcome outcome,
+        bool chinese)
+    {
+        if (!outcome.Ok)
+        {
+            return outcome.DenyReason ?? (chinese ? "执行失败。" : "Execution failed.");
+        }
+
+        var parts = new List<string>();
+        if (outcome.GoldDelta != 0)
+            parts.Add($"{(chinese ? "金币" : "gold")} {outcome.GoldDelta:+#;-#;0}");
+        if (outcome.HpDelta != 0)
+            parts.Add($"HP {outcome.HpDelta:+#;-#;0}");
+        if (outcome.CardsGained.Count > 0)
+            parts.Add($"{(chinese ? "获得卡" : "+cards")} {string.Join("、", outcome.CardsGained)}");
+        if (outcome.CardsLost.Count > 0)
+            parts.Add($"{(chinese ? "失去卡" : "-cards")} {string.Join("、", outcome.CardsLost)}");
+        if (outcome.RelicsGained.Count > 0)
+            parts.Add($"{(chinese ? "获得遗物" : "+relics")} {string.Join("、", outcome.RelicsGained)}");
+        if (outcome.PotionsGained.Count > 0)
+            parts.Add($"{(chinese ? "获得药水" : "+potions")} {string.Join("、", outcome.PotionsGained)}");
+        var text = parts.Count == 0
+            ? (chinese ? "无直接收益。" : "No direct gains.")
+            : string.Join("  ", parts);
+        if (outcome.NextOptions.Count > 0)
+        {
+            text += chinese
+                ? $"　后续选项：{string.Join(" / ", outcome.NextOptions.Select(pair => pair.Item2))}"
+                : $"　Follow-up: {string.Join(" / ", outcome.NextOptions.Select(pair => pair.Item2))}";
+        }
+
+        return text;
     }
 
     private static void AddTakeToggle(
@@ -1038,6 +1228,11 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                     };
                 }
                 var estimate = EstimatePlanDelta(entry, variant, player, chinese);
+                if (_eventOutcomes.TryGetValue(entry.Coord, out var eventOutcome))
+                {
+                    gold += eventOutcome.GoldDelta;
+                    hp += eventOutcome.HpDelta;
+                }
                 if (chain is null)
                     gold += estimate.Gold;
                 cards += estimate.Cards;
