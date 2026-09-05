@@ -36,7 +36,14 @@ echo "[driver] current_run.save hidden"
 # 3) launch headless smoke and wait for exit
 cd "$GAME" || exit 1
 rm -f seed_oracle_autoslay.log seed_oracle_smoke_report.txt
-./SlayTheSpire2.exe ${SMOKE_HEADLESS:+--headless} --seed-oracle-smoke --seed "$SEED" > /dev/null 2>&1
+( ./SlayTheSpire2.exe --headless --seed-oracle-smoke --seed "$SEED" > /dev/null 2>&1 &
+GAMEPID=$!;
+for i in $(seq 1 120); do
+  sleep 5;
+  kill -0 $GAMEPID 2>/dev/null || break;
+done;
+kill -9 $GAMEPID 2>/dev/null;
+wait $GAMEPID 2>/dev/null )
 echo "[driver] game exited with code $?"
 
 # 4) restore the player's real data
