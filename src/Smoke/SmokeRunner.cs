@@ -139,7 +139,7 @@ internal static class SmokeRunner
                 monster,
                 99999m,
                 ValueProp.Unblockable | ValueProp.Move,
-                null);
+                null!);
         }
 
         Entry.Logger.Info($"[Smoke] killed {monsters.Length} monsters");
