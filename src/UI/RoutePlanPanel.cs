@@ -149,12 +149,12 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
         return plan switch
         {
             null => Chinese
-                ? "规划模式：点击地图上尚不可进入的房间，按顺序加入计划。再次点击计划末端房间可截断。"
-                : "Plan mode: click not-yet-enterable rooms in order. Click the last planned room again to truncate.",
+                ? "规划模式：点击房间按顺序纳入规划（不会实际进入）。点击计划末端房间可截断；关闭面板后恢复正常移动。"
+                : "Plan mode: click rooms in order to plan them (you will not enter them). Click the last planned room to truncate. Close the panel to travel normally.",
             { Phase: RoutePlanPhase.Void } => VoidText(plan),
             _ => Chinese
-                ? "点击地图上不可进入的房间继续追加；点击计划末端房间可截断。"
-                : "Click more rooms to append; click the last planned room to truncate."
+                ? "点击房间继续追加；点击计划末端房间可截断。关闭面板后点击可进入房间才会实际前进。"
+                : "Click rooms to append; click the last planned room to truncate. Close the panel to travel again."
         };
     }
 
@@ -537,25 +537,27 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
         if (targetIndex < 0)
             return null;
 
+        // variant.Route lists the rooms BEFORE the target; the target itself is
+        // implied by the Predict call. The planned rooms between the head and
+        // the target must appear in order, with extras allowed only before the
+        // plan head (the travelable step that leads into the plan).
         foreach (var variant in variants)
         {
             var coords = variant.Route
                 .Select(choice => choice.Point.coord)
                 .ToArray();
-            if (coords.Length == 0 || coords[^1] != target.Coord)
-                continue;
-
             var plannedIndex = headIndex;
+            var consuming = false;
             var matched = true;
-            for (var coordIndex = 0; coordIndex < coords.Length && plannedIndex <= targetIndex; coordIndex++)
+            for (var coordIndex = 0; coordIndex < coords.Length; coordIndex++)
             {
-                if (coords[coordIndex] == entries[plannedIndex].Coord)
+                if (plannedIndex < targetIndex && coords[coordIndex] == entries[plannedIndex].Coord)
                 {
+                    consuming = true;
                     plannedIndex++;
                 }
-                else if (plannedIndex == headIndex)
+                else if (!consuming)
                 {
-                    // The unplanned travelable room that leads into the plan.
                     continue;
                 }
                 else
@@ -565,7 +567,7 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                 }
             }
 
-            if (matched && plannedIndex == targetIndex + 1)
+            if (matched && plannedIndex == targetIndex)
                 return variant;
         }
 
@@ -977,7 +979,7 @@ internal static class RoutePlanPanel
                 return;
             Entry.Logger.Info(
                 $"[PlanClick] coord={point.Point.coord} state={point.State} screenOpen={point._screen?.IsOpen}");
-            if (point.State != MapPointState.Untravelable)
+            if (point.State is not (MapPointState.Untravelable or MapPointState.Travelable))
                 return;
             if (point._runState is not RunState run || point._screen is not { } screen)
                 return;
@@ -1007,22 +1009,37 @@ internal static class RoutePlanPanel
 }
 
 /// <summary>
-/// Intercepts left-click releases on map nodes at the raw _GuiInput level.
-/// NMapPoint.OnRelease is intentionally not used: it depends on the game's
-/// enable/press bookkeeping that is torn down by Disable(), while hover
-/// proves disabled nodes still receive GUI events.
+/// While plan mode is open, left clicks on map rooms are planning gestures,
+/// never travel: the press and release are swallowed at the raw _GuiInput
+/// level and the release is routed to the plan handler. NMapPoint.OnRelease is
+/// intentionally not used: it depends on the game's enable/press bookkeeping
+/// that is torn down by Disable(), while hover proves map nodes still receive
+/// GUI events.
 /// </summary>
 [HarmonyPatch(typeof(NClickableControl), nameof(NClickableControl._GuiInput))]
 internal static class NMapPointPlanClickPatch
 {
-    [HarmonyPostfix]
-    private static void Postfix(NClickableControl __instance, InputEvent inputEvent)
+    [HarmonyPrefix]
+    private static bool Prefix(NClickableControl __instance, InputEvent inputEvent)
     {
-        if (inputEvent is not InputEventMouseButton { Pressed: false, ButtonIndex: MouseButton.Left })
-            return;
+        if (inputEvent is not InputEventMouseButton { ButtonIndex: MouseButton.Left })
+            return true;
         if (__instance is not NMapPoint point)
-            return;
+            return true;
+        if (point.State is not (MapPointState.Untravelable or MapPointState.Travelable))
+            return true;
+        if (!RoutePlanPanel.IsPlanMode)
+            return true;
+
+        var screen = point._screen;
+        if (screen is null || screen.Drawings.GetLocalDrawingMode() != DrawingMode.None)
+            return true;
+
+        if (inputEvent.IsPressed())
+            return false;
+
         RoutePlanPanel.HandleMapPointClick(point);
+        return false;
     }
 }
 
