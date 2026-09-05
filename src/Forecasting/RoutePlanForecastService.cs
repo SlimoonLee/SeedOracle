@@ -34,6 +34,10 @@ internal sealed class RoutePlanForecastService(RandomForeseerAdapter randomFores
     {
         public required RandomForeseerAdapter.RouteRewardState State { get; init; }
         public required Dictionary<MapCoord, PlanNodeOutcome> Outcomes { get; init; }
+
+        /// <summary>Virtual potion slots threaded along the plan (by potion id);
+        /// takes replace/evict per the recorded choice, never touching live state.</summary>
+        public required List<ModelId> PotionSlots { get; init; }
         public int Gold { get; set; }
     }
 
@@ -52,10 +56,12 @@ internal sealed class RoutePlanForecastService(RandomForeseerAdapter randomFores
         _ = plan;
 
         var state = randomForeseer.CreateRouteRewardStateForPlan(player);
+        var potionMax = player.MaxPotionCount;
         var chain = new PlanChain
         {
             State = state,
-            Outcomes = new Dictionary<MapCoord, PlanNodeOutcome>()
+            Outcomes = new Dictionary<MapCoord, PlanNodeOutcome>(),
+            PotionSlots = player.Potions.Select(potion => potion.Id).ToList()
         };
         var gold = player.Gold;
 
@@ -94,6 +100,13 @@ internal sealed class RoutePlanForecastService(RandomForeseerAdapter randomFores
 
                     if (entry.Choice is RoutePlanChoice.CardReward { Skip: false })
                         outcome.Note = "+1卡";
+
+                    ApplyPotionTakes(
+                        chain,
+                        potionMax,
+                        rewards.Potions,
+                        entry.Choice as RoutePlanChoice.Potion,
+                        outcome);
                     break;
                 }
                 case RoomType.Shop:
@@ -112,6 +125,23 @@ internal sealed class RoutePlanForecastService(RandomForeseerAdapter randomFores
                             gold -= CostOf(inventory, pick);
                         if (merchantChoice.RemoveCard)
                             gold -= inventory.CardRemovalCost;
+
+                        var potionPicks = merchantChoice.Picks
+                            .Where(pick => pick.Category == MerchantCategory.Potion)
+                            .ToList();
+                        if (potionPicks.Count > 0)
+                        {
+                            var chosenPotions = potionPicks
+                                .Select(pick => new RewardItemDetails(
+                                    IndexOr(inventory.Potions, pick.Index).Item))
+                                .ToList();
+                            ApplyPotionTakes(
+                                chain,
+                                potionMax,
+                                chosenPotions,
+                                new RoutePlanChoice.Potion(Enumerable.Range(0, chosenPotions.Count).ToList(), null),
+                                outcome);
+                        }
                     }
                     break;
                 }
@@ -174,6 +204,56 @@ internal sealed class RoutePlanForecastService(RandomForeseerAdapter randomFores
                 outcome.Note = "举重：提升最大生命";
                 break;
         }
+    }
+
+    /// <summary>
+    /// Applies potion pickups against the virtual slot list: explicit takes,
+    /// or take-everything by default; a recorded discard frees one slot once.
+    /// Over-capacity potions are dropped with a note — never invented space.
+    /// </summary>
+    private static void ApplyPotionTakes(
+        PlanChain chain,
+        int max,
+        IReadOnlyList<RewardItemDetails> potions,
+        RoutePlanChoice.Potion? choice,
+        PlanNodeOutcome outcome)
+    {
+        if (potions.Count == 0)
+            return;
+
+        var taken = choice?.TakenPotions ?? Enumerable.Range(0, potions.Count).ToList();
+        var discardUsed = false;
+        var gained = 0;
+        var dropped = 0;
+        foreach (var index in taken)
+        {
+            if (index < 0 || index >= potions.Count)
+                continue;
+
+            if (chain.PotionSlots.Count >= max)
+            {
+                if (choice?.DiscardPotion is { } discard
+                    && !discardUsed
+                    && chain.PotionSlots.Remove(discard))
+                {
+                    discardUsed = true;
+                }
+                else
+                {
+                    dropped++;
+                    continue;
+                }
+            }
+
+            chain.PotionSlots.Add(potions[index].Id);
+            gained++;
+        }
+
+        if (gained > 0)
+            outcome.Note = (outcome.Note is null ? "" : outcome.Note + "；") + $"+{gained}药水";
+        if (dropped > 0)
+            outcome.Note = (outcome.Note is null ? "" : outcome.Note + "；")
+                           + $"药水槽已满，放弃 {dropped} 瓶";
     }
 
     private void RemoveRelicFromBags(

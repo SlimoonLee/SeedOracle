@@ -34,6 +34,10 @@ internal abstract record RoutePlanChoice
 
     internal sealed record CardReward(int BundleIndex, int CardIndex, bool Skip) : RoutePlanChoice;
 
+    /// <summary>Potion pickup from rewards: indices taken, plus the potion to
+    /// discard first when the slots are full (replacement).</summary>
+    internal sealed record Potion(IReadOnlyList<int> TakenPotions, ModelId? DiscardPotion) : RoutePlanChoice;
+
     internal sealed record Merchant(IReadOnlyList<MerchantPick> Picks, bool RemoveCard) : RoutePlanChoice;
 
     internal sealed record EventOption(int OptionIndex) : RoutePlanChoice;

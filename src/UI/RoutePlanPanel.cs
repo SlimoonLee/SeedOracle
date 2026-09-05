@@ -1,6 +1,7 @@
 using Godot;
 using HarmonyLib;
 using MegaCrit.Sts2.Core.Context;
+using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Entities.RestSite;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Helpers;
@@ -467,6 +468,64 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                         entry.Choice is RoutePlanChoice.Relic { Take: false } ? false : true,
                         take => Update(new RoutePlanChoice.Relic(take)));
                 }
+
+                var rewardPotions = combat.Value!.Potions;
+                if (rewardPotions.Count > 0 && player is not null)
+                {
+                    var potionChoice = entry.Choice as RoutePlanChoice.Potion;
+                    var currentPotions = player.Potions.ToList();
+                    var freeSlots = player.MaxPotionCount - currentPotions.Count;
+                    var potionToggles = new List<(int Index, CheckButton Button)>();
+                    for (var potionIndex = 0; potionIndex < rewardPotions.Count; potionIndex++)
+                    {
+                        var taken = potionIndex;
+                        var button = new CheckButton
+                        {
+                            Text = $"{(chinese ? "拾取" : "Take")} {rewardPotions[potionIndex].Name}",
+                            ButtonPressed = potionChoice is null
+                                ? potionIndex < freeSlots
+                                : potionChoice.TakenPotions.Contains(potionIndex),
+                            MouseFilter = MouseFilterEnum.Stop,
+                            FocusMode = FocusModeEnum.None
+                        };
+                        button.AddThemeFontSizeOverride("font_size", 17);
+                        button.ApplyLocaleFontSubstitution(FontType.Regular, "font");
+                        button.Toggled += _ => Update(new RoutePlanChoice.Potion(
+                            potionToggles.Where(pair => pair.Button.ButtonPressed)
+                                .Select(pair => pair.Index)
+                                .ToArray(),
+                            potionChoice?.DiscardPotion));
+                        potionToggles.Add((taken, button));
+                        choiceBox.AddChild(button);
+                    }
+
+                    var discardPicker = new OptionButton
+                    {
+                        MouseFilter = MouseFilterEnum.Stop,
+                        FocusMode = FocusModeEnum.None
+                    };
+                    discardPicker.AddThemeFontSizeOverride("font_size", 17);
+                    discardPicker.ApplyLocaleFontSubstitution(FontType.Regular, "font");
+                    discardPicker.AddItem(chinese ? "满槽时丢弃…" : "Discard when full…");
+                    foreach (var potion in currentPotions)
+                        discardPicker.AddItem(potion.Title.GetFormattedText());
+                    var discardIndex = potionChoice?.DiscardPotion is { } discardId
+                        ? 1 + currentPotions.FindIndex(potion => potion.Id == discardId)
+                        : 0;
+                    discardPicker.Select(discardIndex < 0 ? 0 : discardIndex);
+                    discardPicker.ItemSelected += (OptionButton.ItemSelectedEventHandler)(index =>
+                    {
+                        ModelId? discard = index <= 0 || (int)index - 1 >= currentPotions.Count
+                            ? null
+                            : currentPotions[(int)index - 1].Id;
+                        Update(new RoutePlanChoice.Potion(
+                            potionToggles.Where(pair => pair.Button.ButtonPressed)
+                                .Select(pair => pair.Index)
+                                .ToArray(),
+                            discard));
+                    });
+                    choiceBox.AddChild(discardPicker);
+                }
             }
         }
         else if (variant.RoomType == RoomType.Shop && variant.Merchant is { HasValue: true } merchant)
@@ -607,7 +666,7 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                 {
                     // Eternal cards are neither removable nor upgradable;
                     // forging additionally excludes already-upgraded cards.
-                    "SMITH" => player.Deck.Cards.Where(card => card.IsUpgradable && !card.IsUpgraded),
+                    "SMITH" => player.Deck.Cards.Where(card => card.IsUpgradable),
                     "COOK" => player.Deck.Cards.Where(card => card.IsRemovable),
                     _ => player.Deck.Cards.AsEnumerable()
                 }).ToList();
@@ -867,7 +926,9 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
             if (variant.CombatRewards is { HasValue: true } combat)
             {
                 gold += combat.Value!.Gold;
-                potions += combat.Value.Potions.Count;
+                potions += choice is RoutePlanChoice.Potion takenPotions
+                    ? takenPotions.TakenPotions.Count
+                    : Math.Min(combat.Value.Potions.Count, Math.Max(0, (player?.MaxPotionCount ?? 3) - (player?.Potions.Count() ?? 0)));
                 if (choice is not RoutePlanChoice.Relic { Take: false })
                     relics += combat.Value.Relics.Count;
             }
@@ -951,7 +1012,7 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
         var gold = chain?.Gold ?? player.Gold;
         var cards = player.Deck.Cards.Count;
         var relics = player.Relics.Count;
-        var potions = player.Potions.Count();
+        var potions = chain?.PotionSlots.Count ?? player.Potions.Count();
         var hp = player.Creature.CurrentHp;
 
         if (plan.Phase == RoutePlanPhase.Active)
@@ -981,7 +1042,7 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                     gold += estimate.Gold;
                 cards += estimate.Cards;
                 relics += estimate.Relics;
-                potions += estimate.Potions;
+                if (chain is null) potions += estimate.Potions;
                 hp += estimate.Hp;
             }
         }
