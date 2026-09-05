@@ -40,6 +40,9 @@ public static class Entry
         CombatSolver = combatSolver;
         MapForecasts = new MapForecastService(randomForeseer);
 
+        if (Smoke.SmokeRunner.IsRequested)
+            Smoke.SmokeRunner.Begin();
+
         Logger.Info($"[Integration] {randomForeseer.Status.Describe()}");
         Logger.Info($"[Integration] {combatSolver.Status.Describe()}");
         if (!combatSolver.SupportsPreCombatForecast)

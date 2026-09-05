@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using Godot;
 using MegaCrit.Sts2.Core.Nodes;
+using SeedOracle.Smoke;
 
 namespace SeedOracle.UI;
 
@@ -33,6 +34,8 @@ internal sealed partial class SeedOracleDispatcher : Node
                 Entry.Logger.Error($"Seed Oracle main-thread callback failed: {exception}");
             }
         }
+
+        SmokeRunner.Tick();
     }
 
     public override void _ExitTree()
