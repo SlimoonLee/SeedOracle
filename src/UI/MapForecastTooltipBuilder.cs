@@ -599,7 +599,7 @@ internal static class MapForecastTooltipBuilder
         }
     }
 
-    private static void AppendMerchantContents(
+    internal static void AppendMerchantContents(
         List<string> lines,
         MerchantInventoryForecast merchant,
         bool chinese,
@@ -614,7 +614,7 @@ internal static class MapForecastTooltipBuilder
             : $"{prefix}Card removal: {merchant.CardRemovalCost}");
     }
 
-    private static void AppendRewards(
+    internal static void AppendRewards(
         List<string> lines,
         RouteVariantForecast variant,
         bool chinese,
@@ -628,7 +628,7 @@ internal static class MapForecastTooltipBuilder
             AppendTreasure(lines, treasure, chinese, prefix);
     }
 
-    private static void AppendEventContents(
+    internal static void AppendEventContents(
         List<string> lines,
         Forecast<EventContentDetails> forecast,
         bool chinese,
@@ -790,7 +790,7 @@ internal static class MapForecastTooltipBuilder
         _ => chinese ? "? 暂不支持" : "? unsupported"
     };
 
-    private static string RoomName(RoomType roomType, bool chinese) => (roomType, chinese) switch
+    internal static string RoomName(RoomType roomType, bool chinese) => (roomType, chinese) switch
     {
         (RoomType.Monster, true) => "普通战",
         (RoomType.Elite, true) => "精英战",

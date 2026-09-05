@@ -53,6 +53,7 @@ internal static class DebugForecastSmokeTest
         }
 
         ValidateForecastItemFormatting();
+        ValidateRoutePlan(run);
 
         var points = map.GetAllMapPoints()
             .Append(map.StartingMapPoint)
@@ -724,6 +725,68 @@ internal static class DebugForecastSmokeTest
         {
             throw new InvalidOperationException("Seed Oracle card-art thumbnail formatting self-test failed.");
         }
+    }
+
+    private static void ValidateRoutePlan(RunState run)
+    {
+        var current = run.CurrentMapPoint;
+        if (current is null)
+            return;
+
+        var grandChildren = current.Children
+            .SelectMany(travelable => travelable.Children)
+            .Where(point => !run.VisitedMapCoords.Contains(point.coord))
+            .Distinct()
+            .ToArray();
+        var candidate = grandChildren.FirstOrDefault();
+        if (candidate is null)
+            return;
+
+        var error = RoutePlanTracker.ToggleNode(run, candidate.coord);
+        if (error is not null)
+            throw new InvalidOperationException(
+                $"Seed Oracle route-plan self-test failed to start: {error}.");
+        if (RoutePlanTracker.Current is not { } plan
+            || plan.Head is not { } head
+            || head.Coord != candidate.coord)
+        {
+            throw new InvalidOperationException(
+                "Seed Oracle route-plan self-test did not register the first planned room.");
+        }
+
+        var headPoint = RoutePlanTracker.FindMapPoint(run, candidate.coord);
+        if (headPoint is not null)
+        {
+            _ = PredictionPurityGuard.Execute(
+                run,
+                "self-test:plan-head",
+                () => Entry.MapForecasts.Predict(run, headPoint, isTravelEnabled: false));
+        }
+
+        var tail = grandChildren
+            .Where(point => point.coord != candidate.coord && point.Children.Count > 0)
+            .Select(point => (From: point, Next: point.Children.First()))
+            .FirstOrDefault(pair => pair.Next.coord != candidate.coord);
+        if (tail.From is not null && tail.Next is not null)
+        {
+            var appendError = RoutePlanTracker.ToggleNode(run, tail.Next.Value.coord);
+            if (appendError is not null
+                || RoutePlanTracker.Current is not { Entries.Count: 2 })
+            {
+                throw new InvalidOperationException(
+                    "Seed Oracle route-plan self-test failed to append the second planned room.");
+            }
+
+            RoutePlanTracker.ToggleNode(run, tail.Next.Value.coord);
+            if (RoutePlanTracker.Current is not { Entries.Count: 1 })
+                throw new InvalidOperationException(
+                    "Seed Oracle route-plan self-test failed to truncate the plan.");
+        }
+
+        RoutePlanTracker.Clear();
+        if (RoutePlanTracker.Current is not null)
+            throw new InvalidOperationException(
+                "Seed Oracle route-plan self-test failed to clear the plan.");
     }
 }
 #endif

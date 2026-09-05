@@ -1117,6 +1117,7 @@ internal sealed partial class PreCombatForecastToggleButton : Button
         else
         {
             RunSeedOverviewPanel.CollapseSafely();
+            RoutePlanPanel.CollapseSafely();
             PreCombatForecastPanel.RememberExpanded(true);
             _panel.ShowWithoutCalculating();
         }

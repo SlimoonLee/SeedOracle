@@ -330,7 +330,10 @@ internal sealed partial class RunSeedOverviewToggleButton : Button
 
         var expanded = !_panel.Visible;
         if (expanded)
+        {
             PreCombatForecastPanel.CollapseSafely();
+            RoutePlanPanel.CollapseSafely();
+        }
         _panel.Visible = expanded;
         ApplyState(expanded);
         RunSeedOverviewPanel.RememberExpanded(expanded);
