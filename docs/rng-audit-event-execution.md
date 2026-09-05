@@ -45,8 +45,37 @@ UI/同步器层。
 | `SaveManager.Mark{Card,Potion,Relic}AsSeen` | **持久档案** Discovered* | 同上 IsMe 门控 → NetId 围栏覆盖 |
 | `CardSelectCmd` 选牌界面 | 阻塞模态 + 远程选择等待 | **选择器注入**：游戏自带 `CardSelectCmd.Selector/LocalSelector` 注入栈，压入返回用户计划选择的 `ICardSelector` |
 | `RewardsCmd.Offer` 奖励界面 | 开奖励 UI | **v1 黑名单**；待查是否存在奖励注入点后升级 |
-| `EnterCombatWithoutExitingEvent` | **要求 IsShared 否则抛**、需要 combatSynchronizer、换场景、push live 房间栈 | **黑名单** |
-| CrystalSphere 小游戏 | 开屏幕 + 发网络消息 | **黑名单** |
+| `EnterCombatWithoutExitingEvent` | **要求 IsShared 否则抛**、需要 combatSynchronizer、换场景、push live 房间栈 | **不上战场**：不真实执行；胜利掉落按「奖励预测 + Resume 效果」计算（见 §4a） |
+| CrystalSphere 小游戏 | 开屏幕 + 发网络消息 | **点位全知方案**：不调 ShowScreen，影子上构造 minigame 读取布局（见 §4b） |
+
+### §4a 战斗分支：胜利掉落预测（用户决策：不上战场）
+
+战斗分支的真实执行止步于开战前。战斗本身的血量/药水消耗留给后续 Combat Solver 联动；
+计划只需回答「若进入并胜利，有什么掉落」：
+
+- **基础战斗奖励**：复用现有 `PredictCombatRewards` 机制（克隆 Rewards 流 + 双遗物袋 +
+  药水赔率 + FastForwardMonsterRoomCombatEndHooks），对事件遭遇做一次胜利结算——事件
+  遭遇的怪组用 `GenerateMonstersWithSlots` 的确定性种子生成（既有机制）。
+- **事件附加奖励**：如 PunchOff 开打分支的额外 [RelicReward, PotionReward]，随同结算。
+- **战后 Resume 效果**：BattlewornDummy V1→随机药水（Rewards 流）、V2→升级 2 张随机可升级
+  （事件本地 Rng）、V3→遗物（GrabBag）。影子 BeginEvent 需要**桩 combatSynchronizer**
+  （无操作 ReadyToEnterCombat，绝不触 RunManager/场景），随后直调/复刻 Resume 效果。
+- **随机流账目**：战斗过程消耗的 Shuffle/MonsterAi 等战斗流不计入（与后续地图预测用的
+  Niche/Encounter/Event/Rewards 流相互独立）；胜利**拿取奖励**会消耗 Rewards 流——沿用
+  现有条件框架「沿途若拿奖励，后续结果会变」如实标注。
+
+### §4b 水晶球：点位全知方案
+
+水晶球的网格生成与 15 项摆放只消费事件本地 RNG（审计确认），完成奖励的
+ToReward/Populate 序列只消费 Rewards 流。两者都可影子重放（Predict Everything 已验证过
+同一套机制）：
+
+1. 影子 BeginEvent 后**直接构造** `CrystalSphereMinigame(owner, base.Rng, count)`（构造为
+   纯模型操作，不调 `PlayMinigame`/`ShowScreen`）；
+2. 读取 11×11 网格与 15 项位置、类型、稀有度 → 计划面板给出完整点位视图；
+3. 完成奖励（遗物拉取、卡牌工厂、金币、药水 NextItem）按克隆 Rewards 流预测，标注
+   「若完成占卜」。
+玩家在真实事件里带着全知点位游玩；占卜次数/窗口策略仍由玩家自主决定。
 
 ### 关键新发现：影子 NetId 必须改写
 `RunState.FromSerializable` 保留玩家 NetId → 影子玩家 `LocalContext.IsMe == true` →
@@ -56,9 +85,10 @@ UI/同步器层。
 
 ## 4. 31 类事件分级
 
-- **黑名单（真实执行不可行）**：战斗类 `BattlewornDummy`、`DenseVegetation(REST→FIGHT)`、
-  `PunchOff`、（`RoundTeaParty` 无战斗）；`CrystalSphere`（不在 31 内，独立黑名单）。
-  这些在计划面板显示为「进入特殊战斗/面板，无法预演」，战斗数值留给战损模拟（后续解冻）。
+- **黑名单（仅剩）**：`WarHistorianRepy` 之外不存在的战斗外硬阻塞（无）。原战斗类
+  （`BattlewornDummy`、`DenseVegetation(REST→FIGHT)`、`PunchOff(FIGHT)`）与水晶球改按
+  §4a/§4b 方案处理。计划面板对战斗分支标注「进入特殊战斗，掉落为胜利预测」；水晶球给
+  完整点位视图。
 - **需奖励界面注入（v1 降级）**：`BrainLeech(RIP)`、`ColorfulPhilosophers`、
   `PotionCourier`、`TheFutureOfPotions`、`WhisperingHollow(GOLD)`、`WarHistorianRepy`、
   `BattlewornDummy` 的战后奖励。等找到 `RewardsCmd.Offer` 的注入/桩点后升级为可执行。
