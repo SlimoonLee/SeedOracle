@@ -22,12 +22,6 @@ internal static class NMapPointOnFocusPatch
     internal static void Render(NMapPoint __instance)
     {
         RouteNodeMarkerOverlay.ClearAll();
-        if (RoutePlanPanel.IsPlanMode)
-        {
-            // While planning, clicks and hover should stay quiet: the plan
-            // overlay owns the map, forecast windows would only cover it.
-            return;
-        }
         if (__instance.State == MapPointState.Traveled || __instance._runState is not RunState run)
             return;
 
@@ -44,7 +38,8 @@ internal static class NMapPointOnFocusPatch
             var content = MapForecastTooltipBuilder.Build(forecast, combatSolver);
             if (content is null)
                 return;
-            RouteNodeMarkerOverlay.Show(__instance, content.RouteMarkers, content.RouteLines);
+            if (!RoutePlanPanel.IsPlanMode)
+                RouteNodeMarkerOverlay.Show(__instance, content.RouteMarkers, content.RouteLines);
 
             if (HoverTipHelper.AddTipToOwner(
                     __instance,
@@ -91,6 +86,23 @@ internal static class MapHoverTipPresentation
         var alignment = HoverTip.GetHoverTipAlignment(owner);
         Apply(tipSet, owner, alignment);
         Callable.From(() => Apply(tipSet, owner, alignment)).CallDeferred();
+    }
+
+    /// <summary>
+    /// Dismisses the forecast window pinned to a node, e.g. right after a
+    /// planning click so the window does not linger over the map.
+    /// </summary>
+    public static void HideTip(NMapPoint owner)
+    {
+        try
+        {
+            if (NHoverTipSet._activeHoverTips.ContainsKey(owner))
+                NHoverTipSet.Remove(owner);
+        }
+        catch (Exception exception)
+        {
+            Entry.Logger.Error($"Hiding the hover tip failed: {exception}");
+        }
     }
 
     private static NHoverTipSet? FindActiveTipSet(Control owner)

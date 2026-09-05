@@ -37,7 +37,7 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
         SetAnchorsPreset(LayoutPreset.LeftWide);
         OffsetLeft = 12f;
         OffsetTop = 96f;
-        OffsetRight = 296f;
+        OffsetRight = 356f;
         OffsetBottom = -96f;
         Visible = false;
         AddThemeStyleboxOverride("panel", PreCombatPanelStyles.CreatePanel(
@@ -64,7 +64,7 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
         var header = new HBoxContainer { MouseFilter = MouseFilterEnum.Pass };
         header.AddThemeConstantOverride(ThemeConstants.BoxContainer.Separation, 8);
         column.AddChild(header);
-        header.AddChild(PreCombatPanelStyles.CreateLabel("全知规划", 17, StsColors.gold, bold: true));
+        header.AddChild(PreCombatPanelStyles.CreateLabel("全知规划", 20, StsColors.gold, bold: true));
 
         var spacer = new Control
         {
@@ -87,7 +87,7 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
         closeButton.Pressed += Collapse;
         header.AddChild(closeButton);
 
-        _status = PreCombatPanelStyles.CreateLabel(string.Empty, 12, StsColors.cream);
+        _status = PreCombatPanelStyles.CreateLabel(string.Empty, 15, StsColors.cream);
         _status.AutowrapMode = TextServer.AutowrapMode.WordSmart;
         _status.SizeFlagsHorizontal = SizeFlags.ExpandFill;
         column.AddChild(_status);
@@ -109,7 +109,7 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
         _planList.AddThemeConstantOverride(ThemeConstants.BoxContainer.Separation, 6);
         scroll.AddChild(_planList);
 
-        _ledger = PreCombatPanelStyles.CreateLabel(string.Empty, 12, StsColors.cream);
+        _ledger = PreCombatPanelStyles.CreateLabel(string.Empty, 14, StsColors.cream);
         _ledger.AutowrapMode = TextServer.AutowrapMode.WordSmart;
         _ledger.SizeFlagsHorizontal = SizeFlags.ExpandFill;
         column.AddChild(_ledger);
@@ -201,7 +201,7 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
         {
             _planList.AddChild(PreCombatPanelStyles.CreateLabel(
                 chinese ? "已完成（实际所得）" : "Completed (actual)",
-                13,
+                16,
                 new Color(0.55f, 0.85f, 0.62f),
                 bold: true));
             foreach (var entry in completed)
@@ -213,7 +213,7 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
         {
             _planList.AddChild(PreCombatPanelStyles.CreateLabel(
                 chinese ? "计划（点击地图追加）" : "Planned",
-                13,
+                16,
                 StsColors.gold,
                 bold: true));
             foreach (var entry in remaining)
@@ -240,12 +240,12 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
             : "?";
         box.AddChild(PreCombatPanelStyles.CreateLabel(
             $"✓ {(chinese ? $"第{floor}层" : $"Floor {floor}")} · {roomName}",
-            14,
+            17,
             new Color(0.55f, 0.85f, 0.62f),
             bold: true));
         box.AddChild(PreCombatPanelStyles.CreateLabel(
             FormatActual(entry.Actual!, chinese),
-            12,
+            14,
             StsColors.cream));
         return row;
     }
@@ -270,7 +270,7 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
         header.AddChild(new RouteMarkerBadge(RouteMarkerPlanner.GetStyle(7)));
         header.AddChild(PreCombatPanelStyles.CreateLabel(
             $"{(chinese ? $"第{floor}层" : $"Floor {floor}")} · {DescribeRoom(point, chinese)}",
-            14,
+            17,
             StsColors.cream,
             bold: true));
 
@@ -293,7 +293,7 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
             ScrollActive = false,
             SizeFlagsHorizontal = SizeFlags.ExpandFill
         };
-        content.AddThemeFontSizeOverride(ThemeConstants.RichTextLabel.NormalFontSize, 12);
+        content.AddThemeFontSizeOverride(ThemeConstants.RichTextLabel.NormalFontSize, 15);
         var themeFont = GetThemeFont(ThemeConstants.Label.Font, "Label");
         if (themeFont is not null)
             content.AddThemeFontOverride(ThemeConstants.RichTextLabel.NormalFont, themeFont);
@@ -304,7 +304,7 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
 
         var deltaLabel = PreCombatPanelStyles.CreateLabel(
             variant is null ? string.Empty : EstimatePlanDelta(entry, variant, player, chinese).Text,
-            12,
+            14,
             new Color(0.15f, 0.82f, 1f));
         box.AddChild(deltaLabel);
 
@@ -355,7 +355,7 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                         MouseFilter = MouseFilterEnum.Stop,
                         FocusMode = FocusModeEnum.None
                     };
-                    select.AddThemeFontSizeOverride("font_size", 12);
+                    select.AddThemeFontSizeOverride("font_size", 14);
                     select.ApplyLocaleFontSubstitution(FontType.Regular, "font");
                     select.AddItem(chinese ? "卡牌奖励：跳过" : "Card reward: skip");
                     foreach (var option in options)
@@ -402,7 +402,7 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                     MouseFilter = MouseFilterEnum.Stop,
                     FocusMode = FocusModeEnum.None
                 };
-                button.AddThemeFontSizeOverride("font_size", 11);
+                button.AddThemeFontSizeOverride("font_size", 13);
                 button.ApplyLocaleFontSubstitution(FontType.Regular, "font");
                 button.Toggled += on =>
                 {
@@ -437,7 +437,7 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                 MouseFilter = MouseFilterEnum.Stop,
                 FocusMode = FocusModeEnum.None
             };
-            removal.AddThemeFontSizeOverride("font_size", 11);
+            removal.AddThemeFontSizeOverride("font_size", 13);
             removal.ApplyLocaleFontSubstitution(FontType.Regular, "font");
             removal.Toggled += on =>
                 Update(new RoutePlanChoice.Merchant(picks.ToArray(), on));
@@ -451,7 +451,7 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                 MouseFilter = MouseFilterEnum.Stop,
                 FocusMode = FocusModeEnum.None
             };
-            select.AddThemeFontSizeOverride("font_size", 12);
+            select.AddThemeFontSizeOverride("font_size", 14);
             select.ApplyLocaleFontSubstitution(FontType.Regular, "font");
             select.AddItem(chinese ? "事件选项：未选" : "Event: not chosen");
             foreach (var option in options)
@@ -477,7 +477,7 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                 MouseFilter = MouseFilterEnum.Stop,
                 FocusMode = FocusModeEnum.None
             };
-            select.AddThemeFontSizeOverride("font_size", 12);
+            select.AddThemeFontSizeOverride("font_size", 14);
             select.ApplyLocaleFontSubstitution(FontType.Regular, "font");
             select.AddItem(chinese ? "休息点：跳过" : "Rest site: skip");
             select.AddItem(chinese ? "休息回血" : "Rest (heal)");
@@ -501,7 +501,7 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
             MouseFilter = MouseFilterEnum.Stop,
             FocusMode = FocusModeEnum.None
         };
-        button.AddThemeFontSizeOverride("font_size", 12);
+        button.AddThemeFontSizeOverride("font_size", 14);
         button.ApplyLocaleFontSubstitution(FontType.Regular, "font");
         button.Toggled += on => onChanged(on);
         box.AddChild(button);
@@ -992,6 +992,7 @@ internal static class RoutePlanPanel
             _currentPanel.ShowHint(error, error is not null);
             _currentPanel.RefreshPlan();
             RoutePlanOverlay.Refresh(screen, run);
+            MapHoverTipPresentation.HideTip(point);
         }
         catch (Exception exception)
         {
