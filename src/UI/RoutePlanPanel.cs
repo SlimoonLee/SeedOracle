@@ -117,14 +117,33 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
         column.AddChild(_ledger);
     }
 
-    /// <summary>Scrolls the plan list to its end after layout settles.</summary>
+    /// <summary>
+    /// Pins the plan list to its end for a few frames: rebuilding rows and
+    /// RichTextLabel text parsing grow the content over several frames, so a
+    /// single deferred scroll lands short.
+    /// </summary>
     public void ScrollToBottom()
     {
-        Callable.From(() =>
+        var tree = _scroll.GetTree();
+        if (tree is null)
+            return;
+
+        var frames = 3;
+        void OnFrame()
         {
-            if (GodotObject.IsInstanceValid(_scroll))
-                _scroll.ScrollVertical = (int)_scroll.GetVScrollBar().MaxValue;
-        }).CallDeferred();
+            if (!GodotObject.IsInstanceValid(_scroll))
+            {
+                tree.ProcessFrame -= OnFrame;
+                return;
+            }
+
+            _scroll.ScrollVertical = (int)_scroll.GetVScrollBar().MaxValue;
+            frames--;
+            if (frames <= 0)
+                tree.ProcessFrame -= OnFrame;
+        }
+
+        tree.ProcessFrame += OnFrame;
     }
 
     private static bool Chinese => LocManager.Instance?.Language is "zhs" or "zht";
