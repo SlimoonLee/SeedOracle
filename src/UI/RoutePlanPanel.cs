@@ -25,6 +25,7 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
     private readonly Label _status;
     private readonly Label _ledger;
     private readonly VBoxContainer _planList;
+    private readonly ScrollContainer _scroll;
     private NMapScreen? _screen;
     private string? _stateToken;
 
@@ -100,6 +101,7 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
             HorizontalScrollMode = ScrollContainer.ScrollMode.Disabled
         };
         column.AddChild(scroll);
+        _scroll = scroll;
 
         _planList = new VBoxContainer
         {
@@ -113,6 +115,16 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
         _ledger.AutowrapMode = TextServer.AutowrapMode.WordSmart;
         _ledger.SizeFlagsHorizontal = SizeFlags.ExpandFill;
         column.AddChild(_ledger);
+    }
+
+    /// <summary>Scrolls the plan list to its end after layout settles.</summary>
+    public void ScrollToBottom()
+    {
+        Callable.From(() =>
+        {
+            if (GodotObject.IsInstanceValid(_scroll))
+                _scroll.ScrollVertical = (int)_scroll.GetVScrollBar().MaxValue;
+        }).CallDeferred();
     }
 
     private static bool Chinese => LocManager.Instance?.Language is "zhs" or "zht";
@@ -1018,6 +1030,7 @@ internal static class RoutePlanPanel
                 Entry.Logger.Info($"[PlanClick] rejected: {error}");
             _currentPanel.ShowHint(error, error is not null);
             _currentPanel.RefreshPlan();
+            _currentPanel.ScrollToBottom();
             RoutePlanOverlay.Refresh(screen, run);
             MapHoverTipPresentation.HideTip(point);
         }
