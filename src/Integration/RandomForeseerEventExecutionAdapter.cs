@@ -3,11 +3,15 @@ using MegaCrit.Sts2.Core.Entities.CardRewardAlternatives;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Events;
+using MegaCrit.Sts2.Core.Factories;
+using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.GameActions.Multiplayer;
 using MegaCrit.Sts2.Core.Helpers;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Models.PotionPools;
 using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.Core.TestSupport;
+using SeedOracle.Api;
 using SeedOracle.Forecasting;
 
 namespace SeedOracle.Integration;
@@ -28,7 +32,6 @@ internal sealed partial class RandomForeseerAdapter
         "CrystalSphere",     // minigame screen + network messages (has its own layout viewer)
         "BattlewornDummy",   // EnterCombatWithoutExitingEvent: needs synchronizer + room push
         "PunchOff",
-        "DenseVegetation",   // only its REST→FIGHT page, denied at option level below too
         "Amalgamator",       // option effects await frame/UI signals: sync-block deadlocks
     };
 
@@ -37,6 +40,7 @@ internal sealed partial class RandomForeseerAdapter
     private static readonly (string Event, string Key)[] OptionDenyList =
     [
         ("BrainLeech", "RIP"),
+        ("DenseVegetation", "FIGHT"),
         ("WhisperingHollow", "GOLD"),
         ("Trial", "REJECT"),
         ("Trial", "DOUBLE_DOWN"),
@@ -341,6 +345,80 @@ internal sealed partial class RandomForeseerAdapter
                 DivinationCount = divinationCount,
                 Error = root.Message
             };
+        }
+    }
+
+    /// <summary>
+    /// Victory-drop prediction for combat-entry event branches (audit §4a):
+    /// no combat is entered; basic rewards come from the cloned reward
+    /// pipeline over the event's own encounter, and per-event resume effects
+    /// are mirrored exactly as the option closures perform them.
+    /// </summary>
+    internal sealed class EventCombatDrops
+    {
+        public Forecast<CombatRewardDetails>? Rewards { get; set; }
+        public List<string> Labels { get; } = [];
+        public string? Error { get; set; }
+    }
+
+    internal EventCombatDrops PredictEventCombatVictoryDrops(
+        Player livePlayer,
+        EventModel canonicalEvent,
+        int optionIndex)
+    {
+        var drops = new EventCombatDrops();
+        try
+        {
+            var encounter = canonicalEvent.CanonicalEncounter
+                            ?? throw new InvalidOperationException("event has no encounter");
+            var snapshot = RunManager.Instance.ToSave(preFinishedRoom: null);
+            var shadowRun = RunState.FromSerializable(snapshot);
+            var shadowPlayer = shadowRun.GetPlayer(livePlayer.NetId)
+                               ?? throw new InvalidOperationException("shadow snapshot lacks player");
+            RewriteShadowNetId(shadowPlayer);
+
+            var mutableEncounter = encounter.ToMutable();
+            mutableEncounter.GenerateMonstersWithSlots(shadowRun);
+            drops.Rewards = PredictCombatRewards(shadowPlayer, [RoomType.Monster], mutableEncounter);
+
+            var entryName = canonicalEvent.GetType().Name;
+            switch (entryName)
+            {
+                case "BattlewornDummy":
+                    if (optionIndex == 0)
+                    {
+                        var pool = shadowPlayer.Character.PotionPool
+                            .GetUnlockedPotions(shadowPlayer.UnlockState)
+                            .Concat(ModelDb.PotionPool<SharedPotionPool>()
+                                .GetUnlockedPotions(shadowPlayer.UnlockState));
+                        var potion = shadowPlayer.PlayerRng.Rewards.NextItem(pool);
+                        drops.Labels.Add(potion is null
+                            ? "战后药水：无可用"
+                            : $"战后药水：{potion!.Title.GetFormattedText()}");
+                    }
+                    else if (optionIndex == 1)
+                    {
+                        drops.Labels.Add("战后：随机强化 2 张可升级牌（牌组变化随 M4 线程生效）");
+                    }
+                    else if (optionIndex == 2)
+                    {
+                        var relic = RelicFactory.PullNextRelicFromFront(shadowPlayer);
+                        drops.Labels.Add(relic is null
+                            ? "战后遗物：无"
+                            : $"战后遗物：{relic.Title.GetFormattedText()}");
+                    }
+                    break;
+                case "PunchOff":
+                    drops.Labels.Add("额外奖励：遗物 + 药水（接受时结算）");
+                    break;
+            }
+
+            return drops;
+        }
+        catch (Exception exception)
+        {
+            drops.Error = exception.GetBaseException().Message;
+            return drops;
         }
     }
 

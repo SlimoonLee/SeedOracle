@@ -825,6 +825,29 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                 return;
             }
 
+            var canonicalType = canonical.GetType().Name;
+            if (canonicalType is "BattlewornDummy" or "PunchOff")
+            {
+                // Combat-entry branches: never enter combat — predict the
+                // victory drops instead (basic rewards + resume effects).
+                outcomeLabel.Text = chinese ? "结算胜利掉落…" : "Resolving victory drops…";
+                _ = Task.Run(() =>
+                {
+                    var drops = adapter.PredictEventCombatVictoryDrops(
+                        player, canonical, choice.OptionIndex);
+                    SeedOracleDispatcher.Post(() =>
+                    {
+                        outcomeLabel.Text = drops.Error is not null
+                            ? $"胜利掉落预测失败：{drops.Error}"
+                            : $"胜利掉落（若进入并获胜）：{string.Join("；", drops.Labels)}"
+                              + (drops.Rewards is { HasValue: true } rewards
+                                  ? $"　基础：金币{rewards.Value!.Gold} 卡组{rewards.Value.CardRewards.Count}组"
+                                  : string.Empty);
+                    });
+                });
+                return;
+            }
+
             outcomeLabel.Text = chinese ? "执行中…" : "Simulating…";
             _ = Task.Run(async () =>
             {
