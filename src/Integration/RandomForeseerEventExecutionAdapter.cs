@@ -220,6 +220,131 @@ internal sealed partial class RandomForeseerAdapter
     }
 
     /// <summary>
+    /// Crystal sphere "omniscient layout": the minigame constructor generates
+    /// the entire 11x11 grid and all 15 items from the event-local RNG alone,
+    /// so a shadow construction predicts every cell without opening the
+    /// screen or consuming any live randomness.
+    /// </summary>
+    internal sealed class CrystalSphereLayout
+    {
+        public int DivinationCount { get; init; }
+        public int Cost { get; init; }
+        public List<string> Rows { get; init; } = [];
+        public List<string> Legend { get; init; } = [];
+        public string? Error { get; init; }
+    }
+
+    internal CrystalSphereLayout PredictCrystalSphereLayout(
+        Player livePlayer,
+        EventModel canonical,
+        int divinationCount)
+    {
+        try
+        {
+            var snapshot = RunManager.Instance.ToSave(preFinishedRoom: null);
+            var shadowRun = RunState.FromSerializable(snapshot);
+            var shadowPlayer = shadowRun.GetPlayer(livePlayer.NetId)
+                               ?? throw new InvalidOperationException("shadow snapshot lacks player");
+            RewriteShadowNetId(shadowPlayer);
+
+            var shadowEvent = canonical.ToMutable();
+            shadowEvent.Owner = shadowPlayer;
+            var slot = shadowEvent.IsShared
+                ? 0
+                : shadowPlayer.RunState.GetPlayerSlotIndex(shadowPlayer);
+            shadowEvent.Rng = new MegaCrit.Sts2.Core.Random.Rng(
+                (ulong)((long)shadowPlayer.RunState.Rng.Seed + slot)
+                + StringHelper.GetDeterministicHashCode(shadowEvent.Id.Entry));
+            shadowEvent.CalculateVars();
+
+            var cost = -1;
+            try
+            {
+                var entry = shadowEvent.DynamicVars["UncoverFutureCost"];
+                cost = (int)entry.BaseValue;
+            }
+            catch
+            {
+                // cost display is best-effort only
+            }
+
+            var minigame = new MegaCrit.Sts2.Core.Events.Custom.CrystalSphereEvent.CrystalSphereMinigame(
+                shadowPlayer, shadowEvent.Rng, divinationCount);
+
+            var glyphs = new string[11, 11];
+            for (var x = 0; x < 11; x++)
+            {
+                for (var y = 0; y < 11; y++)
+                {
+                    glyphs[x, y] = "·";
+                }
+            }
+
+            var legend = new List<string>();
+            foreach (var item in minigame.Items)
+            {
+                var (glyph, color, label) = item switch
+                {
+                    MegaCrit.Sts2.Core.Events.Custom.CrystalSphereEvent.CrystalSphereItems.CrystalSphereRelic
+                        => ("遗", "#FFDA36", "遗物"),
+                    MegaCrit.Sts2.Core.Events.Custom.CrystalSphereEvent.CrystalSphereItems.CrystalSphereCardReward
+                        => ("卡", "#5CB8FF", "卡牌奖励"),
+                    MegaCrit.Sts2.Core.Events.Custom.CrystalSphereEvent.CrystalSphereItems.CrystalSpherePotion
+                        => ("药", "#FF61C7", "药水"),
+                    MegaCrit.Sts2.Core.Events.Custom.CrystalSphereEvent.CrystalSphereItems.CrystalSphereCurse
+                        => ("咒", "#E669FF", "诅咒"),
+                    MegaCrit.Sts2.Core.Events.Custom.CrystalSphereEvent.CrystalSphereItems.CrystalSphereGold
+                        => ("金", "#FFA629", "金币"),
+                    _ => ("?", "#FFFFFF", item.GetType().Name)
+                };
+                legend.Add($"[color={color}]{glyph}[/color]={label}({item.Size.X}x{item.Size.Y})");
+                var position = item.Position;
+                for (var dx = 0; dx < item.Size.X; dx++)
+                {
+                    for (var dy = 0; dy < item.Size.Y; dy++)
+                    {
+                        var cx = position.X + dx;
+                        var cy = position.Y + dy;
+                        if (cx is >= 0 and < 11 && cy is >= 0 and < 11)
+                        {
+                            glyphs[cx, cy] = $"[color={color}]{glyph}[/color]";
+                        }
+                    }
+                }
+            }
+
+            var rows = new List<string>();
+            for (var y = 0; y < 11; y++)
+            {
+                var row = string.Empty;
+                for (var x = 0; x < 11; x++)
+                {
+                    row += glyphs[x, y];
+                }
+
+                rows.Add(row);
+            }
+
+            return new CrystalSphereLayout
+            {
+                DivinationCount = divinationCount,
+                Cost = cost,
+                Rows = rows,
+                Legend = legend
+            };
+        }
+        catch (Exception exception)
+        {
+            var root = exception.GetBaseException();
+            return new CrystalSphereLayout
+            {
+                DivinationCount = divinationCount,
+                Error = root.Message
+            };
+        }
+    }
+
+    /// <summary>
     /// Answers card-select prompts without opening the blocking modal: the
     /// planned card wins; otherwise the first allowed card (options never
     /// reach the game's screen pipeline at all).
