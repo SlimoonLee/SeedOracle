@@ -603,7 +603,14 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
             if (restChoice is { OptionId: "SMITH" or "COOK" or "CLONE" or "MEND" }
                 && player is not null)
             {
-                var deck = player.Deck.Cards.ToList();
+                var deck = (restChoice.OptionId switch
+                {
+                    // Eternal cards are neither removable nor upgradable;
+                    // forging additionally excludes already-upgraded cards.
+                    "SMITH" => player.Deck.Cards.Where(card => card.IsUpgradable && !card.IsUpgraded),
+                    "COOK" => player.Deck.Cards.Where(card => card.IsRemovable),
+                    _ => player.Deck.Cards.AsEnumerable()
+                }).ToList();
                 var target = new OptionButton
                 {
                     MouseFilter = MouseFilterEnum.Stop,
@@ -939,6 +946,7 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
     {
         if (player is null)
             return string.Empty;
+        var potionMax = player.MaxPotionCount;
 
         var gold = chain?.Gold ?? player.Gold;
         var cards = player.Deck.Cards.Count;
@@ -981,8 +989,8 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
         var arrow = chinese ? "→" : "->";
         return chinese
             ? $"当前 金币{player.Gold} 卡{player.Deck.Cards.Count} 遗物{player.Relics.Count}"
-              + $" 药水{player.Potions.Count()} HP{player.Creature.CurrentHp}"
-              + $"\n预计到计划终点 金币{gold} 卡{cards} 遗物{relics} 药水{potions} HP{hp}（战损未计入）"
+              + $" 药水{player.Potions.Count()}/{player.MaxPotionCount} HP{player.Creature.CurrentHp}"
+              + $"\n预计到计划终点 金币{gold} 卡{cards} 遗物{relics} 药水{Math.Min(potions, potionMax)}{(potions > potionMax ? "（超出槽位的药水将放弃）" : string.Empty)} HP{hp}（战损未计入）"
             : $"Now  gold {player.Gold}, deck {player.Deck.Cards.Count}, relics {player.Relics.Count}"
               + $", potions {player.Potions.Count()}, HP {player.Creature.CurrentHp}"
               + $"\nAt plan end {arrow} gold {gold}, deck {cards}, relics {relics}, potions {potions}, HP {hp}"
@@ -995,7 +1003,7 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
             return string.Empty;
         return chinese
             ? $"当前 金币{player.Gold} 卡{player.Deck.Cards.Count} 遗物{player.Relics.Count}"
-              + $" 药水{player.Potions.Count()} HP{player.Creature.CurrentHp}"
+              + $" 药水{player.Potions.Count()}/{player.MaxPotionCount} HP{player.Creature.CurrentHp}"
             : $"Now  gold {player.Gold}, deck {player.Deck.Cards.Count}, relics {player.Relics.Count}"
               + $", potions {player.Potions.Count()}, HP {player.Creature.CurrentHp}";
     }
