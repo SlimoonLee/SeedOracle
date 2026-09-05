@@ -22,6 +22,12 @@ internal static class NMapPointOnFocusPatch
     internal static void Render(NMapPoint __instance)
     {
         RouteNodeMarkerOverlay.ClearAll();
+        if (RoutePlanPanel.IsPlanMode)
+        {
+            // While planning, clicks and hover should stay quiet: the plan
+            // overlay owns the map, forecast windows would only cover it.
+            return;
+        }
         if (__instance.State == MapPointState.Traveled || __instance._runState is not RunState run)
             return;
 

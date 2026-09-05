@@ -285,7 +285,7 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
             variant = MatchVariant(nodeForecast.RouteVariants, plan.Entries, entry);
         }
 
-        var content = new RichTextLabel
+        var content = new MegaRichTextLabel
         {
             BbcodeEnabled = true,
             FitContent = true,
