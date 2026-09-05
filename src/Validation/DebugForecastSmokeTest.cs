@@ -763,6 +763,23 @@ internal static class DebugForecastSmokeTest
                 () => Entry.MapForecasts.Predict(run, headPoint, isTravelEnabled: false));
         }
 
+        if (Entry.RandomForeseer is RandomForeseerAdapter adapter
+            && (LocalContext.GetMe(run) ?? run.Players.FirstOrDefault()) is { } planPlayer)
+        {
+            var chain = PredictionPurityGuard.Execute(
+                run,
+                "self-test:plan-chain",
+                () => new RoutePlanForecastService(adapter).BuildChain(
+                    run,
+                    planPlayer,
+                    RoutePlanTracker.Current!.Entries,
+                    entry => RoutePlanTracker.FindMapPoint(run, entry.Coord),
+                    RoutePlanTracker.Current!));
+            if (chain is null || chain.Gold < planPlayer.Gold - 10_000)
+                throw new InvalidOperationException(
+                    "Seed Oracle plan-chain self-test produced an invalid threaded state.");
+        }
+
         var tail = grandChildren
             .Where(point => point.coord != candidate.coord && point.Children.Count > 0)
             .Select(point => (From: point, Next: point.Children.First()))

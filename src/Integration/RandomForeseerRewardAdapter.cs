@@ -123,6 +123,64 @@ internal sealed partial class RandomForeseerAdapter
         }
     }
 
+    internal RouteRewardState CreateRouteRewardStateForPlan(Player player) => CreateRouteRewardState(player);
+
+    /// <summary>Advances the cloned state through ONE planned room (rewards
+    /// RNG consumed exactly as the game would at that room's end).</summary>
+    internal void AdvanceSingleRoomForPlan(RouteRewardState state, RoomType roomType)
+    {
+        switch (roomType)
+        {
+            case RoomType.Monster:
+            case RoomType.Elite:
+            case RoomType.Boss:
+                AdvanceCombatEnd(state);
+                _ = GenerateCombatRewards(state, roomType, encounter: null);
+                break;
+            case RoomType.Shop:
+                state.MerchantVisits++;
+                _ = PredictMerchantVisit(
+                    state.Context,
+                    state.Player,
+                    state.Rewards,
+                    state.Shops,
+                    state.PlayerRelicGrabBag,
+                    state.SharedRelicGrabBag,
+                    state.MerchantVisits);
+                break;
+            case RoomType.Treasure:
+                _ = GenerateTreasureRoom(state, isPriorRoom: true);
+                break;
+        }
+    }
+
+    internal CombatRewardDetails GenerateCombatRewardsForPlan(RouteRewardState state, RoomType roomType) =>
+        GenerateCombatRewards(state, roomType, encounter: null);
+
+    internal TreasureRoomDetails GenerateTreasureRoomForPlan(RouteRewardState state) =>
+        GenerateTreasureRoom(state, isPriorRoom: false);
+
+    internal MerchantInventoryForecast PredictMerchantVisitForPlan(RouteRewardState state)
+    {
+        state.MerchantVisits++;
+        return PredictMerchantVisit(
+            state.Context,
+            state.Player,
+            state.Rewards,
+            state.Shops,
+            state.PlayerRelicGrabBag,
+            state.SharedRelicGrabBag,
+            state.MerchantVisits);
+    }
+
+    /// <summary>Removes a taken relic from both cloned bags so downstream
+    /// shops, elites, and chests stop offering it.</summary>
+    internal void RemoveRelicForPlan(RouteRewardState state, RelicModel relic)
+    {
+        state.PlayerRelicGrabBag.Remove(relic);
+        state.SharedRelicGrabBag.Remove(relic);
+    }
+
     private RouteRewardState CreateRouteRewardState(Player player)
     {
         var context = _contextConstructor!.Invoke([player]);
@@ -149,6 +207,8 @@ internal sealed partial class RandomForeseerAdapter
             HasUnsupportedOverride(listeners, nameof(AbstractModel.TryModifyRewardsLate), RewardHookTypes),
             HasUnsupportedOverride(listeners, nameof(AbstractModel.ShouldGenerateTreasure), TreasureHookTypes));
     }
+
+    internal void AdvanceRoomsBeforeTargetForPlan(RouteRewardState state, IReadOnlyList<RoomType> resolvedRooms) => AdvanceRoomsBeforeTarget(state, resolvedRooms);
 
     private void AdvanceRoomsBeforeTarget(RouteRewardState state, IReadOnlyList<RoomType> resolvedRooms)
     {
@@ -452,7 +512,7 @@ internal sealed partial class RandomForeseerAdapter
 
     private static readonly HashSet<Type> TreasureHookTypes = [typeof(SilverCrucible)];
 
-    private sealed class RouteRewardState(
+    internal sealed class RouteRewardState(
         Player player,
         object context,
         Rng rewards,

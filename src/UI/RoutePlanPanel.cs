@@ -13,6 +13,7 @@ using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.addons.mega_text;
 using SeedOracle.Forecasting;
+using SeedOracle.Integration;
 using SeedOracle.Validation;
 
 namespace SeedOracle.UI;
@@ -27,6 +28,9 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
     private readonly VBoxContainer _planList;
     private readonly ScrollContainer _scroll;
     private NMapScreen? _screen;
+    private RoutePlanForecastService? _planForecasts;
+    private RunState? _lastRun;
+    private RoutePlanForecastService.PlanChain? _lastChain;
     private string? _stateToken;
 
     public RoutePlanPanelControl()
@@ -218,6 +222,31 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
             return;
         }
 
+        _lastRun = run;
+        _lastChain = null;
+        if (plan.Phase == RoutePlanPhase.Active
+            && player is not null
+            && Entry.RandomForeseer is RandomForeseerAdapter adapter)
+        {
+            _planForecasts ??= new RoutePlanForecastService(adapter);
+            try
+            {
+                _lastChain = PredictionPurityGuard.Execute(
+                    run,
+                    "plan-chain",
+                    () => _planForecasts.BuildChain(
+                        run,
+                        player,
+                        plan.Entries,
+                        entry => RoutePlanTracker.FindMapPoint(run, entry.Coord),
+                        plan));
+            }
+            catch (Exception exception)
+            {
+                Entry.Logger.Error($"Plan chain threading failed: {exception}");
+            }
+        }
+
         if (plan.Phase == RoutePlanPhase.Void)
         {
             _planList.AddChild(PreCombatPanelStyles.CreateLabel(
@@ -248,10 +277,10 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                 StsColors.gold,
                 bold: true));
             foreach (var entry in remaining)
-                _planList.AddChild(BuildPlannedRow(run, plan, entry, chinese));
+                _planList.AddChild(BuildPlannedRow(run, plan, entry, chinese, _lastChain));
         }
 
-        _ledger.Text = BuildLedger(run, player, plan, chinese);
+        _ledger.Text = BuildLedger(run, player, plan, chinese, _lastChain);
     }
 
     private PanelContainer BuildCompletedRow(RunState run, RoutePlanEntry entry, bool chinese)
@@ -281,7 +310,12 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
         return row;
     }
 
-    private PanelContainer BuildPlannedRow(RunState run, RoutePlan plan, RoutePlanEntry entry, bool chinese)
+    private PanelContainer BuildPlannedRow(
+        RunState run,
+        RoutePlan plan,
+        RoutePlanEntry entry,
+        bool chinese,
+        RoutePlanForecastService.PlanChain? chain)
     {
         var row = new PanelContainer { MouseFilter = MouseFilterEnum.Pass };
         row.AddThemeStyleboxOverride("panel", PreCombatPanelStyles.CreatePanel(
@@ -307,6 +341,7 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
 
         RouteVariantForecast? variant = null;
         MapNodeForecast? nodeForecast = null;
+        string? deltaOverride = null;
         if (point is not null)
         {
             nodeForecast = PredictionPurityGuard.Execute(
@@ -314,6 +349,19 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                 $"plan:{point.coord}",
                 () => Entry.MapForecasts.Predict(run, point, isTravelEnabled: false));
             variant = MatchVariant(nodeForecast.RouteVariants, plan.Entries, entry);
+            if (chain is not null && chain.Outcomes.TryGetValue(entry.Coord, out var outcome))
+            {
+                // The threaded plan state is authoritative for rewards, shop
+                // stock, and treasure: choices made upstream already changed it.
+                variant = variant with
+                {
+                    Merchant = outcome.Merchant ?? variant.Merchant,
+                    CombatRewards = outcome.CombatRewards ?? variant.CombatRewards,
+                    Treasure = outcome.Treasure ?? variant.Treasure
+                };
+                if (outcome.Note is not null)
+                    deltaOverride = outcome.Note;
+            }
         }
 
         var content = new RichTextLabel
@@ -334,18 +382,20 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
         box.AddChild(content);
 
         var deltaLabel = PreCombatPanelStyles.CreateLabel(
-            variant is null ? string.Empty : EstimatePlanDelta(entry, variant, player, chinese).Text,
+            deltaOverride
+            ?? (variant is null ? string.Empty : EstimatePlanDelta(entry, variant, player, chinese).Text),
             17,
             new Color(0.15f, 0.82f, 1f));
         box.AddChild(deltaLabel);
 
         if (variant is not null)
-            BuildChoiceControls(box, plan, entry, variant, player, chinese, deltaLabel);
+            BuildChoiceControls(box, run, plan, entry, variant, player, chinese, deltaLabel);
         return row;
     }
 
     private void BuildChoiceControls(
         VBoxContainer box,
+        RunState run,
         RoutePlan plan,
         RoutePlanEntry entry,
         RouteVariantForecast variant,
@@ -503,6 +553,23 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
         }
         else if (variant.RoomType == RoomType.RestSite)
         {
+            List<RestSiteOption> options = [];
+            try
+            {
+                if (player is not null)
+                {
+                    options = PredictionPurityGuard.Execute(
+                        run,
+                        $"plan-rest-options:{entry.Coord.row}_{entry.Coord.col}",
+                        () => RestSiteOption.Generate(player));
+                }
+            }
+            catch (Exception exception)
+            {
+                Entry.Logger.Error($"Rest option enumeration failed: {exception}");
+            }
+
+            var restChoice = entry.Choice as RoutePlanChoice.RestSite;
             var select = new OptionButton
             {
                 MouseFilter = MouseFilterEnum.Stop,
@@ -511,11 +578,57 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
             select.AddThemeFontSizeOverride("font_size", 17);
             select.ApplyLocaleFontSubstitution(FontType.Regular, "font");
             select.AddItem(chinese ? "休息点：跳过" : "Rest site: skip");
-            select.AddItem(chinese ? "休息回血" : "Rest (heal)");
-            select.Select(entry.Choice is RoutePlanChoice.Rest { Heal: true } ? 1 : 0);
+            foreach (var option in options)
+                select.AddItem(option.Title.GetFormattedText());
+            select.Select(restChoice is null
+                ? 0
+                : 1 + options.FindIndex(option => option.OptionId == restChoice.OptionId));
             select.ItemSelected += (OptionButton.ItemSelectedEventHandler)(index =>
-                Update(new RoutePlanChoice.Rest(Heal: index == 1)));
+            {
+                if (index <= 0)
+                {
+                    Update(new RoutePlanChoice.RestSite(string.Empty, null));
+                    return;
+                }
+                var optionIndex = (int)index - 1;
+                if (optionIndex >= options.Count)
+                    return;
+                Update(new RoutePlanChoice.RestSite(options[optionIndex].OptionId, null));
+                var optionId = options[optionIndex].OptionId;
+                if (optionId is "SMITH" or "COOK" or "CLONE" or "MEND")
+                    RefreshPlan();
+            });
             choiceBox.AddChild(select);
+
+            if (restChoice is { OptionId: "SMITH" or "COOK" or "CLONE" or "MEND" }
+                && player is not null)
+            {
+                var deck = player.Deck.Cards.ToList();
+                var target = new OptionButton
+                {
+                    MouseFilter = MouseFilterEnum.Stop,
+                    FocusMode = FocusModeEnum.None
+                };
+                target.AddThemeFontSizeOverride("font_size", 16);
+                target.ApplyLocaleFontSubstitution(FontType.Regular, "font");
+                target.AddItem(chinese ? "选择目标牌…" : "Pick a card…");
+                foreach (var card in deck)
+                    target.AddItem($"{card.Title}{(card.IsUpgraded ? "+" : string.Empty)}");
+                var current = restChoice.TargetCard;
+                var selectedIndex = current is null
+                    ? 0
+                    : deck.FindIndex(card => card.Id == current) + 1;
+                target.Select(selectedIndex < 0 ? 0 : selectedIndex);
+                target.ItemSelected += (OptionButton.ItemSelectedEventHandler)(index2 =>
+                {
+                    if (index2 <= 0)
+                        return;
+                    Update(new RoutePlanChoice.RestSite(
+                        restChoice.OptionId,
+                        deck[(int)index2 - 1].Id));
+                });
+                choiceBox.AddChild(target);
+            }
         }
     }
 
@@ -544,7 +657,33 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
         if (screen is null || !GodotObject.IsInstanceValid(screen) || screen._runState is not { } run)
             return;
         var player = LocalContext.GetMe(run) ?? run.Players.FirstOrDefault();
-        _ledger.Text = BuildLedger(run, player, RoutePlanTracker.Current!, Chinese);
+        var plan = RoutePlanTracker.Current;
+        if (plan is not null
+            && plan.Phase == RoutePlanPhase.Active
+            && player is not null
+            && _planForecasts is not null)
+        {
+            try
+            {
+                _lastChain = PredictionPurityGuard.Execute(
+                    run,
+                    "plan-chain",
+                    () => _planForecasts.BuildChain(
+                        run,
+                        player,
+                        plan.Entries,
+                        entry => RoutePlanTracker.FindMapPoint(run, entry.Coord),
+                        plan));
+            }
+            catch (Exception exception)
+            {
+                Entry.Logger.Error($"Plan chain threading failed: {exception}");
+            }
+        }
+
+        _ledger.Text = plan is null
+            ? FormatCurrentResources(player, Chinese)
+            : BuildLedger(run, player, plan, Chinese, _lastChain);
     }
 
     private static RouteVariantForecast? MatchVariant(
@@ -748,9 +887,18 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
             if (choice is not RoutePlanChoice.Relic { Take: false })
                 relics += treasure.Value.Relics.Count;
         }
-        else if (variant.RoomType == RoomType.RestSite && choice is RoutePlanChoice.Rest { Heal: true })
+        else if (variant.RoomType == RoomType.RestSite && choice is RoutePlanChoice.RestSite rest)
         {
-            hp = player is null ? 0 : (int)HealRestSiteOption.GetHealAmount(player);
+            if (rest.OptionId == "HEAL")
+                hp = player is null ? 0 : (int)HealRestSiteOption.GetHealAmount(player);
+            else if (rest.OptionId == "LIFT")
+                notes.Add("最大生命+");
+            else if (rest.OptionId is "SMITH" or "COOK" or "CLONE" or "MEND" or "HATCH")
+                notes.Add(rest.TargetCard is { } target
+                    ? $"{(chinese ? "目标：" : "target: ")}{target.Entry}"
+                    : (chinese ? "未选目标牌" : "no target card"));
+            else if (rest.OptionId == "DIG")
+                notes.Add(chinese ? "挖遗物" : "dig relic");
         }
 
         if (gold != 0)
@@ -782,12 +930,17 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
     private static MerchantItemForecast IndexOr(IReadOnlyList<MerchantItemForecast> items, int index) =>
         index >= 0 && index < items.Count ? items[index] : new MerchantItemForecast(ForecastItemDetails.Text("?"), 0);
 
-    private string BuildLedger(RunState run, Player? player, RoutePlan plan, bool chinese)
+    private string BuildLedger(
+        RunState run,
+        Player? player,
+        RoutePlan plan,
+        bool chinese,
+        RoutePlanForecastService.PlanChain? chain)
     {
         if (player is null)
             return string.Empty;
 
-        var gold = player.Gold;
+        var gold = chain?.Gold ?? player.Gold;
         var cards = player.Deck.Cards.Count;
         var relics = player.Relics.Count;
         var potions = player.Potions.Count();
@@ -806,8 +959,18 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                 var variant = MatchVariant(nodeForecast.RouteVariants, plan.Entries, entry);
                 if (variant is null)
                     continue;
+                if (chain is not null && chain.Outcomes.TryGetValue(entry.Coord, out var outcome))
+                {
+                    variant = variant with
+                    {
+                        Merchant = outcome.Merchant ?? variant.Merchant,
+                        CombatRewards = outcome.CombatRewards ?? variant.CombatRewards,
+                        Treasure = outcome.Treasure ?? variant.Treasure
+                    };
+                }
                 var estimate = EstimatePlanDelta(entry, variant, player, chinese);
-                gold += estimate.Gold;
+                if (chain is null)
+                    gold += estimate.Gold;
                 cards += estimate.Cards;
                 relics += estimate.Relics;
                 potions += estimate.Potions;

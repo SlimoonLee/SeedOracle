@@ -1,6 +1,7 @@
 using MegaCrit.Sts2.Core.Context;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Map;
+using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Runs;
 
 namespace SeedOracle.UI;
@@ -37,7 +38,7 @@ internal abstract record RoutePlanChoice
 
     internal sealed record EventOption(int OptionIndex) : RoutePlanChoice;
 
-    internal sealed record Rest(bool Heal) : RoutePlanChoice;
+    internal sealed record RestSite(string OptionId, ModelId? TargetCard) : RoutePlanChoice;
 
     internal sealed record Relic(bool Take) : RoutePlanChoice;
 }
