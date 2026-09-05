@@ -76,6 +76,13 @@ internal static class DebugForecastSmokeTest
                 $"self-test:map:{point.PointType}:{point.coord}",
                 () => Entry.MapForecasts.Predict(run, point, isTravelEnabled: false));
             routeVariantCount += forecast.RouteVariants.Count;
+            if (forecast.RouteVariants.Any(variant => variant.Merchant is not null)
+                && forecast.Merchant is null)
+            {
+                throw new InvalidOperationException(
+                    "Seed Oracle dropped merchant inventory for a shop-resolving "
+                    + $"{point.PointType} route at {point.coord}.");
+            }
             var conflictingRoute = forecast.RouteVariants
                 .GroupBy(variant => string.Join(
                     ">",

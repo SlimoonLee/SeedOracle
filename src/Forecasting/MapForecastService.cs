@@ -341,7 +341,8 @@ internal sealed class MapForecastService(IRandomForeseerAdapter randomForeseer)
         bool immediate,
         bool isTravelEnabled)
     {
-        if (point.PointType != MapPointType.Shop)
+        var isShopPoint = point.PointType == MapPointType.Shop;
+        if (!isShopPoint && point.PointType != MapPointType.Unknown)
             return null;
 
         var shops = variants
@@ -350,9 +351,13 @@ internal sealed class MapForecastService(IRandomForeseerAdapter randomForeseer)
             .ToArray();
         if (shops.Length == 0)
         {
-            return Forecast<MerchantInventoryForecast>.Unsupported(
-                "No merchant route could be simulated.",
-                PredictionDependency.Shops);
+            // An unknown point carries inventory only when some feasible route
+            // resolves it to a shop; otherwise the room-type label is enough.
+            return isShopPoint
+                ? Forecast<MerchantInventoryForecast>.Unsupported(
+                    "No merchant route could be simulated.",
+                    PredictionDependency.Shops)
+                : null;
         }
 
         var ordinals = shops
@@ -364,13 +369,17 @@ internal sealed class MapForecastService(IRandomForeseerAdapter randomForeseer)
         {
             var forecast = shops.First(candidate =>
                 candidate.HasValue && candidate.Value!.FutureVisitOrdinal == ordinals[0]);
-            if (immediate && isTravelEnabled && ordinals[0] == 1)
+            if (isShopPoint && immediate && isTravelEnabled && ordinals[0] == 1)
                 return forecast;
 
             return Forecast<MerchantInventoryForecast>.Branch(
                 forecast.Value!,
-                forecast.Dependencies,
-                "Conditional inventory from the current prediction state; earlier rewards, purchases, restocks, or removals can change it.");
+                isShopPoint
+                    ? forecast.Dependencies
+                    : forecast.Dependencies | PredictionDependency.UnknownMapPoint,
+                isShopPoint
+                    ? "Conditional inventory from the current prediction state; earlier rewards, purchases, restocks, or removals can change it."
+                    : "Conditional on the unknown room resolving to a shop; earlier rewards, purchases, restocks, or removals can change it.");
         }
 
         if (ordinals.Length > 1)
