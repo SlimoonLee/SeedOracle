@@ -163,16 +163,16 @@ internal sealed partial class RandomForeseerAdapter
         return new EventContentDetails(predictions);
     }
 
-    private static IReadOnlyList<string> BuildInitialOptionItems(
+    private static IReadOnlyList<ForecastItemDetails> BuildInitialOptionItems(
         EventBridge bridge,
         EventModel eventModel,
         EventOption option)
     {
-        var items = new List<string>();
+        var items = new List<ForecastItemDetails>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
 
         if (bridge.GetRelicForOption(eventModel, option) is { } optionRelic)
-            AddItem(optionRelic.Title.GetFormattedText());
+            AddItem(ForecastItemDetails.Relic(optionRelic));
 
         var nativeTips = EventOptionHoverTipsField?.GetValue(option) as IEnumerable<IHoverTip>
                          ?? option.HoverTips.Where(static tip => !IsRandomForeseerPredictionTip(tip));
@@ -181,30 +181,31 @@ internal sealed partial class RandomForeseerAdapter
             switch (tip)
             {
                 case CardHoverTip cardTip:
-                    AddItem(CardName(cardTip.Card));
+                    AddItem(ForecastItemDetails.Card(cardTip.Card));
                     break;
                 case { CanonicalModel: CardModel card }:
-                    AddItem(CardName(card));
+                    AddItem(ForecastItemDetails.Card(card));
                     break;
                 case { CanonicalModel: RelicModel relic }:
-                    AddItem(relic.Title.GetFormattedText());
+                    AddItem(ForecastItemDetails.Relic(relic));
                     break;
                 case { CanonicalModel: PotionModel potion }:
-                    AddItem(potion.Title.GetFormattedText());
+                    AddItem(ForecastItemDetails.Potion(potion));
                     break;
                 case { CanonicalModel: OrbModel orb }:
-                    AddItem(orb.Title.GetFormattedText());
+                    AddItem(ForecastItemDetails.Orb(orb));
                     break;
             }
         }
 
         return items;
 
-        void AddItem(string value)
+        void AddItem(ForecastItemDetails item)
         {
-            var normalized = NormalizeText(value);
-            if (!string.IsNullOrWhiteSpace(normalized) && seen.Add(normalized))
-                items.Add(normalized);
+            var normalized = NormalizeText(item.Name);
+            var key = $"{item.Kind}:{item.Id}:{normalized}";
+            if (!string.IsNullOrWhiteSpace(normalized) && seen.Add(key))
+                items.Add(item with { Name = normalized });
         }
     }
 
@@ -216,7 +217,7 @@ internal sealed partial class RandomForeseerAdapter
         IReadOnlyList<IHoverTip> tips)
     {
         var sets = new List<EventPredictionSetDetails>();
-        var looseItems = new List<string>();
+        var looseItems = new List<ForecastItemDetails>();
 
         foreach (var tip in tips)
         {
@@ -225,23 +226,41 @@ internal sealed partial class RandomForeseerAdapter
             if (bundleCards is not null)
             {
                 FlushLooseItems();
-                var items = bundleCards.Select(CardName).ToArray();
+                var items = bundleCards.Select(ForecastItemDetails.Card).ToArray();
                 if (items.Length > 0)
                     sets.Add(new EventPredictionSetDetails(items));
                 continue;
             }
 
-            if (tip is CardHoverTip cardTip)
+            switch (tip)
             {
-                looseItems.Add(CardName(cardTip.Card));
-                continue;
-            }
-
-            if (tip is HoverTip textTip)
-            {
-                var text = NormalizeText(textTip.Title ?? textTip.Description);
-                if (!string.IsNullOrWhiteSpace(text))
-                    looseItems.Add(text);
+                case CardHoverTip cardTip:
+                    looseItems.Add(ForecastItemDetails.Card(cardTip.Card));
+                    break;
+                case { CanonicalModel: CardModel card }:
+                    looseItems.Add(ForecastItemDetails.Card(card));
+                    break;
+                case { CanonicalModel: RelicModel relic }:
+                    looseItems.Add(ForecastItemDetails.Relic(relic));
+                    break;
+                case { CanonicalModel: PotionModel potion }:
+                    looseItems.Add(ForecastItemDetails.Potion(potion));
+                    break;
+                case { CanonicalModel: OrbModel orb }:
+                    looseItems.Add(ForecastItemDetails.Orb(orb));
+                    break;
+                case HoverTip textTip:
+                {
+                    if (TryResolveDetachedModelTip(textTip) is { } modelItem)
+                    {
+                        looseItems.Add(modelItem);
+                        break;
+                    }
+                    var text = NormalizeText(textTip.Title ?? textTip.Description);
+                    if (!string.IsNullOrWhiteSpace(text))
+                        looseItems.Add(ForecastItemDetails.Text(text));
+                    break;
+                }
             }
         }
 
@@ -257,8 +276,40 @@ internal sealed partial class RandomForeseerAdapter
         }
     }
 
-    private static string CardName(CardModel card) =>
-        NormalizeText(card.Title) + (card.IsUpgraded ? "+" : string.Empty);
+    private static ForecastItemDetails? TryResolveDetachedModelTip(HoverTip tip)
+    {
+        if (!tip.Id.StartsWith("RandomForeseer:Prediction:", StringComparison.Ordinal))
+            return null;
+
+        if (ExtractLocEntry(tip.Id, "relics") is { } relicEntry)
+        {
+            var relic = ModelDb.AllRelics.FirstOrDefault(candidate =>
+                string.Equals(candidate.Id.Entry, relicEntry, StringComparison.Ordinal));
+            if (relic is not null)
+                return ForecastItemDetails.Relic(relic);
+        }
+
+        if (ExtractLocEntry(tip.Id, "potions") is { } potionEntry)
+        {
+            var potion = ModelDb.AllPotions.FirstOrDefault(candidate =>
+                string.Equals(candidate.Id.Entry, potionEntry, StringComparison.Ordinal));
+            if (potion is not null)
+                return ForecastItemDetails.Potion(potion);
+        }
+
+        return null;
+    }
+
+    private static string? ExtractLocEntry(string id, string table)
+    {
+        var marker = $"Title={table}.";
+        var start = id.IndexOf(marker, StringComparison.Ordinal);
+        if (start < 0)
+            return null;
+        start += marker.Length;
+        var end = id.IndexOf(".title", start, StringComparison.Ordinal);
+        return end <= start ? null : id[start..end];
+    }
 
     private static string NormalizeText(string text)
     {

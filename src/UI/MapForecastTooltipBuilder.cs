@@ -259,15 +259,15 @@ internal static class MapForecastTooltipBuilder
             var heading = index == 0
                 ? chinese ? "卡牌" : "cards"
                 : chinese ? $"额外卡牌 {index}" : $"extra cards {index}";
-            parts.Add($"{heading} {string.Join(" / ", rewards.CardRewards[index].Select(item => item.Name))}");
+            parts.Add($"{heading} {FormatItems(rewards.CardRewards[index].Select(item => item.Item))}");
         }
         parts.Add(rewards.Potions.Count == 0
             ? chinese ? "药水 无" : "no potion"
-            : $"{(chinese ? "药水" : "potion")} {string.Join(" / ", rewards.Potions.Select(item => item.Name))}");
+            : $"{(chinese ? "药水" : "potion")} {FormatItems(rewards.Potions.Select(item => item.Item))}");
         if (rewards.Relics.Count > 0)
         {
             parts.Add($"{(chinese ? "遗物" : "relic")} "
-                      + string.Join(" / ", rewards.Relics.Select(item => item.Name)));
+                      + FormatItems(rewards.Relics.Select(item => item.Item)));
         }
 
         lines.Add($"{routeLabel}{encounterSuffix}{(chinese ? "：" : ":")}");
@@ -651,16 +651,16 @@ internal static class MapForecastTooltipBuilder
             if (option.InitialItems.Count > 0 && option.Sets.Count == 0)
             {
                 lines.Add(chinese
-                    ? $"{prefix}  选项「{option.Option}」入场可见：{string.Join(" / ", option.InitialItems)}"
-                    : $"{prefix}  Option \"{option.Option}\" shown on entry: {string.Join(" / ", option.InitialItems)}");
+                    ? $"{prefix}  选项「{option.Option}」入场可见：{FormatItems(option.InitialItems)}"
+                    : $"{prefix}  Option \"{option.Option}\" shown on entry: {FormatItems(option.InitialItems)}");
                 continue;
             }
 
             if (option.InitialItems.Count == 0 && option.Sets.Count == 1)
             {
                 lines.Add(chinese
-                    ? $"{prefix}  选项「{option.Option}」结果：{string.Join(" / ", option.Sets[0].Items)}"
-                    : $"{prefix}  Option \"{option.Option}\" result: {string.Join(" / ", option.Sets[0].Items)}");
+                    ? $"{prefix}  选项「{option.Option}」结果：{FormatItems(option.Sets[0].Items)}"
+                    : $"{prefix}  Option \"{option.Option}\" result: {FormatItems(option.Sets[0].Items)}");
                 continue;
             }
 
@@ -670,14 +670,14 @@ internal static class MapForecastTooltipBuilder
             if (option.InitialItems.Count > 0)
             {
                 lines.Add(chinese
-                    ? $"{prefix}    入场可见：{string.Join(" / ", option.InitialItems)}"
-                    : $"{prefix}    Shown on entry: {string.Join(" / ", option.InitialItems)}");
+                    ? $"{prefix}    入场可见：{FormatItems(option.InitialItems)}"
+                    : $"{prefix}    Shown on entry: {FormatItems(option.InitialItems)}");
             }
             for (var index = 0; index < option.Sets.Count; index++)
             {
                 lines.Add(chinese
-                    ? $"{prefix}    结果第 {index + 1} 组：{string.Join(" / ", option.Sets[index].Items)}"
-                    : $"{prefix}    Result set {index + 1}: {string.Join(" / ", option.Sets[index].Items)}");
+                    ? $"{prefix}    结果第 {index + 1} 组：{FormatItems(option.Sets[index].Items)}"
+                    : $"{prefix}    Result set {index + 1}: {FormatItems(option.Sets[index].Items)}");
             }
         }
     }
@@ -757,7 +757,7 @@ internal static class MapForecastTooltipBuilder
         IEnumerable<RewardItemDetails> items,
         bool chinese)
     {
-        lines.Add($"{heading}{(chinese ? "：" : ": ")}{string.Join(" / ", items.Select(item => item.Name))}");
+        lines.Add($"{heading}{(chinese ? "：" : ": ")}{FormatItems(items.Select(item => item.Item))}");
     }
 
     private static void AppendItems(
@@ -769,10 +769,13 @@ internal static class MapForecastTooltipBuilder
         var text = items.Select(item =>
         {
             var sale = item.IsOnSale ? (chinese ? " [半价]" : " [sale]") : string.Empty;
-            return $"{item.Name} [blue]{item.Cost}[/blue]{sale}";
+            return $"{ForecastItemFormatter.Format(item.Item)} [blue]{item.Cost}[/blue]{sale}";
         });
         lines.Add($"{heading}{(chinese ? "：" : ": ")}{string.Join(chinese ? "、" : ", ", text)}");
     }
+
+    private static string FormatItems(IEnumerable<ForecastItemDetails> items) =>
+        string.Join(" / ", items.Select(ForecastItemFormatter.Format));
 
     private static string Badge(ForecastAccuracy accuracy, bool chinese) => accuracy switch
     {

@@ -135,12 +135,15 @@ internal static class RouteMarkerPlanner
                    ";",
                    forecast.Value!.Options.Select(option =>
                        option.TextKey + "=initial:"
-                       + string.Join(",", option.InitialItems)
+                       + string.Join(",", option.InitialItems.Select(ItemKey))
                        + ":predicted:"
                        + string.Join(
                            "/",
-                           option.Sets.Select(set => string.Join(",", set.Items)))));
+                           option.Sets.Select(set => string.Join(",", set.Items.Select(ItemKey))))));
     }
+
+    private static string ItemKey(ForecastItemDetails item) =>
+        item.Id?.ToString() ?? item.Name;
 
     private static string CombatRewardKey(Forecast<CombatRewardDetails>? forecast)
     {

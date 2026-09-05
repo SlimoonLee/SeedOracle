@@ -52,6 +52,8 @@ internal static class DebugForecastSmokeTest
                 $"Seed Oracle hover-tip viewport clamp failed: {clampedBounds}.");
         }
 
+        ValidateForecastItemFormatting();
+
         var points = map.GetAllMapPoints()
             .Append(map.StartingMapPoint)
             .Append(map.BossMapPoint)
@@ -478,6 +480,22 @@ internal static class DebugForecastSmokeTest
             throw new InvalidOperationException(
                 $"Seed Oracle merchant self-test failed: {merchant.Reason ?? "unexpected inventory shape"}.");
         }
+        var merchantCards = merchant.Value.CharacterCards
+            .Concat(merchant.Value.ColorlessCards)
+            .Select(entry => entry.Item)
+            .ToArray();
+        if (merchantCards.Any(item =>
+                item.Kind != ForecastItemKind.Card
+                || string.IsNullOrWhiteSpace(item.ImagePath)
+                || !Godot.ResourceLoader.Exists(item.ImagePath))
+            || merchant.Value.Relics.Any(item => item.Item.Kind != ForecastItemKind.Relic)
+            || merchant.Value.Potions.Any(item => item.Item.Kind != ForecastItemKind.Potion)
+            || !merchant.Value.ColorlessCards.Any(item => item.Item.Rarity == ForecastItemRarity.Uncommon)
+            || !merchant.Value.ColorlessCards.Any(item => item.Item.Rarity == ForecastItemRarity.Rare))
+        {
+            throw new InvalidOperationException(
+                "Seed Oracle merchant items did not retain their type, rarity, and card-art metadata.");
+        }
 
         var secondMerchant = PredictionPurityGuard.Execute(
             run,
@@ -528,6 +546,27 @@ internal static class DebugForecastSmokeTest
         {
             throw new InvalidOperationException(
                 $"Seed Oracle event-local-RNG self-test failed: {eventTransformContent?.Reason ?? "no transform results"}.");
+        }
+
+        var eventPotionContent = PredictionPurityGuard.Execute(
+            run,
+            "self-test:event-detached-potion-metadata",
+            () => Entry.RandomForeseer.PredictEventContents(
+                player,
+                [RoomType.Event],
+                ModelDb.Event<TheLegendsWereTrue>()));
+        var eventPotionItems = eventPotionContent is { HasValue: true }
+            ? eventPotionContent.Value!.Options
+                .SelectMany(option => option.Sets)
+                .SelectMany(set => set.Items)
+                .Count(item => item.Kind == ForecastItemKind.Potion
+                               && item.Rarity != ForecastItemRarity.None)
+            : 0;
+        if (eventPotionItems == 0)
+        {
+            throw new InvalidOperationException(
+                $"Seed Oracle detached event-item metadata self-test failed: "
+                + $"{eventPotionContent?.Reason ?? "predicted potion lost its rarity"}.");
         }
 
         var slipperyBridgeContent = PredictionPurityGuard.Execute(
@@ -637,9 +676,47 @@ internal static class DebugForecastSmokeTest
             + $"ancient_rules={validatedAncientRuleCount} "
             + "tooltip_clamp=passed "
             + $"event_random_items={eventRandomItemCount} event_local_rng_items={eventTransformItemCount} "
+            + $"event_potion_items={eventPotionItems} "
             + $"unknown={(unknownPoint is null ? "not_present" : "passed")} hp_monsters={hpCount} "
             + $"combat_reward_cards={combatReward.Value!.CardRewards.Count} "
             + $"treasure={(treasurePoint is null ? "not_present" : $"relics={treasureReward!.Value!.Relics.Count}")}");
+    }
+
+    private static void ValidateForecastItemFormatting()
+    {
+        var common = new ForecastItemDetails(
+            ModelId.none,
+            "Common",
+            ForecastItemKind.Card,
+            ForecastItemRarity.Common,
+            "res://common.tres");
+        var uncommon = common with { Name = "Uncommon", Rarity = ForecastItemRarity.Uncommon };
+        var rare = common with
+        {
+            Name = "Rare+",
+            Rarity = ForecastItemRarity.Rare,
+            ImagePath = "res://rare.tres",
+            IsUpgraded = true
+        };
+
+        if (ForecastItemFormatter.Format(common, useCardArtThumbnails: false)
+                != "[color=#FFFFFF]Common[/color]"
+            || ForecastItemFormatter.Format(uncommon, useCardArtThumbnails: false)
+                != "[color=#64FFFF]Uncommon[/color]"
+            || ForecastItemFormatter.Format(rare, useCardArtThumbnails: false)
+                != "[color=#FFDA36]Rare+[/color]")
+        {
+            throw new InvalidOperationException("Seed Oracle rarity-color formatting self-test failed.");
+        }
+
+        var thumbnail = ForecastItemFormatter.Format(rare, useCardArtThumbnails: true);
+        if (!thumbnail.Contains("[color=#FFDA36]◆[/color]", StringComparison.Ordinal)
+            || !thumbnail.Contains("[img=72x54]res://rare.tres[/img]", StringComparison.Ordinal)
+            || !thumbnail.EndsWith("[green]+[/green]", StringComparison.Ordinal)
+            || thumbnail.Contains("Rare", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("Seed Oracle card-art thumbnail formatting self-test failed.");
+        }
     }
 }
 #endif

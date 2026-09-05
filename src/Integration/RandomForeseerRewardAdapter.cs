@@ -428,13 +428,14 @@ internal sealed partial class RandomForeseerAdapter
                && !supportedTypes.Contains(listener.GetType());
     });
 
-    private static RewardItemDetails ToDetails(CardModel card) => new(card.Id, card.Title);
+    private static RewardItemDetails ToDetails(CardModel card) =>
+        new(ForecastItemDetails.Card(card));
 
     private static RewardItemDetails ToDetails(PotionModel potion) =>
-        new(potion.Id, potion.Title.GetFormattedText());
+        new(ForecastItemDetails.Potion(potion));
 
     private static RewardItemDetails ToDetails(RelicModel relic) =>
-        new(relic.Id, relic.Title.GetFormattedText());
+        new(ForecastItemDetails.Relic(relic));
 
     private static readonly HashSet<Type> RewardHookTypes =
     [

@@ -25,6 +25,7 @@ Seed Oracle 是《Slay the Spire 2》`0.111.0` 的路线信息前瞻 Mod。它�
 - 按可行路线推进克隆的 `Rewards`、`Shops`、卡牌/药水赔率和玩家遗物袋，显示战后金币、卡牌、药水与遗物；支持当前游戏内会改写基础奖励的遗物与自定义模式；
 - 使用克隆的 `TreasureRoomRelics` RNG 与共享遗物袋预测宝箱遗物和金币，并处理银坩埚空箱与首次教学宝箱；
 - 使用游戏支持的 `[gold]`、`[green]`、`[orange]` 和 `[blue]` 富文本标签显示预测状态与价格；
+- 卡牌、遗物与药水名称按实际稀有度显示为普通白、罕见蓝、稀有金等颜色；Mod 设置页可改用原生卡图缩略图代替卡名，彩色菱形继续标出稀有度，升级牌保留“+”；
 - 地图顶部提供“战损与模拟”按钮和可见面板；打开面板与地图悬停都不会启动 worker。每个场景有独立“计算”按钮，未选择的路线不排队；相同跑局状态与搜索设置会直接恢复缓存结果；
 - 面板用与地图路线标记一致的彩色三角形、正方形、菱形等图形区分路线，悬停一行会在地图上高亮对应目标与路径；可选择单场搜索预算与并行度，并查看耗时、可信度和药水计划；
 - 面板实时显示隔离 Combat Solver worker 的 PID、工作集、私有内存和静音状态；可选择保活 2、10、30 分钟、一直维持或任务结束后自动关闭，也可手动关闭及重启/预热；
@@ -43,7 +44,7 @@ Seed Oracle 是《Slay the Spire 2》`0.111.0` 的路线信息前瞻 Mod。它�
 
 ## 当前兼容性
 
-Seed Oracle `0.1.18` 需要 [SlimoonLee/CombatSolver](https://github.com/SlimoonLee/CombatSolver) 的 `upstream/precombat-api-rfc` 分支（本地 Mod 版本 `0.29.5`、public API v5）。[Torch1230/CombatSolver](https://github.com/Torch1230/CombatSolver) 的 `v0.29.1` 尚未包含该接口，不能直接替代这个扩展版本。
+Seed Oracle `0.1.19` 需要 [SlimoonLee/CombatSolver](https://github.com/SlimoonLee/CombatSolver) 的 `upstream/precombat-api-rfc` 分支（本地 Mod 版本 `0.29.5`、public API v5）。[Torch1230/CombatSolver](https://github.com/Torch1230/CombatSolver) 的 `v0.29.1` 尚未包含该接口，不能直接替代这个扩展版本。
 
 ## 构建
 
@@ -57,7 +58,7 @@ dotnet build .\SeedOracle.csproj -c Release
 
 依赖：
 
-- STS2-RitsuLib `0.5.13+`
+- STS2-RitsuLib `0.5.18+`
 - Random Foreseer `0.13.10+`
 - Combat Solver 本地扩展版 `0.29.5+`（基于作者 `v0.29.1`，必须包含 public API v5；作者原版目前不提供此接口）
 

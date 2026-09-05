@@ -4,8 +4,10 @@ using MegaCrit.Sts2.Core.Logging;
 using MegaCrit.Sts2.Core.Map;
 using MegaCrit.Sts2.Core.Modding;
 using MegaCrit.Sts2.Core.Nodes;
+using SeedOracle.Data;
 using SeedOracle.Forecasting;
 using SeedOracle.Integration;
+using SeedOracle.Settings;
 using SeedOracle.UI;
 using Logger = MegaCrit.Sts2.Core.Logging.Logger;
 
@@ -29,6 +31,9 @@ public static class Entry
 
     public static void Initialize()
     {
+        SeedOracleData.Register();
+        SeedOracleSettingsUi.Register();
+
         var randomForeseer = new RandomForeseerAdapter();
         var combatSolver = new CombatSolverAdapter();
         RandomForeseer = randomForeseer;

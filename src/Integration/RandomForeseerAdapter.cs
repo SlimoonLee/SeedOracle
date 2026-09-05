@@ -295,7 +295,7 @@ internal sealed partial class RandomForeseerAdapter : IRandomForeseerAdapter
             cost = ApplyPrice(player: card.Owner!, entry, cost);
         }
 
-        return new MerchantItemForecast(card.Id, card.Title, cost, isOnSale);
+        return new MerchantItemForecast(ForecastItemDetails.Card(card), cost, isOnSale);
     }
 
     private IReadOnlyList<MerchantItemForecast> PredictRelics(
@@ -324,7 +324,7 @@ internal sealed partial class RandomForeseerAdapter : IRandomForeseerAdapter
             sharedRelicGrabBag.Remove(relic);
             var cost = (int)Math.Round(relic.MerchantCost * shops.NextFloat(0.85f, 1.15f));
             cost = ApplyPrice(player, priceProbe, cost);
-            result.Add(new MerchantItemForecast(relic.Id, relic.Title.GetFormattedText(), cost));
+            result.Add(new MerchantItemForecast(ForecastItemDetails.Relic(relic), cost));
         }
 
         return result;
@@ -345,7 +345,7 @@ internal sealed partial class RandomForeseerAdapter : IRandomForeseerAdapter
             };
             var cost = Mathf.RoundToInt(baseCost * shops.NextFloat(0.95f, 1.05f));
             cost = ApplyPrice(player, priceProbe, cost);
-            result.Add(new MerchantItemForecast(potion.Id, potion.Title.GetFormattedText(), cost));
+            result.Add(new MerchantItemForecast(ForecastItemDetails.Potion(potion), cost));
         }
 
         return result;

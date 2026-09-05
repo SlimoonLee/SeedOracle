@@ -1,4 +1,7 @@
 using MegaCrit.Sts2.Core.Map;
+using MegaCrit.Sts2.Core.Entities.Cards;
+using MegaCrit.Sts2.Core.Entities.Potions;
+using MegaCrit.Sts2.Core.Entities.Relics;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Rooms;
 using SeedOracle.Api;
@@ -33,12 +36,104 @@ internal sealed record EncounterDetails(
 
 internal sealed record EventDetails(ModelId Id, string Title);
 
-internal sealed record EventPredictionSetDetails(IReadOnlyList<string> Items);
+internal enum ForecastItemKind
+{
+    Text,
+    Card,
+    Relic,
+    Potion,
+    Orb
+}
+
+internal enum ForecastItemRarity
+{
+    None,
+    Common,
+    Uncommon,
+    Rare,
+    Ancient,
+    Shop,
+    Event,
+    Curse,
+    Quest
+}
+
+internal sealed record ForecastItemDetails(
+    ModelId? Id,
+    string Name,
+    ForecastItemKind Kind,
+    ForecastItemRarity Rarity = ForecastItemRarity.None,
+    string? ImagePath = null,
+    bool IsUpgraded = false)
+{
+    public static ForecastItemDetails Text(string text) =>
+        new(null, text, ForecastItemKind.Text);
+
+    public static ForecastItemDetails Card(CardModel card) =>
+        new(
+            card.Id,
+            card.Title,
+            ForecastItemKind.Card,
+            CardRarityOf(card.Rarity),
+            card.PortraitPath,
+            card.IsUpgraded);
+
+    public static ForecastItemDetails Relic(RelicModel relic) =>
+        new(
+            relic.Id,
+            relic.Title.GetFormattedText(),
+            ForecastItemKind.Relic,
+            RelicRarityOf(relic.Rarity));
+
+    public static ForecastItemDetails Potion(PotionModel potion) =>
+        new(
+            potion.Id,
+            potion.Title.GetFormattedText(),
+            ForecastItemKind.Potion,
+            PotionRarityOf(potion.Rarity));
+
+    public static ForecastItemDetails Orb(OrbModel orb) =>
+        new(orb.Id, orb.Title.GetFormattedText(), ForecastItemKind.Orb);
+
+    private static ForecastItemRarity CardRarityOf(CardRarity rarity) => rarity switch
+    {
+        CardRarity.Basic or CardRarity.Common => ForecastItemRarity.Common,
+        CardRarity.Uncommon => ForecastItemRarity.Uncommon,
+        CardRarity.Rare => ForecastItemRarity.Rare,
+        CardRarity.Ancient => ForecastItemRarity.Ancient,
+        CardRarity.Event => ForecastItemRarity.Event,
+        CardRarity.Curse => ForecastItemRarity.Curse,
+        CardRarity.Quest => ForecastItemRarity.Quest,
+        _ => ForecastItemRarity.None
+    };
+
+    private static ForecastItemRarity RelicRarityOf(RelicRarity rarity) => rarity switch
+    {
+        RelicRarity.Starter or RelicRarity.Common => ForecastItemRarity.Common,
+        RelicRarity.Uncommon => ForecastItemRarity.Uncommon,
+        RelicRarity.Rare => ForecastItemRarity.Rare,
+        RelicRarity.Ancient => ForecastItemRarity.Ancient,
+        RelicRarity.Shop => ForecastItemRarity.Shop,
+        RelicRarity.Event => ForecastItemRarity.Event,
+        _ => ForecastItemRarity.None
+    };
+
+    private static ForecastItemRarity PotionRarityOf(PotionRarity rarity) => rarity switch
+    {
+        PotionRarity.Common => ForecastItemRarity.Common,
+        PotionRarity.Uncommon => ForecastItemRarity.Uncommon,
+        PotionRarity.Rare => ForecastItemRarity.Rare,
+        PotionRarity.Event => ForecastItemRarity.Event,
+        _ => ForecastItemRarity.None
+    };
+}
+
+internal sealed record EventPredictionSetDetails(IReadOnlyList<ForecastItemDetails> Items);
 
 internal sealed record EventOptionPredictionDetails(
     string Option,
     string TextKey,
-    IReadOnlyList<string> InitialItems,
+    IReadOnlyList<ForecastItemDetails> InitialItems,
     IReadOnlyList<EventPredictionSetDetails> Sets);
 
 internal sealed record EventContentDetails(
@@ -47,10 +142,14 @@ internal sealed record EventContentDetails(
 internal sealed record MonsterHpDetails(string Monster, int Hp);
 
 internal sealed record MerchantItemForecast(
-    ModelId Id,
-    string Name,
+    ForecastItemDetails Item,
     int Cost,
-    bool IsOnSale = false);
+    bool IsOnSale = false)
+{
+    public ModelId Id => Item.Id!;
+
+    public string Name => Item.Name;
+}
 
 internal sealed record MerchantInventoryForecast(
     IReadOnlyList<MerchantItemForecast> CharacterCards,
@@ -60,7 +159,12 @@ internal sealed record MerchantInventoryForecast(
     int CardRemovalCost,
     int FutureVisitOrdinal);
 
-internal sealed record RewardItemDetails(ModelId Id, string Name);
+internal sealed record RewardItemDetails(ForecastItemDetails Item)
+{
+    public ModelId Id => Item.Id!;
+
+    public string Name => Item.Name;
+}
 
 internal sealed record CombatRewardDetails(
     int Gold,
