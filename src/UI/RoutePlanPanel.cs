@@ -353,7 +353,7 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
             {
                 // The threaded plan state is authoritative for rewards, shop
                 // stock, and treasure: choices made upstream already changed it.
-                variant = variant with
+                if (variant is not null) variant = variant with
                 {
                     Merchant = outcome.Merchant ?? variant.Merchant,
                     CombatRewards = outcome.CombatRewards ?? variant.CombatRewards,
