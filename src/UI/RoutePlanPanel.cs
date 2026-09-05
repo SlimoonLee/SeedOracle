@@ -8,6 +8,7 @@ using MegaCrit.Sts2.Core.Localization;
 using MegaCrit.Sts2.Core.Localization.Fonts;
 using MegaCrit.Sts2.Core.Map;
 using MegaCrit.Sts2.Core.Nodes.Screens.Map;
+using MegaCrit.Sts2.Core.Nodes.GodotExtensions;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.addons.mega_text;
@@ -889,10 +890,12 @@ internal static class RoutePlanPanel
     public static RoutePlanPanelControl Refresh(NMapScreen screen)
     {
         var panel = screen.GetNodeOrNull<RoutePlanPanelControl>(RoutePlanPanelControl.NodeName);
+        var created = false;
         if (panel is null || !GodotObject.IsInstanceValid(panel) || panel.IsQueuedForDeletion())
         {
             panel = new RoutePlanPanelControl();
             screen.AddChild(panel);
+            created = true;
         }
 
         var toggle = screen.GetNodeOrNull<RoutePlanToggleButton>(RoutePlanToggleButton.NodeName);
@@ -900,8 +903,11 @@ internal static class RoutePlanPanel
         {
             toggle = new RoutePlanToggleButton();
             screen.AddChild(toggle);
+            created = true;
         }
 
+        if (created)
+            Entry.Logger.Info("[PlanPanel] plan UI created");
         panel.Configure(screen);
         toggle.Bind(panel);
         toggle.Visible = screen.IsOpen;
@@ -969,6 +975,8 @@ internal static class RoutePlanPanel
         {
             if (!IsPlanMode || _currentPanel is null)
                 return;
+            Entry.Logger.Info(
+                $"[PlanClick] coord={point.Point.coord} state={point.State} screenOpen={point._screen?.IsOpen}");
             if (point.State != MapPointState.Untravelable)
                 return;
             if (point._runState is not RunState run || point._screen is not { } screen)
@@ -977,6 +985,8 @@ internal static class RoutePlanPanel
                 return;
 
             var error = RoutePlanTracker.ToggleNode(run, point.Point.coord);
+            if (error is not null)
+                Entry.Logger.Info($"[PlanClick] rejected: {error}");
             _currentPanel.ShowHint(error, error is not null);
             _currentPanel.RefreshPlan();
             RoutePlanOverlay.Refresh(screen, run);
@@ -996,12 +1006,24 @@ internal static class RoutePlanPanel
     }
 }
 
-[HarmonyPatch(typeof(NMapPoint), "OnRelease")]
+/// <summary>
+/// Intercepts left-click releases on map nodes at the raw _GuiInput level.
+/// NMapPoint.OnRelease is intentionally not used: it depends on the game's
+/// enable/press bookkeeping that is torn down by Disable(), while hover
+/// proves disabled nodes still receive GUI events.
+/// </summary>
+[HarmonyPatch(typeof(NClickableControl), nameof(NClickableControl._GuiInput))]
 internal static class NMapPointPlanClickPatch
 {
     [HarmonyPostfix]
-    private static void Postfix(NMapPoint __instance) =>
-        RoutePlanPanel.HandleMapPointClick(__instance);
+    private static void Postfix(NClickableControl __instance, InputEvent inputEvent)
+    {
+        if (inputEvent is not InputEventMouseButton { Pressed: false, ButtonIndex: MouseButton.Left })
+            return;
+        if (__instance is not NMapPoint point)
+            return;
+        RoutePlanPanel.HandleMapPointClick(point);
+    }
 }
 
 [HarmonyPatch(typeof(NMapScreen), nameof(NMapScreen.SetMap))]
