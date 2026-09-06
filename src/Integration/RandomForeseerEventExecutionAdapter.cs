@@ -1,6 +1,11 @@
 using MegaCrit.Sts2.Core.Commands;
+using HarmonyLib;
+using MegaCrit.Sts2.Core.Context;
 using MegaCrit.Sts2.Core.Entities.CardRewardAlternatives;
 using MegaCrit.Sts2.Core.Entities.Cards;
+using MegaCrit.Sts2.Core.Entities.Creatures;
+using MegaCrit.Sts2.Core.Entities.Potions;
+using MegaCrit.Sts2.Core.Entities.Relics;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Events;
 using MegaCrit.Sts2.Core.Factories;
@@ -121,7 +126,7 @@ internal sealed partial class RandomForeseerAdapter
             var shadowPlayer = shadowRun.GetPlayer(livePlayer.NetId)
                                ?? throw new InvalidOperationException(
                                    $"shadow snapshot lacks player {livePlayer.NetId}");
-            RewriteShadowNetId(shadowPlayer);
+            EnterShadowIsolation(shadowPlayer);
 
             if (projectedDeck is { Count: > 0 })
             {
@@ -201,19 +206,28 @@ internal sealed partial class RandomForeseerAdapter
         finally
         {
             NonInteractiveMode.AutoSlayerCheck = previousCheck;
+            ExitShadowIsolation();
         }
     }
 
-    private static void RewriteShadowNetId(Player shadowPlayer)
+    /// <summary>
+    /// While a shadow execution/layout is in flight, every
+    /// LocalContext.IsMe/IsMine gate reports false for the SHADOW objects:
+    /// profile writes, VFX, and other local-player branches stay closed. The
+    /// shadow player keeps its ORIGINAL NetId, so run-history lookups inside
+    /// effect code still resolve (they index PlayerStats by NetId).
+    /// </summary>
+    internal static Player? ActiveShadowPlayer;
+
+    private static void EnterShadowIsolation(Player shadowPlayer)
     {
-        // NetId is get-only; the backing field rewrite is what keeps every
-        // LocalContext.IsMe/IsMine gate (profile writes, VFX) closed.
-        var field = typeof(Player).GetField(
-            "<NetId>k__BackingField",
-            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
-        field?.SetValue(shadowPlayer, shadowPlayer.NetId ^ 0x5EED0FCEC0FFEE00UL);
+        ActiveShadowPlayer = shadowPlayer;
     }
 
+    private static void ExitShadowIsolation()
+    {
+        ActiveShadowPlayer = null;
+    }
     private static PlayerSnapshot Capture(Player player)
     {
         return new PlayerSnapshot(
@@ -275,7 +289,7 @@ internal sealed partial class RandomForeseerAdapter
             var shadowRun = RunState.FromSerializable(snapshot);
             var shadowPlayer = shadowRun.GetPlayer(livePlayer.NetId)
                                ?? throw new InvalidOperationException("shadow snapshot lacks player");
-            RewriteShadowNetId(shadowPlayer);
+            EnterShadowIsolation(shadowPlayer);
 
             var shadowEvent = canonical.ToMutable();
             shadowEvent.Owner = shadowPlayer;
@@ -372,6 +386,10 @@ internal sealed partial class RandomForeseerAdapter
                 Error = root.Message
             };
         }
+        finally
+        {
+            ExitShadowIsolation();
+        }
     }
 
     /// <summary>
@@ -401,7 +419,7 @@ internal sealed partial class RandomForeseerAdapter
             var shadowRun = RunState.FromSerializable(snapshot);
             var shadowPlayer = shadowRun.GetPlayer(livePlayer.NetId)
                                ?? throw new InvalidOperationException("shadow snapshot lacks player");
-            RewriteShadowNetId(shadowPlayer);
+            EnterShadowIsolation(shadowPlayer);
 
             var mutableEncounter = encounter.ToMutable();
             mutableEncounter.GenerateMonstersWithSlots(shadowRun);
@@ -445,6 +463,10 @@ internal sealed partial class RandomForeseerAdapter
         {
             drops.Error = exception.GetBaseException().Message;
             return drops;
+        }
+        finally
+        {
+            ExitShadowIsolation();
         }
     }
 
@@ -495,6 +517,88 @@ internal sealed partial class RandomForeseerAdapter
                 card = pick ?? options[0].Card,
                 alternative = null
             };
+        }
+    }
+}
+
+/// <summary>
+/// Closes the local-player gates for SHADOW objects while an execution or
+/// layout prediction is in flight: IsMe/IsMine return false when the queried
+/// model belongs to the active shadow player. Live players are unaffected,
+/// and the shadow keeps its real NetId so history lookups inside effects work.
+/// </summary>
+[HarmonyPatch(typeof(MegaCrit.Sts2.Core.Context.LocalContext))]
+internal static class ShadowIsolationPatch
+{
+    [HarmonyPostfix]
+    [HarmonyPatch(nameof(MegaCrit.Sts2.Core.Context.LocalContext.IsMe), typeof(Player))]
+    private static void IsMePlayer(Player? player, ref bool __result)
+    {
+        if (__result
+            && RandomForeseerAdapter.ActiveShadowPlayer is { } shadow
+            && ReferenceEquals(player, shadow))
+        {
+            __result = false;
+        }
+    }
+
+    [HarmonyPostfix]
+    [HarmonyPatch(nameof(MegaCrit.Sts2.Core.Context.LocalContext.IsMe), typeof(Creature))]
+    private static void IsMeCreature(Creature? creature, ref bool __result)
+    {
+        if (__result
+            && RandomForeseerAdapter.ActiveShadowPlayer is { } shadow
+            && ReferenceEquals(creature?.Player, shadow))
+        {
+            __result = false;
+        }
+    }
+
+    [HarmonyPostfix]
+    [HarmonyPatch(nameof(MegaCrit.Sts2.Core.Context.LocalContext.IsMine), typeof(CardModel))]
+    private static void IsMineCard(CardModel? card, ref bool __result)
+    {
+        if (__result
+            && RandomForeseerAdapter.ActiveShadowPlayer is { } shadow
+            && ReferenceEquals(card?.Owner, shadow))
+        {
+            __result = false;
+        }
+    }
+
+    [HarmonyPostfix]
+    [HarmonyPatch(nameof(MegaCrit.Sts2.Core.Context.LocalContext.IsMine), typeof(PotionModel))]
+    private static void IsMinePotion(PotionModel? potion, ref bool __result)
+    {
+        if (__result
+            && RandomForeseerAdapter.ActiveShadowPlayer is { } shadow
+            && ReferenceEquals(potion?.Owner, shadow))
+        {
+            __result = false;
+        }
+    }
+
+    [HarmonyPostfix]
+    [HarmonyPatch(nameof(MegaCrit.Sts2.Core.Context.LocalContext.IsMine), typeof(RelicModel))]
+    private static void IsMineRelic(RelicModel? relic, ref bool __result)
+    {
+        if (__result
+            && RandomForeseerAdapter.ActiveShadowPlayer is { } shadow
+            && ReferenceEquals(relic?.Owner, shadow))
+        {
+            __result = false;
+        }
+    }
+
+    [HarmonyPostfix]
+    [HarmonyPatch(nameof(MegaCrit.Sts2.Core.Context.LocalContext.IsMine), typeof(EventModel))]
+    private static void IsMineEvent(EventModel? eventModel, ref bool __result)
+    {
+        if (__result
+            && RandomForeseerAdapter.ActiveShadowPlayer is { } shadow
+            && ReferenceEquals(eventModel?.Owner, shadow))
+        {
+            __result = false;
         }
     }
 }

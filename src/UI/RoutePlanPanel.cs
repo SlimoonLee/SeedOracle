@@ -849,6 +849,11 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
             : "Executes this option on a shadow run for exact outcomes";
         executeButton.Pressed += () =>
         {
+            // Read the choice fresh: the dropdown updates plan.Entries after
+            // this control was built, so the captured record is stale.
+            var choice = RoutePlanTracker.Current?.Entries
+                .FirstOrDefault(candidate => candidate.Coord == entry.Coord)
+                .Choice as RoutePlanChoice.EventOption;
             if (choice is not { OptionIndex: >= 0 })
             {
                 outcomeLabel.Text = chinese ? "先选择一个事件选项。" : "Choose an option first.";
