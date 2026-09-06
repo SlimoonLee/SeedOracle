@@ -39,12 +39,12 @@ Seed Oracle 是《Slay the Spire 2》`0.111.0` 的路线信息前瞻 Mod。它�
 
 远端路线预测会在提示中注明条件：沿途事件选择、奖励选择、宝箱跳过、商店购买、补货和删牌若改变相关状态，后续结果也会随之改变。多人宝箱的投票结果同样属于条件分支。
 
-当前版本使用 Combat Solver 作者主线 `0.31.1` 中已经合并的 public API v5（合并提交 `0552b33`）。战斗会在独立 headless 游戏进程中初始化和求解，主进程调用前后核对完整跑局/RNG 状态令牌。确定路线 API 接收目标地图坐标和连续的非战斗路径历史，使目标 `TotalFloor`、怪物局部种子及地图相关开战状态一致；纯模拟 API 则在隔离快照校验之后替换样本战斗 RNG。隔离用户设置中的主音量、BGM、音效与环境音全部强制为零。远端确定路线数值仍是清楚标注的条件结果：沿途若拿牌、拿遗物、用药、购买、锻造或触发其他状态变化，应在实际选择后重新计算。
+当前版本使用 Combat Solver 作者工坊版 `0.31.2` 中的 public API v5（接口最初合并于提交 `0552b33`）。战斗会在独立 headless 游戏进程中初始化和求解，主进程调用前后核对完整跑局/RNG 状态令牌。确定路线 API 接收目标地图坐标和连续的非战斗路径历史，使目标 `TotalFloor`、怪物局部种子及地图相关开战状态一致；纯模拟 API 则在隔离快照校验之后替换样本战斗 RNG。隔离用户设置中的主音量、BGM、音效与环境音全部强制为零。远端确定路线数值仍是清楚标注的条件结果：沿途若拿牌、拿遗物、用药、购买、锻造或触发其他状态变化，应在实际选择后重新计算。
 设计评估与验证边界见 [docs/combat-solver-precombat-assessment.md](docs/combat-solver-precombat-assessment.md)。
 
 ## 当前兼容性
 
-Seed Oracle `0.1.20` 需要包含 public API v5 的 Combat Solver `0.31.1+`。该 API 已合并到 [Torch1230/CombatSolver](https://github.com/Torch1230/CombatSolver) 作者主线；当前可用构建为合并提交 `0552b33` 或其后版本。旧的无 API 工坊构建会被适配器安全标记为暂不支持，不能用于战前预测。
+Seed Oracle `0.1.21` 直接依赖作者工坊版 Combat Solver `0.31.2+` 的 public API v5。该 API 已合并到 [Torch1230/CombatSolver](https://github.com/Torch1230/CombatSolver) 作者主线；无需再把本地 API 分支放进游戏 `mods` 目录。旧的无 API 构建会被适配器安全标记为暂不支持，不能用于战前预测。
 
 ## 构建
 
@@ -54,13 +54,15 @@ Seed Oracle `0.1.20` 需要包含 public API v5 的 Combat Solver `0.31.1+`。�
 dotnet build .\SeedOracle.csproj -c Release
 ```
 
+`local.props` 中的 `CombatSolverDir` 应指向作者工坊条目 `2868840/3790899961`；不要把本地 API 版 DLL 复制到游戏 `mods` 目录。
+
 默认会把 `SeedOracle.dll`、PDB 和清单部署到游戏目录的 `mods/SeedOracle`。
 
 依赖：
 
 - STS2-RitsuLib `0.5.18+`
 - Random Foreseer `0.13.11+`
-- Combat Solver `0.31.1+`（必须包含 public API v5；作者主线已合并该接口）
+- Combat Solver `0.31.2+`（作者工坊版，包含 public API v5）
 
 依赖能力审计见 [docs/capability-audit.md](docs/capability-audit.md)。
 

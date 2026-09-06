@@ -4,6 +4,7 @@
     <Sts2DataDir>$(Sts2Dir)\data_sts2_windows_x86_64</Sts2DataDir>
     <RitsuLibDir>$(Sts2Dir)\mods\STS2-RitsuLib</RitsuLibDir>
     <RandomForeseerDir>$(Sts2Dir)\mods\RandomForeseer</RandomForeseerDir>
-    <CombatSolverDir>$(Sts2Dir)\mods\CombatSolver</CombatSolverDir>
+    <!-- Use the author's Steam Workshop build; keep the API fork out of the game mods directory. -->
+    <CombatSolverDir>C:\path\to\Steam\steamapps\workshop\content\2868840\3790899961</CombatSolverDir>
   </PropertyGroup>
 </Project>

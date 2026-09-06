@@ -1,6 +1,6 @@
 # PR 记录（已合并）：Add a controllable isolated pre-combat forecast API for companion mods
 
-PR #43 已由作者合并到 `main`。当前作者主线合并提交为 `0552b33`，manifest 仍为 `0.31.1`，并包含 public API v5；下方保留本地审阅分支从作者 `v0.29.1` 到 API v5 的提交链和历史验证结果。
+PR #43 已由作者合并到 `main`。public API v5 最初进入合并提交 `0552b33`；作者工坊条目现为 `0.31.2` 并包含该接口。下方保留本地审阅分支从作者 `v0.29.1` 到 API v5 的提交链和历史验证结果。
 
 ## Problem
 

@@ -32,6 +32,25 @@ namespace SeedOracle.Integration;
 /// </summary>
 internal sealed partial class RandomForeseerAdapter
 {
+    internal enum EventPlanningKind
+    {
+        Exact,
+        RewardChoice,
+        CardOrUiChoice,
+        SpecialCombat,
+        Minigame,
+        RunEnding
+    }
+
+    internal sealed record EventPlanningCapability(EventPlanningKind Kind, string ReasonKey);
+
+    internal sealed record EventOptionDescriptor(
+        int Index,
+        string Title,
+        string TextKey,
+        bool IsLocked,
+        EventPlanningCapability Capability);
+
     /// <summary>Events whose Chosen() cannot run headless at all.</summary>
     private static readonly HashSet<string> EventExecutionDenyList = new(StringComparer.Ordinal)
     {
@@ -43,25 +62,30 @@ internal sealed partial class RandomForeseerAdapter
 
     /// <summary>Option-level denies: options that open reward/card-selection
     /// screens or kill-confirmation popups; TextKey substring match.</summary>
-    private static readonly (string Event, string Key)[] OptionDenyList =
+    private static readonly (string Event, string Key, EventPlanningKind Kind)[] OptionDenyList =
     [
         // These options enter RewardsCmd.OfferCustom or a native card grid.
         // The serialized shadow has no multiplayer reward state or UI modal;
         // keep the boundary explicit instead of letting the native path throw.
-        ("DenseVegetation", "INITIAL.options.REST"),
-        ("Wellspring", "INITIAL.options.BOTTLE"),
-        ("DrowningBeacon", "INITIAL.options.BOTTLE"),
-        ("ColorfulPhilosophers", "INITIAL.options."),
-        ("PotionCourier", "INITIAL.options."),
-        ("BrainLeech", "INITIAL.options.SHARE_KNOWLEDGE"),
-        ("RoomFullOfCheese", "INITIAL.options.GORGE"),
-        ("TheLegendsWereTrue", "INITIAL.options.SLOWLY_FIND_AN_EXIT"),
-        ("BrainLeech", "RIP"),
-        ("DenseVegetation", "FIGHT"),
-        ("WhisperingHollow", "GOLD"),
-        ("Trial", "REJECT"),
-        ("Trial", "DOUBLE_DOWN"),
-        ("WarHistorianRepy", "UNLOCK"),
+        ("DenseVegetation", "INITIAL.options.REST", EventPlanningKind.RewardChoice),
+        ("Wellspring", "INITIAL.options.BOTTLE", EventPlanningKind.RewardChoice),
+        ("DrowningBeacon", "INITIAL.options.BOTTLE", EventPlanningKind.RewardChoice),
+        ("ColorfulPhilosophers", "INITIAL.options.", EventPlanningKind.RewardChoice),
+        ("PotionCourier", "INITIAL.options.", EventPlanningKind.RewardChoice),
+        ("BrainLeech", "INITIAL.options.SHARE_KNOWLEDGE", EventPlanningKind.RewardChoice),
+        ("TheLegendsWereTrue", "INITIAL.options.SLOWLY_FIND_AN_EXIT", EventPlanningKind.RewardChoice),
+        ("WhisperingHollow", "GOLD", EventPlanningKind.RewardChoice),
+        ("WarHistorianRepy", "UNLOCK_CHEST", EventPlanningKind.RewardChoice),
+
+        // Native card grids or other UI-mediated choices need another plan
+        // decision before their result can be threaded downstream.
+        ("RoomFullOfCheese", "INITIAL.options.GORGE", EventPlanningKind.CardOrUiChoice),
+        ("BrainLeech", "RIP", EventPlanningKind.CardOrUiChoice),
+
+        // These are represented explicitly instead of attempting to enter a
+        // room/scene from the map planner.
+        ("DenseVegetation", "FIGHT", EventPlanningKind.SpecialCombat),
+        ("Trial", "DOUBLE_DOWN", EventPlanningKind.RunEnding),
     ];
 
     internal sealed class EventExecutionOutcome
@@ -92,21 +116,40 @@ internal sealed partial class RandomForeseerAdapter
 
     internal bool IsEventExecutionDenied(string entryName, IReadOnlyList<EventOption> options, int optionIndex)
     {
-        if (EventExecutionDenyList.Contains(entryName))
-            return true;
         if (optionIndex < 0 || optionIndex >= options.Count)
             return true;
-        var key = options[optionIndex].TextKey;
-        foreach (var (denyEvent, denyKey) in OptionDenyList)
+        return GetEventPlanningCapability(entryName, options[optionIndex]).Kind != EventPlanningKind.Exact;
+    }
+
+    internal EventPlanningCapability GetEventPlanningCapability(string entryName, EventOption option)
+    {
+        if (entryName.Contains("CrystalSphere", StringComparison.Ordinal))
+            return new EventPlanningCapability(EventPlanningKind.Minigame, "crystal_sphere");
+        if (entryName.Contains("BattlewornDummy", StringComparison.Ordinal)
+            || entryName.Contains("PunchOff", StringComparison.Ordinal))
+        {
+            return new EventPlanningCapability(EventPlanningKind.SpecialCombat, "event_combat");
+        }
+        if (entryName.Contains("Amalgamator", StringComparison.Ordinal))
+            return new EventPlanningCapability(EventPlanningKind.CardOrUiChoice, "awaits_ui_frames");
+
+        foreach (var (denyEvent, denyKey, kind) in OptionDenyList)
         {
             if (entryName.Contains(denyEvent, StringComparison.Ordinal)
-                && key.Contains(denyKey, StringComparison.OrdinalIgnoreCase))
+                && option.TextKey.Contains(denyKey, StringComparison.OrdinalIgnoreCase))
             {
-                return true;
+                return new EventPlanningCapability(kind, kind switch
+                {
+                    EventPlanningKind.RewardChoice => "reward_choice",
+                    EventPlanningKind.CardOrUiChoice => "card_or_ui_choice",
+                    EventPlanningKind.SpecialCombat => "event_combat",
+                    EventPlanningKind.RunEnding => "run_ending",
+                    _ => "unsupported"
+                });
             }
         }
 
-        return false;
+        return new EventPlanningCapability(EventPlanningKind.Exact, "exact");
     }
 
     /// <summary>
@@ -178,9 +221,18 @@ internal sealed partial class RandomForeseerAdapter
                 outcome.OptionOutOfRange = true;
                 return outcome;
             }
-            if (IsEventExecutionDenied(entryName, options, optionIndex))
+            var capability = GetEventPlanningCapability(entryName, options[optionIndex]);
+            if (capability.Kind != EventPlanningKind.Exact)
             {
-                outcome.DenyReason = "该选项会打开界面/进入特殊战斗，无法无头预演";
+                outcome.DenyReason = capability.Kind switch
+                {
+                    EventPlanningKind.RewardChoice => "该选项还需要指定奖励取舍，暂不推进后续世界线",
+                    EventPlanningKind.CardOrUiChoice => "该选项还需要指定卡牌或界面选择，暂不推进后续世界线",
+                    EventPlanningKind.SpecialCombat => "该选项会进入特殊战斗，请改用胜利掉落/战损估算",
+                    EventPlanningKind.Minigame => "该选项会进入小游戏，请改用专用布局预测",
+                    EventPlanningKind.RunEnding => "该选项会终止当前跑局",
+                    _ => "该选项暂时无法无头预演"
+                };
                 return outcome;
             }
             var before = Capture(shadowPlayer);
@@ -289,7 +341,7 @@ internal sealed partial class RandomForeseerAdapter
     /// the same shadow initialization the executor uses — for events outside
     /// Random Foreseer's registry whose options are deterministic.
     /// </summary>
-    internal IReadOnlyList<(int Index, string Title)> EnumerateEventOptions(
+    internal IReadOnlyList<EventOptionDescriptor> EnumerateEventOptions(
         Player livePlayer,
         EventModel canonical)
     {
@@ -297,7 +349,12 @@ internal sealed partial class RandomForeseerAdapter
         {
             _ = InitializeShadowEvent(livePlayer, canonical, out var shadowEvent);
             return shadowEvent.CurrentOptions
-                .Select((option, index) => (index, option.Title.GetFormattedText()))
+                .Select((option, index) => new EventOptionDescriptor(
+                    index,
+                    option.Title.GetFormattedText(),
+                    option.TextKey,
+                    option.IsLocked,
+                    GetEventPlanningCapability(canonical.GetType().Name, option)))
                 .ToList();
         }
         catch (Exception exception)

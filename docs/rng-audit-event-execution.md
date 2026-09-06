@@ -89,19 +89,22 @@ ToReward/Populate 序列只消费 Rewards 流。两者都可影子重放（Predi
 - **事件级黑名单**：`CrystalSphere`、`BattlewornDummy`、`PunchOff`、`Amalgamator`。
   前三者会开小游戏/特殊战斗或换场景，`Amalgamator` 的效果会等待 UI 帧；计划面板分别走
   水晶球点位和战斗掉落预测，其他情况明确降级。
-- **需奖励/卡牌网格界面注入（v1 降级）**：`DenseVegetation(REST)`、`Wellspring(BOTTLE)`、
+- **需奖励/卡牌网格界面注入（当前条件规划）**：`DenseVegetation(REST)`、`Wellspring(BOTTLE)`、
   `DrowningBeacon(BOTTLE)`、`ColorfulPhilosophers`、`PotionCourier`、`BrainLeech(SHARE_KNOWLEDGE)`、
   `RoomFullOfCheese(GORGE)`、`TheLegendsWereTrue(SLOWLY_FIND_AN_EXIT)`，以及
-  `BrainLeech(RIP)`、`WhisperingHollow(GOLD)`、`WarHistorianRepy` 等已有奖励界面分支。
-  这些选项会进入原生 `RewardsCmd.OfferCustom` 或卡牌网格选择器；当前显式降级，避免在无头影子中触发
-  `RewardsSetSynchronizer`/选择界面异常。
+  `BrainLeech(RIP)`、`WhisperingHollow(GOLD)`、`WarHistorianRepy(UNLOCK_CHEST)` 等已有奖励界面分支。
+  这些选项会进入原生 `RewardsCmd.OfferCustom` 或卡牌网格选择器；规划面板预先标成“奖励待选”或
+  “卡牌/交互待选”，不再让用户点击后才遇到模糊失败，也不会把默认第一项伪装成玩家计划。
+- **终止跑局**：`Trial(DOUBLE_DOWN)`。选择后后续房间在逻辑上不可达，界面以终止标记显示；
+  `Trial(REJECT)` 本身只是进入下一页，仍可精确执行。
 - **可执行（白名单）**：其余全部，含多页/循环次级选项——`DollRoom`、`SlipperyBridge(HOLD_ON
   循环)`、`EndlessConveyor(GRAB 循环)`、`TabletOfTruth(DECIPHER 递进)`、`Trial(两段)`、
   `TinkerTime(两段)`、`RoundTeaParty`、选牌类 `AromaOfChaos`、`DoorsOfLightAndDark`、
   `LuminousChoir`、`MorphicGrove`、`Symbiote`、`Wellspring(BATHE)`、`WhisperingHollow(HUG)`、
   `RoomFullOfCheese(SEARCH)`、`WelcomeToWongos`、`RanwidTheElder`、
   `Reflections`、`ThisOrThat`、`UnrestSite`、`TrashHeap`、`InfestedAutomaton`、
-  `TheLegendsWereTrue(NAB_THE_MAP)`、`SlipperyBridge(OVERCOME)` 等；上方“需奖励/卡牌网格界面注入”
+  `TheLegendsWereTrue(NAB_THE_MAP)`、`SlipperyBridge(OVERCOME)`、`Trial(REJECT)`、
+  `WarHistorianRepy(UNLOCK_CAGE)` 等；上方“需奖励/卡牌网格界面注入”
   中列出的选项不在白名单内。
   选牌选项的「5 选 1 不可跳 / 3 选 1 可跳」语义来自选项构造参数（`Cancelable=false` 等），
   计划子面板直接按执行结果渲染。

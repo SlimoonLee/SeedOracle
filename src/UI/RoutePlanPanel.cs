@@ -411,9 +411,13 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
 
         void Update(RoutePlanChoice choice)
         {
-            var updated = entry with { Choice = choice };
+            var current = plan.Entries.FirstOrDefault(item =>
+                              !item.IsCompleted && item.Coord == entry.Coord)
+                          ?? entry;
+            InvalidateEventOutcomesFrom(plan, current);
+            var updated = current with { Choice = choice };
             plan.Entries = plan.Entries
-                .Select(item => item == entry ? updated : item)
+                .Select(item => !item.IsCompleted && item.Coord == entry.Coord ? updated : item)
                 .ToArray();
             deltaLabel.Text = EstimatePlanDelta(updated, variant, player, chinese).Text;
             RefreshLedgerOnly();
@@ -648,43 +652,20 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                         modeSelect.Select(eventChoice?.OptionIndex is 1 ? 1 : 0);
                         modeSelect.ItemSelected += (OptionButton.ItemSelectedEventHandler)(index =>
                         {
-                            Update(new RoutePlanChoice.EventOption((int)index - 1));
+                            mode = index == 1 ? 6 : 3;
+                            Update(new RoutePlanChoice.EventOption((int)index));
                             RenderLayout();
                         });
                         choiceBox.AddChild(modeSelect);
                     }
                 }
             }
-            else if (variant.EventContents is { HasValue: true } eventContents)
+            else
             {
-                var options = eventContents.Value!.Options;
-                var select = new OptionButton
-                {
-                    MouseFilter = MouseFilterEnum.Stop,
-                    FocusMode = FocusModeEnum.None
-                };
-                select.AddThemeFontSizeOverride("font_size", 17);
-                select.ApplyLocaleFontSubstitution(FontType.Regular, "font");
-                select.AddItem(chinese ? "事件选项：未选" : "Event: not chosen");
-                foreach (var option in options)
-                    select.AddItem(option.Option);
-                var eventChoice = entry.Choice as RoutePlanChoice.EventOption;
-                select.Select(eventChoice is null ? 0 : eventChoice.OptionIndex + 1);
-                select.ItemSelected += (OptionButton.ItemSelectedEventHandler)(index =>
-                    Update(new RoutePlanChoice.EventOption((int)index - 1)));
-                choiceBox.AddChild(select);
-
-                AddEventExecutionControls(
-                    choiceBox,
-                    variant.Event.Id.Entry,
-                    entry,
-                    player,
-                    chinese, _lastChain);
-            }
-            else if (variant.Event is not null)
-            {
-                // Deterministic events with no Random Foreseer content still
-                // have real, executable options (e.g. Abyssal Baths).
+                // Always use the event's complete generated option list as the
+                // source of indices. Random Foreseer intentionally omits
+                // options with no predicted random content, so its content
+                // list is explanatory data and must never define the dropdown.
                 var canonical = ResolveCanonicalEvent(variant.Event.Id.Entry);
                 if (canonical is not null
                     && player is not null
@@ -699,20 +680,43 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                     select.AddThemeFontSizeOverride("font_size", 17);
                     select.ApplyLocaleFontSubstitution(FontType.Regular, "font");
                     select.AddItem(chinese ? "事件选项：未选" : "Event: not chosen");
-                    foreach (var pair in choices)
-                        select.AddItem(pair.Title);
+                    for (var optionIndex = 0; optionIndex < choices.Count; optionIndex++)
+                    {
+                        var option = choices[optionIndex];
+                        select.AddItem(PlanningPrefix(option.Capability.Kind) + option.Title);
+                        if (option.IsLocked)
+                            select.SetItemDisabled(optionIndex + 1, true);
+                    }
                     var eventChoice = entry.Choice as RoutePlanChoice.EventOption;
-                    select.Select(eventChoice is null ? 0 : eventChoice.OptionIndex + 1);
-                    select.ItemSelected += (OptionButton.ItemSelectedEventHandler)(index =>
-                        Update(new RoutePlanChoice.EventOption((int)index - 1)));
+                    var selected = eventChoice is null
+                        ? -1
+                        : choices.ToList().FindIndex(option => option.Index == eventChoice.OptionIndex);
+                    select.Select(selected < 0 ? 0 : selected + 1);
                     choiceBox.AddChild(select);
 
-                    AddEventExecutionControls(
+                    var refreshCapability = AddEventExecutionControls(
                         choiceBox,
                         variant.Event.Id.Entry,
                         entry,
                         player,
-                        chinese, _lastChain);
+                        chinese,
+                        _lastChain,
+                        choices);
+                    select.ItemSelected += (OptionButton.ItemSelectedEventHandler)(index =>
+                    {
+                        var listIndex = (int)index - 1;
+                        if (listIndex < 0)
+                        {
+                            Update(new RoutePlanChoice.EventOption(-1));
+                            refreshCapability?.Invoke(-1);
+                            return;
+                        }
+                        if (listIndex >= choices.Count)
+                            return;
+                        var selectedOption = choices[listIndex];
+                        Update(new RoutePlanChoice.EventOption(selectedOption.Index));
+                        refreshCapability?.Invoke(selectedOption.Index);
+                    });
                 }
             }
         }
@@ -842,6 +846,29 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
 
     private readonly Dictionary<MapCoord, RandomForeseerAdapter.EventExecutionOutcome> _eventOutcomes = new();
 
+    private void InvalidateEventOutcomesFrom(RoutePlan plan, RoutePlanEntry changed)
+    {
+        var invalidate = false;
+        foreach (var item in plan.Entries)
+        {
+            if (!invalidate && !item.IsCompleted && item.Coord == changed.Coord)
+                invalidate = true;
+            if (invalidate)
+                _eventOutcomes.Remove(item.Coord);
+        }
+    }
+
+    private static string PlanningPrefix(RandomForeseerAdapter.EventPlanningKind kind) => kind switch
+    {
+        RandomForeseerAdapter.EventPlanningKind.Exact => "✓ ",
+        RandomForeseerAdapter.EventPlanningKind.RewardChoice => "◇ ",
+        RandomForeseerAdapter.EventPlanningKind.CardOrUiChoice => "◆ ",
+        RandomForeseerAdapter.EventPlanningKind.SpecialCombat => "⚔ ",
+        RandomForeseerAdapter.EventPlanningKind.Minigame => "▦ ",
+        RandomForeseerAdapter.EventPlanningKind.RunEnding => "✕ ",
+        _ => string.Empty
+    };
+
     private static EventModel? ResolveCanonicalEvent(string entry)
     {
         return ModelDb.AllEvents.FirstOrDefault(candidate =>
@@ -853,22 +880,29 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
     /// really executes on a shadow run (worker task), yielding exact deltas
     /// and the revealed follow-up options. Live state is never touched.
     /// </summary>
-    private void AddEventExecutionControls(
+    private Action<int>? AddEventExecutionControls(
         VBoxContainer choiceBox,
         string eventName,
         RoutePlanEntry entry,
         Player? player,
         bool chinese,
-        RoutePlanForecastService.PlanChain? chain)
+        RoutePlanForecastService.PlanChain? chain,
+        IReadOnlyList<RandomForeseerAdapter.EventOptionDescriptor> options)
     {
         if (ResolveCanonicalEvent(eventName) is not { } canonical
             || Entry.RandomForeseer is not RandomForeseerAdapter adapter
             || player is null)
         {
-            return;
+            return null;
         }
 
-        var choice = entry.Choice as RoutePlanChoice.EventOption;
+        var capabilityLabel = PreCombatPanelStyles.CreateLabel(
+            string.Empty,
+            15,
+            new Color(0.55f, 0.8f, 0.95f));
+        capabilityLabel.AutowrapMode = TextServer.AutowrapMode.WordSmart;
+        capabilityLabel.SizeFlagsHorizontal = SizeFlags.ExpandFill;
+
         var outcomeLabel = PreCombatPanelStyles.CreateLabel(
             DescribeEventOutcome(entry.Coord, chinese),
             15,
@@ -878,9 +912,60 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
 
         var executeButton = PreCombatPanelStyles.CreateButton(
             chinese ? "执行预演" : "Simulate choice", 160);
-        executeButton.TooltipText = chinese
-            ? "在影子跑局上真实执行该选项（不影响当前局），得到确切收益与后续选项"
-            : "Executes this option on a shadow run for exact outcomes";
+
+        void ApplyCapability(int optionIndex)
+        {
+            var option = options.FirstOrDefault(candidate => candidate.Index == optionIndex);
+            outcomeLabel.Text = DescribeEventOutcome(entry.Coord, chinese);
+            if (option is null)
+            {
+                capabilityLabel.Text = chinese
+                    ? "图例：✓精确　◇奖励待选　◆卡牌/交互待选　⚔特殊战斗　✕终止跑局"
+                    : "Legend: ✓ exact  ◇ reward choice  ◆ card/UI choice  ⚔ special combat  ✕ run ends";
+                executeButton.Text = chinese ? "先选择事件选项" : "Choose an option";
+                executeButton.Disabled = true;
+                return;
+            }
+
+            var kind = option.Capability.Kind;
+            capabilityLabel.Text = kind switch
+            {
+                RandomForeseerAdapter.EventPlanningKind.Exact => chinese
+                    ? "✓ 可在隔离影子跑局中精确执行；结果可计入资源台账。"
+                    : "✓ Can execute exactly on an isolated shadow run; result can enter the resource ledger.",
+                RandomForeseerAdapter.EventPlanningKind.RewardChoice => chinese
+                    ? "◇ 随机奖励内容可预知，但还需要指定拿取/跳过；未指定前不应推进后续世界线。"
+                    : "◇ Reward contents are predictable, but take/skip decisions are still required before advancing the worldline.",
+                RandomForeseerAdapter.EventPlanningKind.CardOrUiChoice => chinese
+                    ? "◆ 还包含卡牌或界面内选择；当前只展示候选内容，不把默认第一项伪装成计划。"
+                    : "◆ Contains another card or UI choice; candidates are shown without silently assuming the first one.",
+                RandomForeseerAdapter.EventPlanningKind.SpecialCombat => chinese
+                    ? "⚔ 特殊战斗：可查看胜利掉落；战损必须单独估算，胜负未定时后续属于条件世界线。"
+                    : "⚔ Special combat: victory drops can be shown; damage must be estimated separately and downstream is conditional on winning.",
+                RandomForeseerAdapter.EventPlanningKind.Minigame => chinese
+                    ? "▦ 小游戏使用专用布局预测。"
+                    : "▦ This minigame uses its dedicated layout forecast.",
+                RandomForeseerAdapter.EventPlanningKind.RunEnding => chinese
+                    ? "✕ 该选择会结束当前跑局，计划中的后续房间不再成立。"
+                    : "✕ This choice ends the run, so later planned rooms are unreachable.",
+                _ => string.Empty
+            };
+
+            executeButton.Text = kind switch
+            {
+                RandomForeseerAdapter.EventPlanningKind.Exact => chinese ? "执行精确预演" : "Run exact preview",
+                RandomForeseerAdapter.EventPlanningKind.SpecialCombat => chinese ? "查看胜利掉落" : "Show victory drops",
+                RandomForeseerAdapter.EventPlanningKind.RewardChoice => chinese ? "等待奖励取舍" : "Reward choice required",
+                RandomForeseerAdapter.EventPlanningKind.CardOrUiChoice => chinese ? "等待附加选择" : "Extra choice required",
+                RandomForeseerAdapter.EventPlanningKind.RunEnding => chinese ? "此选择终止跑局" : "This ends the run",
+                _ => chinese ? "使用专用预测" : "Use dedicated forecast"
+            };
+            executeButton.Disabled = kind is not (
+                RandomForeseerAdapter.EventPlanningKind.Exact
+                or RandomForeseerAdapter.EventPlanningKind.SpecialCombat);
+            executeButton.TooltipText = capabilityLabel.Text;
+        }
+
         executeButton.Pressed += () =>
         {
             // Read the choice fresh: the dropdown updates plan.Entries after
@@ -894,48 +979,81 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                 return;
             }
 
-            var canonicalType = canonical.GetType().Name;
-            if (canonicalType is "BattlewornDummy" or "PunchOff")
+            var requestedOptionIndex = choice.OptionIndex;
+            var descriptor = options.FirstOrDefault(option => option.Index == requestedOptionIndex);
+            if (descriptor is null)
+            {
+                outcomeLabel.Text = chinese ? "选项已经失效，请重新选择。" : "The option is stale; choose it again.";
+                return;
+            }
+
+            if (descriptor.Capability.Kind == RandomForeseerAdapter.EventPlanningKind.SpecialCombat)
             {
                 // Combat-entry branches: never enter combat — predict the
                 // victory drops instead (basic rewards + resume effects).
                 outcomeLabel.Text = chinese ? "结算胜利掉落…" : "Resolving victory drops…";
+                executeButton.Disabled = true;
                 _ = Task.Run(() =>
                 {
                     var drops = adapter.PredictEventCombatVictoryDrops(
-                        player, canonical, choice.OptionIndex);
+                        player, canonical, requestedOptionIndex);
                     SeedOracleDispatcher.Post(() =>
                     {
+                        var liveChoice = RoutePlanTracker.Current?.Entries
+                            .FirstOrDefault(candidate => candidate.Coord == entry.Coord)?.Choice
+                            as RoutePlanChoice.EventOption;
+                        if (liveChoice?.OptionIndex != requestedOptionIndex)
+                            return;
+                        ApplyCapability(requestedOptionIndex);
                         outcomeLabel.Text = drops.Error is not null
                             ? $"胜利掉落预测失败：{drops.Error}"
                             : $"胜利掉落（若进入并获胜）：{string.Join("；", drops.Labels)}"
-                              + (drops.Rewards is { HasValue: true } rewards
-                                  ? $"　基础：金币{rewards.Value!.Gold} 卡组{rewards.Value.CardRewards.Count}组"
+                              + (drops.Rewards is { HasValue: true } resolvedRewards
+                                  ? $"　基础：金币{resolvedRewards.Value!.Gold} 卡组{resolvedRewards.Value.CardRewards.Count}组"
                                   : string.Empty);
                     });
                 });
                 return;
             }
 
+            if (descriptor.Capability.Kind != RandomForeseerAdapter.EventPlanningKind.Exact)
+            {
+                ApplyCapability(requestedOptionIndex);
+                return;
+            }
+
             outcomeLabel.Text = chinese ? "执行中…" : "Simulating…";
+            executeButton.Disabled = true;
             _ = Task.Run(async () =>
             {
                 var outcome = await adapter.ExecuteEventOptionAsync(
-                    player, canonical, choice.OptionIndex, null, chain?.Deck);
+                    player, canonical, requestedOptionIndex, null, chain?.Deck);
                 SeedOracleDispatcher.Post(() =>
                 {
+                    var liveChoice = RoutePlanTracker.Current?.Entries
+                        .FirstOrDefault(candidate => candidate.Coord == entry.Coord)?.Choice
+                        as RoutePlanChoice.EventOption;
+                    if (liveChoice?.OptionIndex != requestedOptionIndex)
+                        return;
                     if (outcome.Ok)
                     {
                         _eventOutcomes[entry.Coord] = outcome;
                     }
 
+                    ApplyCapability(requestedOptionIndex);
                     outcomeLabel.Text = DescribeOutcomeText(outcome, chinese);
                     RefreshLedgerOnly();
                 });
             });
         };
+        choiceBox.AddChild(capabilityLabel);
         choiceBox.AddChild(executeButton);
         choiceBox.AddChild(outcomeLabel);
+        var initialChoice = RoutePlanTracker.Current?.Entries
+            .FirstOrDefault(candidate => candidate.Coord == entry.Coord)?.Choice
+            as RoutePlanChoice.EventOption;
+        ApplyCapability(initialChoice?.OptionIndex ?? -1);
+        return ApplyCapability;
     }
 
     private string DescribeEventOutcome(MapCoord coord, bool chinese)
