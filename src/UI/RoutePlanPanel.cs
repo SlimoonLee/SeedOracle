@@ -390,7 +390,7 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
         box.AddChild(deltaLabel);
 
         if (variant is not null)
-            BuildChoiceControls(box, run, plan, entry, variant, player, chinese, deltaLabel);
+            BuildChoiceControls(box, run, plan, entry, variant, player, chinese, deltaLabel, _lastChain);
         return row;
     }
 
@@ -402,7 +402,8 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
         RouteVariantForecast variant,
         Player? player,
         bool chinese,
-        Label deltaLabel)
+        Label deltaLabel,
+        RoutePlanForecastService.PlanChain? chain)
     {
         var choiceBox = new VBoxContainer { MouseFilter = MouseFilterEnum.Pass };
         choiceBox.AddThemeConstantOverride(ThemeConstants.BoxContainer.Separation, 2);
@@ -678,7 +679,7 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                     variant.Event.Id.Entry,
                     entry,
                     player,
-                    chinese);
+                    chinese, _lastChain);
             }
         }
         else if (variant.RoomType == RoomType.Treasure && variant.Treasure is { HasValue: true } treasure)
@@ -741,14 +742,42 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
             if (restChoice is { OptionId: "SMITH" or "COOK" or "CLONE" or "MEND" }
                 && player is not null)
             {
-                var deck = (restChoice.OptionId switch
+                // Source the target list from the PROJECTED deck when a plan
+                // chain exists: cards planned earlier (picked/added) are
+                // visible to later rest-site choices, and cooked cards are
+                // already gone. Live deck is the fallback.
+                IReadOnlyList<(ModelId Id, string Title, bool Upgraded, bool IsUpgradable, bool IsRemovable)> deck;
+                if (chain is not null)
+                {
+                    deck = chain.Deck
+                        .Select(projected =>
+                        {
+                            var model = ModelDb.AllCards.FirstOrDefault(candidate =>
+                                candidate.Id.Entry == projected.Id.Entry);
+                            return (projected.Id,
+                                projected.Title,
+                                projected.Upgraded,
+                                model?.IsUpgradable ?? false,
+                                model?.IsRemovable ?? true);
+                        })
+                        .ToList();
+                }
+                else
+                {
+                    deck = player.Deck.Cards
+                        .Select(card => ((ModelId)card.Id, card.Title, card.IsUpgraded, card.IsUpgradable, card.IsRemovable))
+                        .ToList();
+                }
+
+                var filtered = restChoice.OptionId switch
                 {
                     // Eternal cards are neither removable nor upgradable;
-                    // forging additionally excludes already-upgraded cards.
-                    "SMITH" => player.Deck.Cards.Where(card => card.IsUpgradable),
-                    "COOK" => player.Deck.Cards.Where(card => card.IsRemovable),
-                    _ => player.Deck.Cards.AsEnumerable()
-                }).ToList();
+                    // forging excludes already-upgraded cards (IsUpgradable
+                    // alone governs infinite-upgrade cards like Searing Blow).
+                    "SMITH" => deck.Where(card => card.IsUpgradable && !card.Upgraded).ToList(),
+                    "COOK" => deck.Where(card => card.IsRemovable).ToList(),
+                    _ => deck.ToList()
+                };
                 var target = new OptionButton
                 {
                     MouseFilter = MouseFilterEnum.Stop,
@@ -757,12 +786,12 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                 target.AddThemeFontSizeOverride("font_size", 16);
                 target.ApplyLocaleFontSubstitution(FontType.Regular, "font");
                 target.AddItem(chinese ? "选择目标牌…" : "Pick a card…");
-                foreach (var card in deck)
-                    target.AddItem($"{card.Title}{(card.IsUpgraded ? "+" : string.Empty)}");
+                foreach (var card in filtered)
+                    target.AddItem($"{card.Title}{(card.Upgraded ? "+" : string.Empty)}");
                 var current = restChoice.TargetCard;
                 var selectedIndex = current is null
                     ? 0
-                    : deck.FindIndex(card => card.Id == current) + 1;
+                    : filtered.FindIndex(card => card.Id == current) + 1;
                 target.Select(selectedIndex < 0 ? 0 : selectedIndex);
                 target.ItemSelected += (OptionButton.ItemSelectedEventHandler)(index2 =>
                 {
@@ -770,7 +799,7 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                         return;
                     Update(new RoutePlanChoice.RestSite(
                         restChoice.OptionId,
-                        deck[(int)index2 - 1].Id));
+                        filtered[(int)index2 - 1].Id));
                 });
                 choiceBox.AddChild(target);
             }
@@ -795,7 +824,8 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
         string eventName,
         RoutePlanEntry entry,
         Player? player,
-        bool chinese)
+        bool chinese,
+        RoutePlanForecastService.PlanChain? chain)
     {
         if (ResolveCanonicalEvent(eventName) is not { } canonical
             || Entry.RandomForeseer is not RandomForeseerAdapter adapter
@@ -852,7 +882,7 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
             _ = Task.Run(async () =>
             {
                 var outcome = await adapter.ExecuteEventOptionAsync(
-                    player, canonical, choice.OptionIndex, null);
+                    player, canonical, choice.OptionIndex, null, chain?.Deck);
                 SeedOracleDispatcher.Post(() =>
                 {
                     if (outcome.Ok)
@@ -1223,7 +1253,7 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
         var potionMax = player.MaxPotionCount;
 
         var gold = chain?.Gold ?? player.Gold;
-        var cards = player.Deck.Cards.Count;
+        var cards = chain?.Deck.Count ?? player.Deck.Cards.Count;
         var relics = player.Relics.Count;
         var potions = chain?.PotionSlots.Count ?? player.Potions.Count();
         var hp = player.Creature.CurrentHp;
@@ -1258,7 +1288,7 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                 }
                 if (chain is null)
                     gold += estimate.Gold;
-                cards += estimate.Cards;
+                if (chain is null) cards += estimate.Cards;
                 relics += estimate.Relics;
                 if (chain is null) potions += estimate.Potions;
                 hp += estimate.Hp;

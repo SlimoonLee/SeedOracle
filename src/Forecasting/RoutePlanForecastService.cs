@@ -30,6 +30,8 @@ internal sealed class RoutePlanForecastService(RandomForeseerAdapter randomFores
         public string? Note { get; set; }
     }
 
+    internal sealed record ProjectedCard(ModelId Id, string Title, bool Upgraded);
+
     internal sealed class PlanChain
     {
         public required RandomForeseerAdapter.RouteRewardState State { get; init; }
@@ -38,6 +40,11 @@ internal sealed class RoutePlanForecastService(RandomForeseerAdapter randomFores
         /// <summary>Virtual potion slots threaded along the plan (by potion id);
         /// takes replace/evict per the recorded choice, never touching live state.</summary>
         public required List<ModelId> PotionSlots { get; init; }
+
+        /// <summary>Projected deck threaded along the plan: planned card
+        /// pickups add, forge upgrades, cook removals — downstream choices
+        /// (smith/cook pickers, later event decks) see this, not the live deck.</summary>
+        public required List<ProjectedCard> Deck { get; init; }
         public int Gold { get; set; }
     }
 
@@ -61,7 +68,10 @@ internal sealed class RoutePlanForecastService(RandomForeseerAdapter randomFores
         {
             State = state,
             Outcomes = new Dictionary<MapCoord, PlanNodeOutcome>(),
-            PotionSlots = player.Potions.Select(potion => potion.Id).ToList()
+            PotionSlots = player.Potions.Select(potion => potion.Id).ToList(),
+            Deck = player.Deck.Cards
+                .Select(card => new ProjectedCard(card.Id, card.Title, card.IsUpgraded))
+                .ToList()
         };
         var gold = player.Gold;
 
@@ -98,8 +108,32 @@ internal sealed class RoutePlanForecastService(RandomForeseerAdapter randomFores
                             RemoveRelicFromBags(state, relic.Id);
                     }
 
-                    if (entry.Choice is RoutePlanChoice.CardReward { Skip: false })
+                    if (entry.Choice is RoutePlanChoice.CardReward { Skip: false } cardPick)
+                    {
                         outcome.Note = "+1卡";
+                        // Thread the picked card into the projected deck so
+                        // later smith/cook targets and event decks see it.
+                        var flat = 0;
+                        var done = false;
+                        foreach (var bundle in rewards.CardRewards)
+                        {
+                            foreach (var card in bundle)
+                            {
+                                if (done)
+                                    break;
+                                if (flat == cardPick.CardIndex)
+                                {
+                                    chain.Deck.Add(new ProjectedCard(card.Id, card.Name, false));
+                                    done = true;
+                                }
+
+                                flat++;
+                            }
+
+                            if (done)
+                                break;
+                        }
+                    }
 
                     ApplyPotionTakes(
                         chain,
@@ -163,7 +197,7 @@ internal sealed class RoutePlanForecastService(RandomForeseerAdapter randomFores
                 }
                 case RoomType.RestSite:
                 {
-                    ApplyRestChoice(state, entry.Choice, outcome, ref gold);
+                    ApplyRestChoice(chain, potionMax, entry.Choice, outcome, ref gold);
                     break;
                 }
             }
@@ -176,11 +210,13 @@ internal sealed class RoutePlanForecastService(RandomForeseerAdapter randomFores
     }
 
     private void ApplyRestChoice(
-        RandomForeseerAdapter.RouteRewardState state,
+        PlanChain chain,
+        int potionMax,
         RoutePlanChoice? choice,
         PlanNodeOutcome outcome,
         ref int gold)
     {
+        var state = chain.State;
         switch (choice)
         {
             case RoutePlanChoice.RestSite { OptionId: "DIG" }:
@@ -195,10 +231,36 @@ internal sealed class RoutePlanForecastService(RandomForeseerAdapter randomFores
                 break;
             }
             case RoutePlanChoice.RestSite { OptionId: "COOK" }:
-                outcome.Note = "烹饪：删除一张牌（卡组变化在 M3 状态线程中生效）";
+                if (choice is RoutePlanChoice.RestSite { TargetCard: { } cookId })
+                {
+                    var removed = chain.Deck.RemoveAll(card => card.Id == cookId);
+                    outcome.Note = removed > 0
+                        ? "烹饪：目标牌已从计划牌组移除"
+                        : "烹饪：目标牌不在计划牌组中";
+                }
+                else
+                {
+                    outcome.Note = "烹饪：未选目标牌";
+                }
                 break;
             case RoutePlanChoice.RestSite { OptionId: "SMITH" }:
-                outcome.Note = "锻造：升级所选牌";
+                if (choice is RoutePlanChoice.RestSite { TargetCard: { } smithId })
+                {
+                    var cardIndex = chain.Deck.FindIndex(card => card.Id == smithId);
+                    if (cardIndex >= 0 && !chain.Deck[cardIndex].Upgraded)
+                    {
+                        chain.Deck[cardIndex] = chain.Deck[cardIndex] with { Upgraded = true };
+                        outcome.Note = "锻造：目标牌已升级（计划牌组）";
+                    }
+                    else
+                    {
+                        outcome.Note = "锻造：目标牌不可升级或已升级";
+                    }
+                }
+                else
+                {
+                    outcome.Note = "锻造：未选目标牌";
+                }
                 break;
             case RoutePlanChoice.RestSite { OptionId: "LIFT" }:
                 outcome.Note = "举重：提升最大生命";

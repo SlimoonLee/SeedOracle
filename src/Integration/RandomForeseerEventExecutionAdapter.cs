@@ -101,7 +101,8 @@ internal sealed partial class RandomForeseerAdapter
         Player livePlayer,
         EventModel canonicalEvent,
         int optionIndex,
-        ModelId? plannedCardPick)
+        ModelId? plannedCardPick,
+        IReadOnlyList<RoutePlanForecastService.ProjectedCard>? projectedDeck = null)
     {
         var outcome = new EventExecutionOutcome();
         var entryName = canonicalEvent.GetType().Name;
@@ -121,6 +122,31 @@ internal sealed partial class RandomForeseerAdapter
                                ?? throw new InvalidOperationException(
                                    $"shadow snapshot lacks player {livePlayer.NetId}");
             RewriteShadowNetId(shadowPlayer);
+
+            if (projectedDeck is { Count: > 0 })
+            {
+                // Thread the plan's projected deck into the shadow player so
+                // the event's own card lists (removal pools, upgrade pools,
+                // selection grids) reflect planned pickups, removals, and
+                // upgrades instead of the live deck.
+                var playerSave = shadowPlayer.ToSerializable();
+                playerSave.Deck = projectedDeck
+                    .Select(projected =>
+                    {
+                        var model = ModelDb.AllCards.FirstOrDefault(candidate =>
+                            candidate.Id.Entry == projected.Id.Entry);
+                        if (model is null)
+                            return null;
+                        var card = model.ToMutable();
+                        if (projected.Upgraded && !card.IsUpgraded)
+                            CardCmd.Upgrade(card);
+                        return (CardModel?)card;
+                    })
+                    .OfType<CardModel>()
+                    .Select(card => card.ToSerializable())
+                    .ToList();
+                shadowPlayer.SyncWithSerializedPlayer(playerSave);
+            }
 
             // The proven initialization path (same as the prediction adapter):
             // BeginEvent is intentionally NOT used — it rejects canonical
