@@ -1,14 +1,14 @@
 # Seed Oracle 依赖能力审计
 
-审计基线：2026-09-04。本文记录当前 live 版本的实现边界。
+审计基线：2026-09-06。本文记录当前 live 版本的实现边界。
 
 ## 权威输入
 
 | 组件 | 本地版本 | 本地/源码证据 |
 |---|---:|---|
 | Slay the Spire 2 | `0.111.0` / `41cef1ea` | live `sts2.dll`、`sts2.xml` 与 `release_info.json` |
-| Random Foreseer | `0.13.10` / `a2410e46f4d4386e0a2221cc2942479caa242d85` | Workshop `3747531952/lib/0.13.10`；仓库 HEAD 与 build-info 一致 |
-| Combat Solver | Workshop `0.29.1` / `f63c57c`；本地扩展版 `0.29.5` 在该版本上保留并扩展 API | Workshop `3790899961` 保持未修改；本地 `feat/precombat-api` 构建部署到游戏 `mods/CombatSolver` |
+| Random Foreseer | `0.13.11` / `a8ccb72953b9d300a4b39c67c28b73aba1b5c445` | Workshop `3747531952/lib/0.13.11`；仓库 release tag 与 build-info 一致 |
+| Combat Solver | 作者主线 manifest `0.31.1` / `0552b33`，已合并 public API v5；带 API 的构建仍可能沿用 `0.31.1` manifest | `.reference/CombatSolver` 的 `origin/main` 与本地部署 DLL 均来自 `0552b33`；旧的 `v0.31.1` tag `6dcd698` 不含该接口 |
 
 审计顺序采用 live 游戏程序集、live Mod 程序集、与 live 提交完全一致的源码。反编译仅用于确认当前 `sts2.dll` 的实际实现。
 
@@ -40,7 +40,7 @@
 
 ## Random Foreseer 可复用入口
 
-RF `0.13.10` 的主要预测类是 `internal`。对地图商店聚合有用的签名包括：
+RF `0.13.11` 的主要预测类是 `internal`。对地图商店聚合有用的签名包括：
 
 - `RunPredictionContext(Player)`：克隆 `Rewards`、`Shops`、`Niche`、玩家 `RelicGrabBag`、卡牌/药水赔率；
 - `MerchantRestockPrediction.PredictCard(...)`：安全生成一张商店卡牌并执行 RF 已维护的卡牌 Hook Mirror；
@@ -62,16 +62,16 @@ RF 的事件选项预测原本只服务于已经进入的事件。Seed Oracle �
 
 ## Combat Solver 可复用入口
 
-Workshop CS `0.28.3` 只有 `CombatSolver.Entry` 与 Mirror 描述类型是 public。以下能力存在，但仍保持 `internal`：
+历史 Workshop CS `0.28.3` 只有 `CombatSolver.Entry` 与 Mirror 描述类型是 public。当前作者主线仍将以下求解器类型保持为 `internal`，仅通过 v5 契约暴露隔离的战前边界：
 
 - `CombatRootSnapshot.Capture(CombatState)`；
 - `IntentForecaster.Forecast(...)`；
 - `CombatSearchCoordinator.Solve(...)`；
 - `SolverResult` / `SolverOverlaySnapshot`。
 
-本地 `feat/precombat-api` 原型现为 `CombatSolver.Api.PreCombatForecastApi` v5。它没有尝试从未来 Encounter 手工拼装不完整 Root，而是把规范化完整跑局、Encounter、目标楼层/列坐标、节点类型和已确定的连续非战斗地图历史交给独立游戏进程；worker 精确恢复跑局、补记结构性路径历史并应用可选入战 HP 后，通过原生入口建立战斗，再复用上述内部 Root 与搜索管线。独立的 `SimulateAsync` 在精确恢复校验后才替换隔离战斗 RNG；状态接口只读返回 worker 进程、内存信息和可空空闲期限。
+作者主线中的 `CombatSolver.Api.PreCombatForecastApi` v5 已在合并提交 `0552b33` 中可用。它没有尝试从未来 Encounter 手工拼装不完整 Root，而是把规范化完整跑局、Encounter、目标楼层/列坐标、节点类型和已确定的连续非战斗地图历史交给独立游戏进程；worker 精确恢复跑局、补记结构性路径历史并应用可选入战 HP 后，通过原生入口建立战斗，再复用上述内部 Root 与搜索管线。独立的 `SimulateAsync` 在精确恢复校验后才替换隔离战斗 RNG；状态接口只读返回 worker 进程、内存信息和可空空闲期限。
 
-`CombatSolverAdapter` 直接依赖该编译期契约，并在启动时检查 `ApiVersion >= 5` 与 `IsAvailable`。在作者正式发布带 API 的版本前，当前 Seed Oracle 构建必须与本地 Combat Solver `0.29.5+` 成对使用；作者 Workshop `0.29.1` 本身不满足这个契约。
+`CombatSolverAdapter` 直接依赖该编译期契约，并在启动时检查 `ApiVersion >= 5` 与 `IsAvailable`。当前 Seed Oracle 构建应与作者主线 `0.31.1` 的 API 构建（合并提交 `0552b33` 或更新）成对使用；仅有旧 `v0.31.1` 标签内容的无 API 构建会保持不支持，不会退回到不安全的内部入口。
 
 ## 已确认的游戏行为
 

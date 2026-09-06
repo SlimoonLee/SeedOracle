@@ -681,6 +681,40 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                     player,
                     chinese, _lastChain);
             }
+            else if (variant.Event is not null)
+            {
+                // Deterministic events with no Random Foreseer content still
+                // have real, executable options (e.g. Abyssal Baths).
+                var canonical = ResolveCanonicalEvent(variant.Event.Id.Entry);
+                if (canonical is not null
+                    && player is not null
+                    && Entry.RandomForeseer is RandomForeseerAdapter execAdapter)
+                {
+                    var choices = execAdapter.EnumerateEventOptions(player, canonical);
+                    var select = new OptionButton
+                    {
+                        MouseFilter = MouseFilterEnum.Stop,
+                        FocusMode = FocusModeEnum.None
+                    };
+                    select.AddThemeFontSizeOverride("font_size", 17);
+                    select.ApplyLocaleFontSubstitution(FontType.Regular, "font");
+                    select.AddItem(chinese ? "事件选项：未选" : "Event: not chosen");
+                    foreach (var pair in choices)
+                        select.AddItem(pair.Title);
+                    var eventChoice = entry.Choice as RoutePlanChoice.EventOption;
+                    select.Select(eventChoice is null ? 0 : eventChoice.OptionIndex + 1);
+                    select.ItemSelected += (OptionButton.ItemSelectedEventHandler)(index =>
+                        Update(new RoutePlanChoice.EventOption((int)index - 1)));
+                    choiceBox.AddChild(select);
+
+                    AddEventExecutionControls(
+                        choiceBox,
+                        variant.Event.Id.Entry,
+                        entry,
+                        player,
+                        chinese, _lastChain);
+                }
+            }
         }
         else if (variant.RoomType == RoomType.Treasure && variant.Treasure is { HasValue: true } treasure)
         {
@@ -851,9 +885,9 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
         {
             // Read the choice fresh: the dropdown updates plan.Entries after
             // this control was built, so the captured record is stale.
-            var choice = RoutePlanTracker.Current?.Entries
-                .FirstOrDefault(candidate => candidate.Coord == entry.Coord)
-                .Choice as RoutePlanChoice.EventOption;
+            var currentEntry = RoutePlanTracker.Current?.Entries
+                .FirstOrDefault(candidate => candidate.Coord == entry.Coord);
+            var choice = currentEntry?.Choice as RoutePlanChoice.EventOption;
             if (choice is not { OptionIndex: >= 0 })
             {
                 outcomeLabel.Text = chinese ? "先选择一个事件选项。" : "Choose an option first.";

@@ -135,10 +135,7 @@ internal sealed partial class RandomForeseerAdapter
             (ulong)((long)shadowPlayer.RunState.Rng.Seed + playerSlot)
             + StringHelper.GetDeterministicHashCode(mutable.Id.Entry));
         mutable.CalculateVars();
-        var options = (IReadOnlyList<EventOption>?)GenerateInitialEventOptionsMethod.Invoke(mutable, null)
-                      ?? throw new InvalidOperationException(
-                          $"Event {mutable.Id} returned no initial options.");
-        SetEventStateMethod.Invoke(mutable, [mutable.InitialDescription, options]);
+        var options = GenerateAndSetInitialOptions(mutable, "content-prediction");
 
         var predictions = new List<EventOptionPredictionDetails>();
         foreach (var option in options.Where(candidate => !candidate.IsLocked))
@@ -161,6 +158,31 @@ internal sealed partial class RandomForeseerAdapter
         }
 
         return new EventContentDetails(predictions);
+    }
+
+    /// <summary>
+    /// EventModel.GenerateInitialOptionsWrapper only generates and returns the
+    /// options. CurrentOptions is populated by SetEventState, and RF 0.13.11
+    /// materializes the enumerable in its SetEventState prefix. Always use the
+    /// returned options as the input, then read CurrentOptions after the state
+    /// transition so option effects and RF predictors see the same objects.
+    /// </summary>
+    private static IReadOnlyList<EventOption> GenerateAndSetInitialOptions(
+        EventModel eventModel,
+        string operation)
+    {
+        var generated = (IReadOnlyList<EventOption>?)GenerateInitialEventOptionsMethod.Invoke(
+                             eventModel,
+                             null)
+                         ?? throw new InvalidOperationException(
+                             $"Event {eventModel.Id} returned no initial options.");
+        SetEventStateMethod.Invoke(eventModel, [eventModel.InitialDescription, generated]);
+        var current = eventModel.CurrentOptions;
+        var sharedObjects = generated.Count == current.Count
+                            && generated.Zip(current).All(pair => ReferenceEquals(pair.First, pair.Second));
+        Entry.Logger.Debug(
+            $"[EventInit] {operation} {eventModel.Id.Entry}: generated={generated.Count}, current={current.Count}, sharedOptions={sharedObjects}");
+        return current;
     }
 
     private static IReadOnlyList<ForecastItemDetails> BuildInitialOptionItems(

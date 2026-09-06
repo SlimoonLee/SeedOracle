@@ -1,10 +1,12 @@
 # Combat Solver 战前预测接入评估与原型结果
 
-原始评估对象：Combat Solver `0.28.3`，对应当时 Workshop live DLL 与提交 `57574c9b12f24db3508cd578c12749ad85edcc4e`。当前原型已将 API 改动重放到作者 `v0.29.1`（`f63c57c`）之上，本地版本为 `0.29.5`，分支仍为 `feat/precombat-api`。
+原始评估对象：Combat Solver `0.28.3`，对应当时 Workshop live DLL 与提交 `57574c9b12f24db3508cd578c12749ad85cc4e`。历史原型曾将 API 改动重放到作者 `v0.29.1`（`f63c57c`）之上；当前状态见下方更新。
+
+当前状态（2026-09-06）：PR #43 已合并到作者 `main`，合并提交 `0552b33` 的 manifest 为 `0.31.1` 并包含 public API v5。Seed Oracle `0.1.20` 已按该主线 API 构建；本文件中 `0.29.x` 的版本号和 runId 保留为历史验证记录，不代表当前依赖。
 
 ## 结论
 
-作者 Workshop `0.29.1` 仍没有 Seed Oracle 所需的 public API，也不适合从地图 Hover 直接调用内部入口。现有原型没有放宽这一结论，而是在本地 Combat Solver `0.29.5` 中提供 public API v5：完整战斗初始化和搜索放入静音、可复用的独立 headless 游戏进程，主进程只捕获、校验并展示不可变结果。主进程初始化时钉住本次会话实际载入的 Mod 文件，避免运行中工坊更新改变 worker 环境。Seed Oracle 打开面板和 Hover 都不会启动计算；玩家逐项选择确定路线或纯模拟样本。
+历史上作者 Workshop `0.29.1` 没有 Seed Oracle 所需的 public API；当前作者主线 `0552b33` 已提供 public API v5。完整战斗初始化和搜索放入静音、可复用的独立 headless 游戏进程，主进程只捕获、校验并展示不可变结果。主进程初始化时钉住本次会话实际载入的 Mod 文件，避免运行中工坊更新改变 worker 环境。Seed Oracle 打开面板和 Hover 都不会启动计算；玩家逐项选择确定路线或纯模拟样本。
 
 ## 已确认的限制
 

@@ -39,12 +39,12 @@ Seed Oracle 是《Slay the Spire 2》`0.111.0` 的路线信息前瞻 Mod。它�
 
 远端路线预测会在提示中注明条件：沿途事件选择、奖励选择、宝箱跳过、商店购买、补货和删牌若改变相关状态，后续结果也会随之改变。多人宝箱的投票结果同样属于条件分支。
 
-当前开发版使用 Combat Solver `feat/precombat-api` 分支提供的 public API v5。战斗会在独立 headless 游戏进程中初始化和求解，主进程调用前后核对完整跑局/RNG 状态令牌。确定路线 API 接收目标地图坐标和连续的非战斗路径历史，使目标 `TotalFloor`、怪物局部种子及地图相关开战状态一致；纯模拟 API 则在隔离快照校验之后替换样本战斗 RNG。隔离用户设置中的主音量、BGM、音效与环境音全部强制为零。远端确定路线数值仍是清楚标注的条件结果：沿途若拿牌、拿遗物、用药、购买、锻造或触发其他状态变化，应在实际选择后重新计算。
+当前版本使用 Combat Solver 作者主线 `0.31.1` 中已经合并的 public API v5（合并提交 `0552b33`）。战斗会在独立 headless 游戏进程中初始化和求解，主进程调用前后核对完整跑局/RNG 状态令牌。确定路线 API 接收目标地图坐标和连续的非战斗路径历史，使目标 `TotalFloor`、怪物局部种子及地图相关开战状态一致；纯模拟 API 则在隔离快照校验之后替换样本战斗 RNG。隔离用户设置中的主音量、BGM、音效与环境音全部强制为零。远端确定路线数值仍是清楚标注的条件结果：沿途若拿牌、拿遗物、用药、购买、锻造或触发其他状态变化，应在实际选择后重新计算。
 设计评估与验证边界见 [docs/combat-solver-precombat-assessment.md](docs/combat-solver-precombat-assessment.md)。
 
 ## 当前兼容性
 
-Seed Oracle `0.1.19` 需要 [SlimoonLee/CombatSolver](https://github.com/SlimoonLee/CombatSolver) 的 `upstream/precombat-api-rfc` 分支（本地 Mod 版本 `0.29.5`、public API v5）。[Torch1230/CombatSolver](https://github.com/Torch1230/CombatSolver) 的 `v0.29.1` 尚未包含该接口，不能直接替代这个扩展版本。
+Seed Oracle `0.1.20` 需要包含 public API v5 的 Combat Solver `0.31.1+`。该 API 已合并到 [Torch1230/CombatSolver](https://github.com/Torch1230/CombatSolver) 作者主线；当前可用构建为合并提交 `0552b33` 或其后版本。旧的无 API 工坊构建会被适配器安全标记为暂不支持，不能用于战前预测。
 
 ## 构建
 
@@ -59,8 +59,8 @@ dotnet build .\SeedOracle.csproj -c Release
 依赖：
 
 - STS2-RitsuLib `0.5.18+`
-- Random Foreseer `0.13.10+`
-- Combat Solver 本地扩展版 `0.29.5+`（基于作者 `v0.29.1`，必须包含 public API v5；作者原版目前不提供此接口）
+- Random Foreseer `0.13.11+`
+- Combat Solver `0.31.1+`（必须包含 public API v5；作者主线已合并该接口）
 
 依赖能力审计见 [docs/capability-audit.md](docs/capability-audit.md)。
 
@@ -69,7 +69,7 @@ dotnet build .\SeedOracle.csproj -c Release
 - [STS2-RitsuLib](https://github.com/BAKAOLC/STS2-RitsuLib)
 - [Random Foreseer](https://github.com/hotwords123/StS2.RandomForeseer)
 - [Combat Solver](https://github.com/Torch1230/CombatSolver)（作者原版）
-- [Combat Solver pre-combat API Fork](https://github.com/SlimoonLee/CombatSolver)（Seed Oracle 当前所需扩展）
+- [Combat Solver pre-combat API Fork](https://github.com/SlimoonLee/CombatSolver)（API 合并前的维护分支与审阅记录）
 
 ## 许可证
 

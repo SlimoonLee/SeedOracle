@@ -3,7 +3,7 @@
   "name": "Seed Oracle / 种子先知",
   "author": "slimoon",
   "description": "在路线选择前显示由当前跑局状态能够确定的未来信息，并标注预测准确度。",
-  "version": "0.1.19",
+  "version": "0.1.20",
   "has_pck": false,
   "has_dll": true,
   "affects_gameplay": false,
@@ -15,11 +15,11 @@
     },
     {
       "id": "RandomForeseer",
-      "min_version": "0.13.10"
+      "min_version": "0.13.11"
     },
     {
       "id": "CombatSolver",
-      "min_version": "0.29.5"
+      "min_version": "0.31.1"
     }
   ]
 }

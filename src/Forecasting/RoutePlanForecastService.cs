@@ -85,13 +85,23 @@ internal sealed class RoutePlanForecastService(RandomForeseerAdapter randomFores
             var roomType = RoutePlanPanelControl.RoomFromPointType(point.PointType);
             var outcome = new PlanNodeOutcome();
 
+            // Resolve the plan-matching worldline: it carries the real
+            // encounter (gold ranges, monster slots) and resolved rooms.
+            EncounterModel? nodeEncounter = null;
+            if (roomType is RoomType.Monster or RoomType.Elite or RoomType.Boss)
+            {
+                var exploration = RouteStateExplorer.Explore(run, point);
+                var worldlines = RouteWorldlinePredictor.Predict(run, point, exploration.Paths);
+                nodeEncounter = MatchWorldlineEncounter(worldlines, allEntries, headIndex, index);
+            }
+
             switch (roomType)
             {
                 case RoomType.Monster:
                 case RoomType.Elite:
                 case RoomType.Boss:
                 {
-                    var rewards = randomForeseer.GenerateCombatRewardsForPlan(state, roomType);
+                    var rewards = randomForeseer.GenerateCombatRewardsForPlan(state, roomType, nodeEncounter);
                     outcome.CombatRewards = Forecast<CombatRewardDetails>.Branch(
                         rewards,
                         PredictionDependency.Rewards
@@ -316,6 +326,50 @@ internal sealed class RoutePlanForecastService(RandomForeseerAdapter randomFores
         if (dropped > 0)
             outcome.Note = (outcome.Note is null ? "" : outcome.Note + "；")
                            + $"药水槽已满，放弃 {dropped} 瓶";
+    }
+
+    /// <summary>
+    /// Picks the worldline whose route passes through the planned rooms
+    /// (head..index-1) in order — extras allowed only before the plan head —
+    /// and yields the target's real encounter model.
+    /// </summary>
+    private static EncounterModel? MatchWorldlineEncounter(
+        IReadOnlyList<RouteWorldline> worldlines,
+        IReadOnlyList<RoutePlanEntry> entries,
+        int headIndex,
+        int index)
+    {
+        foreach (var line in worldlines)
+        {
+            var coords = line.Route
+                .Select(choice => choice.Point.coord)
+                .ToArray();
+            var plannedIndex = headIndex;
+            var consuming = false;
+            var matched = true;
+            for (var coordIndex = 0; coordIndex < coords.Length; coordIndex++)
+            {
+                if (plannedIndex < index && coords[coordIndex] == entries[plannedIndex].Coord)
+                {
+                    consuming = true;
+                    plannedIndex++;
+                }
+                else if (!consuming)
+                {
+                    continue;
+                }
+                else
+                {
+                    matched = false;
+                    break;
+                }
+            }
+
+            if (matched && plannedIndex == index)
+                return line.TargetEncounter;
+        }
+
+        return null;
     }
 
     private void RemoveRelicFromBags(

@@ -24,10 +24,11 @@ namespace SeedOracle.Integration;
 /// <summary>
 /// Executes event options on a SERIALIZED SHADOW RUN for the route planner.
 /// Envelope (from docs/rng-audit-event-execution.md): the shadow player's
-/// NetId is rewritten so every IsMe/IsMine gate (profile writes, VFX) stays
-/// closed; NonInteractiveMode mutes audio; card-select prompts are answered
-/// by a scripted ICardSelector instead of the blocking modal; everything is
-/// wrapped by the caller in PredictionPurityGuard.
+/// IsMe/IsMine gates are closed by ShadowIsolationPatch while its original
+/// NetId remains available for history lookups; NonInteractiveMode mutes
+/// audio; card-select prompts are answered by a scripted ICardSelector
+/// instead of the blocking modal; everything is wrapped by the caller in
+/// PredictionPurityGuard.
 /// </summary>
 internal sealed partial class RandomForeseerAdapter
 {
@@ -40,10 +41,21 @@ internal sealed partial class RandomForeseerAdapter
         "Amalgamator",       // option effects await frame/UI signals: sync-block deadlocks
     };
 
-    /// <summary>Option-level denies: options that open reward screens or
-    /// kill-confirmation popups; TextKey substring match.</summary>
+    /// <summary>Option-level denies: options that open reward/card-selection
+    /// screens or kill-confirmation popups; TextKey substring match.</summary>
     private static readonly (string Event, string Key)[] OptionDenyList =
     [
+        // These options enter RewardsCmd.OfferCustom or a native card grid.
+        // The serialized shadow has no multiplayer reward state or UI modal;
+        // keep the boundary explicit instead of letting the native path throw.
+        ("DenseVegetation", "INITIAL.options.REST"),
+        ("Wellspring", "INITIAL.options.BOTTLE"),
+        ("DrowningBeacon", "INITIAL.options.BOTTLE"),
+        ("ColorfulPhilosophers", "INITIAL.options."),
+        ("PotionCourier", "INITIAL.options."),
+        ("BrainLeech", "INITIAL.options.SHARE_KNOWLEDGE"),
+        ("RoomFullOfCheese", "INITIAL.options.GORGE"),
+        ("TheLegendsWereTrue", "INITIAL.options.SLOWLY_FIND_AN_EXIT"),
         ("BrainLeech", "RIP"),
         ("DenseVegetation", "FIGHT"),
         ("WhisperingHollow", "GOLD"),
@@ -153,21 +165,14 @@ internal sealed partial class RandomForeseerAdapter
                 shadowPlayer.SyncWithSerializedPlayer(playerSave);
             }
 
-            // The proven initialization path (same as the prediction adapter):
-            // BeginEvent is intentionally NOT used — it rejects canonical
-            // clones whose Owner was carried over by the shallow copy.
-            var shadowEvent = canonicalEvent.ToMutable();
-            shadowEvent.Owner = shadowPlayer;
-            var playerSlot = shadowEvent.IsShared
-                ? 0
-                : shadowPlayer.RunState.GetPlayerSlotIndex(shadowPlayer);
-            shadowEvent.Rng = new MegaCrit.Sts2.Core.Random.Rng(
-                (ulong)((long)shadowPlayer.RunState.Rng.Seed + playerSlot)
-                + StringHelper.GetDeterministicHashCode(shadowEvent.Id.Entry));
-            shadowEvent.CalculateVars();
-            var options = (IReadOnlyList<EventOption>?)GenerateInitialEventOptionsMethod.Invoke(shadowEvent, null)
-                          ?? throw new InvalidOperationException(
-                              $"Event {shadowEvent.Id} returned no initial options.");
+            // RF event hooks can consult their per-run prediction state while
+            // initial options are generated. Keep the context alive through
+            // the option execution as well as initialization.
+            var routeState = CreateRouteRewardState(shadowPlayer);
+            InitShadowEventOn(shadowRun, shadowPlayer, canonicalEvent, out var shadowEvent);
+            GC.KeepAlive(routeState);
+
+            var options = shadowEvent.CurrentOptions;
             if (optionIndex >= options.Count)
             {
                 outcome.OptionOutOfRange = true;
@@ -178,13 +183,13 @@ internal sealed partial class RandomForeseerAdapter
                 outcome.DenyReason = "该选项会打开界面/进入特殊战斗，无法无头预演";
                 return outcome;
             }
-            SetEventStateMethod.Invoke(shadowEvent, [shadowEvent.InitialDescription, options]);
             var before = Capture(shadowPlayer);
 
             using (CardSelectCmd.PushSelector(new ScriptedCardSelector(plannedCardPick)))
             {
                 await options[optionIndex].Chosen();
             }
+            GC.KeepAlive(routeState);
 
             var after = Capture(shadowPlayer);
             FillDeltas(outcome, before, after);
@@ -201,6 +206,7 @@ internal sealed partial class RandomForeseerAdapter
         {
             var root = exception.GetBaseException();
             outcome.DenyReason = $"无头执行失败，已降级：{root.Message}";
+            Entry.Logger.Error($"[Smoke] exec {entryName}[{optionIndex}] failed: {exception}");
             return outcome;
         }
         finally
@@ -276,6 +282,81 @@ internal sealed partial class RandomForeseerAdapter
         public List<string> Rows { get; init; } = [];
         public List<string> Legend { get; init; } = [];
         public string? Error { get; init; }
+    }
+
+    /// <summary>
+    /// Enumerates an event's initial options (index + localized title) through
+    /// the same shadow initialization the executor uses — for events outside
+    /// Random Foreseer's registry whose options are deterministic.
+    /// </summary>
+    internal IReadOnlyList<(int Index, string Title)> EnumerateEventOptions(
+        Player livePlayer,
+        EventModel canonical)
+    {
+        try
+        {
+            _ = InitializeShadowEvent(livePlayer, canonical, out var shadowEvent);
+            return shadowEvent.CurrentOptions
+                .Select((option, index) => (index, option.Title.GetFormattedText()))
+                .ToList();
+        }
+        catch (Exception exception)
+        {
+            Entry.Logger.Error($"[Smoke] option enumeration failed: {exception.Message}");
+            return [];
+        }
+        finally
+        {
+            ExitShadowIsolation();
+        }
+    }
+
+    /// <summary>
+    /// Shared shadow-event initialization: snapshot, shadow player with IsMe
+    /// isolation (real NetId preserved for history lookups), mutable clone,
+    /// deterministic event RNG, CalculateVars, initial options.
+    /// </summary>
+    private RunState InitializeShadowEvent(
+        Player livePlayer,
+        EventModel canonical,
+        out EventModel shadowEvent)
+    {
+        var (shadowRun, shadowPlayer) = PrepareShadowRun(livePlayer);
+        ActiveShadowPlayer = shadowPlayer;
+        var routeState = CreateRouteRewardState(shadowPlayer);
+        InitShadowEventOn(shadowRun, shadowPlayer, canonical, out shadowEvent);
+        GC.KeepAlive(routeState);
+        return shadowRun;
+    }
+
+    private static (RunState ShadowRun, Player ShadowPlayer) PrepareShadowRun(Player livePlayer)
+    {
+        ActiveShadowPlayer = null;
+        var snapshot = RunManager.Instance.ToSave(preFinishedRoom: null);
+        var shadowRun = RunState.FromSerializable(snapshot);
+        var shadowPlayer = shadowRun.GetPlayer(livePlayer.NetId)
+                           ?? throw new InvalidOperationException("shadow snapshot lacks player");
+        return (shadowRun, shadowPlayer);
+    }
+
+    private void InitShadowEventOn(
+        RunState shadowRun,
+        Player shadowPlayer,
+        EventModel canonical,
+        out EventModel shadowEvent)
+    {
+        _ = shadowRun;
+
+        shadowEvent = canonical.ToMutable();
+        shadowEvent.Owner = shadowPlayer;
+        var playerSlot = shadowEvent.IsShared
+            ? 0
+            : shadowPlayer.RunState.GetPlayerSlotIndex(shadowPlayer);
+        shadowEvent.Rng = new MegaCrit.Sts2.Core.Random.Rng(
+            (ulong)((long)shadowPlayer.RunState.Rng.Seed + playerSlot)
+            + StringHelper.GetDeterministicHashCode(shadowEvent.Id.Entry));
+        shadowEvent.CalculateVars();
+        _ = GenerateAndSetInitialOptions(shadowEvent, "shadow-execution");
     }
 
     internal CrystalSphereLayout PredictCrystalSphereLayout(

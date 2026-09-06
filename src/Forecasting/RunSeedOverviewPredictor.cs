@@ -188,10 +188,10 @@ internal static class RunSeedOverviewPredictor
     {
         var simulation = CreateAncientSimulation(snapshot, playerId, actIndex);
         var generated = (IReadOnlyList<EventOption>?)GenerateInitialEventOptionsMethod.Invoke(
-            simulation.Ancient,
-            null)
-                        ?? throw new InvalidOperationException(
-                            $"Ancient {simulation.Ancient.Id} returned no initial options.");
+                             simulation.Ancient,
+                             null)
+                         ?? throw new InvalidOperationException(
+                             $"Ancient {simulation.Ancient.Id} returned no initial options.");
         var options = generated
             .Where(option => !option.IsProceed)
             .Select(SummarizeOption)
@@ -384,11 +384,12 @@ internal static class RunSeedOverviewPredictor
                 player.NetId,
                 actIndex,
                 ancient);
-            var actual = ((IReadOnlyList<EventOption>?)GenerateInitialEventOptionsMethod.Invoke(
-                    actualSimulation.Ancient,
-                    null)
-                          ?? throw new InvalidOperationException(
-                              $"Ancient {ancient.Id} returned no options during validation."))
+            var actualOptions = (IReadOnlyList<EventOption>?)GenerateInitialEventOptionsMethod.Invoke(
+                                    actualSimulation.Ancient,
+                                    null)
+                                ?? throw new InvalidOperationException(
+                                    $"Ancient {ancient.Id} returned no options during validation.");
+            var actual = actualOptions
                 .Where(option => !option.IsProceed)
                 .Select(option => SummarizeOption(option).Title)
                 .ToArray();

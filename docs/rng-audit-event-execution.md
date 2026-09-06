@@ -1,8 +1,8 @@
 # 事件选项执行 RNG 风险审计（M3 前置）
 
-审计基线：2026-09-06，游戏 v0.111.0（`.reference/sts2-v0.111.0`），Random Foreseer 0.13.10。
+审计基线：2026-09-06，游戏 v0.111.0（`.reference/sts2-v0.111.0`），Random Foreseer 0.13.11。
 结论：**存在干净的模型级执行路径，可以安全执行影子跑局上的事件选项**，但必须落实 4 项围栏
-（NetId 改写、NonInteractiveMode 包裹、选择器注入、黑名单），详见下文。
+（影子对象的 `IsMe/IsMine` 隔离、`NonInteractiveMode` 包裹、选择器注入、显式降级表），详见下文。
 
 ## 1. 执行路径（反编译确认）
 
@@ -11,11 +11,12 @@
 各事件 `GenerateInitialOptions` 里构建的 `OnChosen` 闭包 → `*Cmd` 静态帮助类。
 
 **绕开 UI/命令管线的模型级路径存在且就是同步器做的事去掉消息**：
-1. `ModelDb.Event<T>()`（或 `SaveUtil.EventOrDeprecated(id)`）→ `ToMutable()`；
-2. `await ev.BeginEvent(shadowPlayer, combatSynchronizer: null, isPreFinished: false)`
-   ——确定性播种 `ev.Rng`（`EventModel.cs:234`），跑 `CalculateVars`、生成 `CurrentOptions`；
-3. `await ev.CurrentOptions[i].Chosen()`；多页事件每步后重读 `CurrentOptions`（次级选项机制
-   = `SetEventState` 替换选项列表），至 `IsFinished`。
+1. `RunManager.ToSave` → `RunState.FromSerializable` 建立独立影子跑局，并保留影子玩家的原始 `NetId`；
+2. 影子玩家进入 `ActiveShadowPlayer` 隔离后，事件 `ToMutable()`，按 `BeginEvent` 的公式设置事件局部
+   RNG，执行 `CalculateVars`，调用 `GenerateInitialOptionsWrapper`，再用返回的同一组选项调用
+   `SetEventState`；
+3. 在 `CardSelectCmd` 选择器栈中注入脚本选择器后执行 `await ev.CurrentOptions[i].Chosen()`；多页事件
+   每步后重读 `CurrentOptions`（次级选项机制 = `SetEventState` 替换选项列表），至 `IsFinished`。
 不经过任何 `*Cmd` 命令/网络消息——事件没有专用 Command 类，管线只有 3 个网络消息且都在
 UI/同步器层。
 
@@ -41,8 +42,8 @@ UI/同步器层。
 | 移除卡 | 卡组 | 安全 |
 | 获得遗物/药水（含 GrabBag 拉取） | 双遗物袋、槽位 | 安全（消耗影子 Rewards 流） |
 | `SfxCmd.Play` 音效 | **无条件解引用** NAudioManager | `NonInteractiveMode.AutoSlayerCheck=()=>true` 静音（测试注入点） |
-| VFX 分支（伤害数字/升级/获得卡） | `NRun.Instance.GlobalUi` 等 | 全部 `LocalContext.IsMe/IsMine` 门控 → **NetId 围栏**后不触发 |
-| `SaveManager.Mark{Card,Potion,Relic}AsSeen` | **持久档案** Discovered* | 同上 IsMe 门控 → NetId 围栏覆盖 |
+| VFX 分支（伤害数字/升级/获得卡） | `NRun.Instance.GlobalUi` 等 | 全部 `LocalContext.IsMe/IsMine` 门控 → **影子对象隔离**后不触发 |
+| `SaveManager.Mark{Card,Potion,Relic}AsSeen` | **持久档案** Discovered* | 同上 IsMe 门控 → 影子对象隔离覆盖 |
 | `CardSelectCmd` 选牌界面 | 阻塞模态 + 远程选择等待 | **选择器注入**：游戏自带 `CardSelectCmd.Selector/LocalSelector` 注入栈，压入返回用户计划选择的 `ICardSelector` |
 | `RewardsCmd.Offer` 奖励界面 | 开奖励 UI | **v1 黑名单**；待查是否存在奖励注入点后升级 |
 | `EnterCombatWithoutExitingEvent` | **要求 IsShared 否则抛**、需要 combatSynchronizer、换场景、push live 房间栈 | **不上战场**：不真实执行；胜利掉落按「奖励预测 + Resume 效果」计算（见 §4a） |
@@ -77,34 +78,37 @@ ToReward/Populate 序列只消费 Rewards 流。两者都可影子重放（Predi
    「若完成占卜」。
 玩家在真实事件里带着全知点位游玩；占卜次数/窗口策略仍由玩家自主决定。
 
-### 关键新发现：影子 NetId 必须改写
-`RunState.FromSerializable` 保留玩家 NetId → 影子玩家 `LocalContext.IsMe == true` →
-上述 IsMe/IsMine 门（档案写入、VFX、伤害数字）**全部放行**，会污染本地成就档案并触碰
-`NRun.Instance.GlobalUi`。**围栏**：影子化后立刻把影子玩家 NetId 改写为哨兵值（影子内部
-查找改用槽位/引用，不用 NetId）；执行结束影子整体丢弃。
+### 关键实现：影子对象隔离而不是改写 NetId
+`RunState.FromSerializable` 保留玩家 NetId，保证事件效果内部按 NetId 查找历史时仍能命中；同时
+`ActiveShadowPlayer` 期间对影子玩家、Creature、Card、Potion、Relic 和 Event 的
+`LocalContext.IsMe/IsMine` 结果统一压为 `false`。这样档案写入、VFX 和全局 UI 分支不会触发，执行结束后
+整体丢弃影子跑局。影子内部查找继续使用槽位或对象引用。
 
 ## 4. 31 类事件分级
 
-- **黑名单（仅剩）**：`WarHistorianRepy` 之外不存在的战斗外硬阻塞（无）。原战斗类
-  （`BattlewornDummy`、`DenseVegetation(REST→FIGHT)`、`PunchOff(FIGHT)`）与水晶球改按
-  §4a/§4b 方案处理。计划面板对战斗分支标注「进入特殊战斗，掉落为胜利预测」；水晶球给
-  完整点位视图。
-- **需奖励界面注入（v1 降级）**：`BrainLeech(RIP)`、`ColorfulPhilosophers`、
-  `PotionCourier`、`TheFutureOfPotions`、`WhisperingHollow(GOLD)`、`WarHistorianRepy`、
-  `BattlewornDummy` 的战后奖励。等找到 `RewardsCmd.Offer` 的注入/桩点后升级为可执行。
+- **事件级黑名单**：`CrystalSphere`、`BattlewornDummy`、`PunchOff`、`Amalgamator`。
+  前三者会开小游戏/特殊战斗或换场景，`Amalgamator` 的效果会等待 UI 帧；计划面板分别走
+  水晶球点位和战斗掉落预测，其他情况明确降级。
+- **需奖励/卡牌网格界面注入（v1 降级）**：`DenseVegetation(REST)`、`Wellspring(BOTTLE)`、
+  `DrowningBeacon(BOTTLE)`、`ColorfulPhilosophers`、`PotionCourier`、`BrainLeech(SHARE_KNOWLEDGE)`、
+  `RoomFullOfCheese(GORGE)`、`TheLegendsWereTrue(SLOWLY_FIND_AN_EXIT)`，以及
+  `BrainLeech(RIP)`、`WhisperingHollow(GOLD)`、`WarHistorianRepy` 等已有奖励界面分支。
+  这些选项会进入原生 `RewardsCmd.OfferCustom` 或卡牌网格选择器；当前显式降级，避免在无头影子中触发
+  `RewardsSetSynchronizer`/选择界面异常。
 - **可执行（白名单）**：其余全部，含多页/循环次级选项——`DollRoom`、`SlipperyBridge(HOLD_ON
   循环)`、`EndlessConveyor(GRAB 循环)`、`TabletOfTruth(DECIPHER 递进)`、`Trial(两段)`、
   `TinkerTime(两段)`、`RoundTeaParty`、选牌类 `AromaOfChaos`、`DoorsOfLightAndDark`、
   `LuminousChoir`、`MorphicGrove`、`Symbiote`、`Wellspring(BATHE)`、`WhisperingHollow(HUG)`、
-  `RoomFullOfCheese`、`BrainLeech(SHARE_KNOWLEDGE)`、`WelcomeToWongos`、`RanwidTheElder`、
+  `RoomFullOfCheese(SEARCH)`、`WelcomeToWongos`、`RanwidTheElder`、
   `Reflections`、`ThisOrThat`、`UnrestSite`、`TrashHeap`、`InfestedAutomaton`、
-  `TheLegendsWereTrue`、`SlipperyBridge(OVERCOME)` 等。
+  `TheLegendsWereTrue(NAB_THE_MAP)`、`SlipperyBridge(OVERCOME)` 等；上方“需奖励/卡牌网格界面注入”
+  中列出的选项不在白名单内。
   选牌选项的「5 选 1 不可跳 / 3 选 1 可跳」语义来自选项构造参数（`Cancelable=false` 等），
   计划子面板直接按执行结果渲染。
 
 ## 5. 运行时围栏（实现时逐条落实）
 
-1. 影子化后改写影子玩家 NetId（哨兵值）；影子内查找用槽位。
+1. 影子化后设置 `ActiveShadowPlayer`，对影子对象关闭 `IsMe/IsMine`；保留 NetId 供历史查找。
 2. 执行全程 `NonInteractiveMode.AutoSlayerCheck = () => true`（finally 还原）。
 3. `CardSelectCmd.Selector` 压入确定性 `ICardSelector`（返回计划面板里用户点选的牌）。
 4. 全程包 `PredictionPurityGuard` + live 指纹（`run_rng`/档案外所有段）——任何 live 漂移抛异常。

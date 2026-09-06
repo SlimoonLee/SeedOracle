@@ -154,8 +154,11 @@ internal sealed partial class RandomForeseerAdapter
         }
     }
 
-    internal CombatRewardDetails GenerateCombatRewardsForPlan(RouteRewardState state, RoomType roomType) =>
-        GenerateCombatRewards(state, roomType, encounter: null);
+    internal CombatRewardDetails GenerateCombatRewardsForPlan(
+        RouteRewardState state,
+        RoomType roomType,
+        EncounterModel? encounter) =>
+        GenerateCombatRewards(state, roomType, encounter);
 
     internal TreasureRoomDetails GenerateTreasureRoomForPlan(RouteRewardState state) =>
         GenerateTreasureRoom(state, isPriorRoom: false);
