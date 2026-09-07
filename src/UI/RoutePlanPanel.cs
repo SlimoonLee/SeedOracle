@@ -14,7 +14,6 @@ using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.addons.mega_text;
 using SeedOracle.Forecasting;
-using SeedOracle.Integration;
 using SeedOracle.Validation;
 
 namespace SeedOracle.UI;
@@ -30,9 +29,11 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
     private readonly ScrollContainer _scroll;
     private NMapScreen? _screen;
     private RoutePlanForecastService? _planForecasts;
+    private readonly PlanningEventPredictionService _planEventPredictions = new();
     private RunState? _lastRun;
     private RoutePlanForecastService.PlanChain? _lastChain;
     private string? _stateToken;
+    private long _planRevision;
 
     public RoutePlanPanelControl()
     {
@@ -202,6 +203,7 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
 
     public void RefreshPlan()
     {
+        _planRevision++;
         var screen = _screen;
         if (screen is null || !GodotObject.IsInstanceValid(screen))
             return;
@@ -219,17 +221,18 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
         var player = LocalContext.GetMe(run) ?? run.Players.FirstOrDefault();
         if (plan is null)
         {
+            _eventOutcomes.Clear();
             _ledger.Text = FormatCurrentResources(player, chinese);
             return;
         }
 
+        PruneEventOutcomes(plan);
+
         _lastRun = run;
         _lastChain = null;
-        if (plan.Phase == RoutePlanPhase.Active
-            && player is not null
-            && Entry.RandomForeseer is RandomForeseerAdapter adapter)
+        if (plan.Phase == RoutePlanPhase.Active && player is not null)
         {
-            _planForecasts ??= new RoutePlanForecastService(adapter);
+            _planForecasts ??= new RoutePlanForecastService(new PlanningPredictionService());
             try
             {
                 _lastChain = PredictionPurityGuard.Execute(
@@ -240,7 +243,8 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                         player,
                         plan.Entries,
                         entry => RoutePlanTracker.FindMapPoint(run, entry.Coord),
-                        plan));
+                        plan,
+                        PlannedEventOutcomes()));
             }
             catch (Exception exception)
             {
@@ -363,6 +367,14 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                 if (outcome.Note is not null)
                     deltaOverride = outcome.Note;
             }
+            if (deltaOverride is null
+                && chain?.BlockedAtEvent is { } blocked
+                && IsAfterPlanEntry(plan, blocked, entry.Coord))
+            {
+                deltaOverride = chinese
+                    ? "前置事件尚未完成；完成事件的后续选项后才会刷新这里"
+                    : "A previous event is unfinished; this node refreshes after its follow-up choices.";
+            }
         }
 
         var content = new RichTextLabel
@@ -407,24 +419,43 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
     {
         var choiceBox = new VBoxContainer { MouseFilter = MouseFilterEnum.Pass };
         choiceBox.AddThemeConstantOverride(ThemeConstants.BoxContainer.Separation, 2);
+        var planningPlayer = ResolvePlanningPlayer(chain, entry, player);
         box.AddChild(choiceBox);
 
         void Update(RoutePlanChoice choice)
         {
             var current = plan.Entries.FirstOrDefault(item =>
-                              !item.IsCompleted && item.Coord == entry.Coord)
-                          ?? entry;
+                               !item.IsCompleted && item.Coord == entry.Coord)
+                           ?? entry;
+
+            // Signals from controls that were visible before a refresh can
+            // arrive after a rest action was committed. Treat the recorded
+            // choice as authoritative; only the explicit empty choice from
+            // "Change rest choice" may clear it.
+            if (current.Choice is RoutePlanChoice.RestSite currentRest
+                && currentRest.IsCommitted
+                && choice is RoutePlanChoice.RestSite nextRest
+                && nextRest.OptionId.Length > 0)
+            {
+                return;
+            }
+
             InvalidateEventOutcomesFrom(plan, current);
             var updated = current with { Choice = choice };
             plan.Entries = plan.Entries
                 .Select(item => !item.IsCompleted && item.Coord == entry.Coord ? updated : item)
                 .ToArray();
             deltaLabel.Text = EstimatePlanDelta(updated, variant, player, chinese).Text;
-            RefreshLedgerOnly();
+            // Rebuild every row after a choice change. The upstream choice can
+            // change downstream gold, merchant stock, card filters, and event
+            // locks, so refreshing only the ledger leaves stale controls on
+            // screen.
+            RefreshPlan();
         }
 
         if (variant.Encounter is not null)
         {
+            var combatChoice = RoutePlanChoice.AsCombat(entry.Choice);
             if (variant.CombatRewards is { HasValue: true } combat)
             {
                 var bundles = combat.Value!.CardRewards;
@@ -447,20 +478,26 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                     select.AddItem(chinese ? "卡牌奖励：跳过" : "Card reward: skip");
                     foreach (var option in options)
                         select.AddItem(chinese ? $"拿 {option.Name}" : $"Take {option.Name}");
-                    var choice = entry.Choice as RoutePlanChoice.CardReward;
-                    select.Select(choice is { Skip: false }
+                    var cardChoice = combatChoice.CardRewardChoice;
+                    select.Select(cardChoice is { Skip: false }
                         ? 1 + options.FindIndex(option =>
-                              option.Bundle == choice.BundleIndex && option.Card == choice.CardIndex)
+                              option.Bundle == cardChoice.BundleIndex && option.Card == cardChoice.CardIndex)
                         : 0);
                     select.ItemSelected += (OptionButton.ItemSelectedEventHandler)(index =>
                     {
                         if (index <= 0)
-                            Update(new RoutePlanChoice.CardReward(0, 0, Skip: true));
+                            Update(combatChoice with
+                            {
+                                CardRewardChoice = new RoutePlanChoice.CardReward(0, 0, Skip: true)
+                            });
                         else
-                            Update(new RoutePlanChoice.CardReward(
-                                options[(int)index - 1].Bundle,
-                                options[(int)index - 1].Card,
-                                Skip: false));
+                            Update(combatChoice with
+                            {
+                                CardRewardChoice = new RoutePlanChoice.CardReward(
+                                    options[(int)index - 1].Bundle,
+                                    options[(int)index - 1].Card,
+                                    Skip: false)
+                            });
                     });
                     choiceBox.AddChild(select);
                 }
@@ -470,16 +507,28 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                     AddTakeToggle(
                         choiceBox,
                         chinese ? "拾取精英遗物" : "Take elite relic",
-                        entry.Choice is RoutePlanChoice.Relic { Take: false } ? false : true,
-                        take => Update(new RoutePlanChoice.Relic(take)));
+                        combatChoice.TakeRelic,
+                        take => Update(combatChoice with { TakeRelic = take }));
                 }
 
                 var rewardPotions = combat.Value!.Potions;
                 if (rewardPotions.Count > 0 && player is not null)
                 {
-                    var potionChoice = entry.Choice as RoutePlanChoice.Potion;
-                    var currentPotions = player.Potions.ToList();
-                    var freeSlots = player.MaxPotionCount - currentPotions.Count;
+                    var potionChoice = combatChoice.PotionChoice;
+                    var currentPotions = ResolvePlanningPotions(chain, entry, planningPlayer, player);
+                    var potionMax = planningPlayer?.MaxPotionCount
+                                    ?? chain?.State.Player.MaxPotionCount
+                                    ?? player.MaxPotionCount;
+                    var freeSlots = potionMax - currentPotions.Count;
+                    var currentPotionText = currentPotions.Count == 0
+                        ? (chinese ? "无" : "none")
+                        : string.Join("、", currentPotions.Select(potion => potion.Name));
+                    choiceBox.AddChild(PreCombatPanelStyles.CreateLabel(
+                        chinese
+                            ? $"当前规划药水：{currentPotionText}（{currentPotions.Count}/{potionMax}）"
+                            : $"Planned potions: {currentPotionText} ({currentPotions.Count}/{potionMax})",
+                        15,
+                        new Color(0.68f, 0.78f, 0.8f)));
                     var potionToggles = new List<(int Index, CheckButton Button)>();
                     for (var potionIndex = 0; potionIndex < rewardPotions.Count; potionIndex++)
                     {
@@ -495,11 +544,14 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                         };
                         button.AddThemeFontSizeOverride("font_size", 17);
                         button.ApplyLocaleFontSubstitution(FontType.Regular, "font");
-                        button.Toggled += _ => Update(new RoutePlanChoice.Potion(
-                            potionToggles.Where(pair => pair.Button.ButtonPressed)
-                                .Select(pair => pair.Index)
-                                .ToArray(),
-                            potionChoice?.DiscardPotion));
+                        button.Toggled += _ => Update(combatChoice with
+                        {
+                            PotionChoice = new RoutePlanChoice.Potion(
+                                potionToggles.Where(pair => pair.Button.ButtonPressed)
+                                    .Select(pair => pair.Index)
+                                    .ToArray(),
+                                potionChoice?.DiscardPotion)
+                        });
                         potionToggles.Add((taken, button));
                         choiceBox.AddChild(button);
                     }
@@ -513,9 +565,10 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                     discardPicker.ApplyLocaleFontSubstitution(FontType.Regular, "font");
                     discardPicker.AddItem(chinese ? "满槽时丢弃…" : "Discard when full…");
                     foreach (var potion in currentPotions)
-                        discardPicker.AddItem(potion.Title.GetFormattedText());
+                        discardPicker.AddItem(potion.Name);
                     var discardIndex = potionChoice?.DiscardPotion is { } discardId
-                        ? 1 + currentPotions.FindIndex(potion => potion.Id == discardId)
+                        ? 1 + currentPotions.ToList().FindIndex(potion =>
+                            SameModelId(potion.Id, discardId) || SamePotionEntry(potion.Id, discardId))
                         : 0;
                     discardPicker.Select(discardIndex < 0 ? 0 : discardIndex);
                     discardPicker.ItemSelected += (OptionButton.ItemSelectedEventHandler)(index =>
@@ -523,11 +576,14 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                         ModelId? discard = index <= 0 || (int)index - 1 >= currentPotions.Count
                             ? null
                             : currentPotions[(int)index - 1].Id;
-                        Update(new RoutePlanChoice.Potion(
-                            potionToggles.Where(pair => pair.Button.ButtonPressed)
-                                .Select(pair => pair.Index)
-                                .ToArray(),
-                            discard));
+                        Update(combatChoice with
+                        {
+                            PotionChoice = new RoutePlanChoice.Potion(
+                                potionToggles.Where(pair => pair.Button.ButtonPressed)
+                                    .Select(pair => pair.Index)
+                                    .ToArray(),
+                                discard)
+                        });
                     });
                     choiceBox.AddChild(discardPicker);
                 }
@@ -544,6 +600,8 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                 var button = new CheckButton
                 {
                     Text = $"{label}  {cost}",
+                    ButtonPressed = picks.Any(existing =>
+                        existing.Category == pick.Category && existing.Index == pick.Index),
                     MouseFilter = MouseFilterEnum.Stop,
                     FocusMode = FocusModeEnum.None
                 };
@@ -556,7 +614,9 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                     else
                         picks.RemoveAll(other =>
                             other.Category == pick.Category && other.Index == pick.Index);
-                    var removeCard = entry.Choice is RoutePlanChoice.Merchant { RemoveCard: true };
+                    var removeCard = plan.Entries.FirstOrDefault(item =>
+                                      !item.IsCompleted && item.Coord == entry.Coord)?.Choice
+                                  is RoutePlanChoice.Merchant { RemoveCard: true };
                     Update(new RoutePlanChoice.Merchant(picks.ToArray(), removeCard));
                 };
                 choiceBox.AddChild(button);
@@ -600,78 +660,81 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                 var canonical = ResolveCanonicalEvent(eventName);
                 if (canonical is not null && player is not null)
                 {
-                    if (Entry.RandomForeseer is RandomForeseerAdapter execAdapter)
+                    var layoutBox = new VBoxContainer { MouseFilter = MouseFilterEnum.Pass };
+                    choiceBox.AddChild(layoutBox);
+                    var eventChoice = entry.Choice as RoutePlanChoice.EventOption;
+                    var mode = eventChoice?.OptionIndex is 1 ? 6 : 3;
+                    var stateBefore = _lastChain?.StatesBefore.TryGetValue(entry.Coord, out var capturedState) == true
+                        ? capturedState
+                        : null;
+                    int LayoutCost(int count) =>
+                        Math.Max(_planEventPredictions
+                            .PredictCrystalSphereLayout(player, canonical, count, stateBefore).Cost, 0);
+
+                    void RenderLayout()
                     {
-                        var layoutBox = new VBoxContainer { MouseFilter = MouseFilterEnum.Pass };
-                        choiceBox.AddChild(layoutBox);
-                        var eventChoice = entry.Choice as RoutePlanChoice.EventOption;
-                        var mode = eventChoice?.OptionIndex is 1 ? 6 : 3;
-                        int LayoutCost(int count) =>
-                            Math.Max(execAdapter.PredictCrystalSphereLayout(player, canonical, count).Cost, 0);
-
-                        void RenderLayout()
+                        foreach (var child in layoutBox.GetChildren())
+                            child.QueueFree();
+                        var layout = _planEventPredictions
+                            .PredictCrystalSphereLayout(player, canonical, mode, stateBefore);
+                        var text = layout.Error is not null
+                            ? $"[color=#FF6B5E]布局预测失败：{layout.Error}[/color]"
+                            : string.Join("\n", layout.Rows)
+                              + "\n" + string.Join("  ", layout.Legend)
+                              + (layout.Cost >= 0 && mode == 6
+                                  ? $"  [color=#FFA629]6次价格：{layout.Cost}金[/color]"
+                                  : string.Empty);
+                        var grid = new RichTextLabel
                         {
-                            foreach (var child in layoutBox.GetChildren())
-                                child.QueueFree();
-                            var layout = execAdapter.PredictCrystalSphereLayout(player, canonical, mode);
-                            var text = layout.Error is not null
-                                ? $"[color=#FF6B5E]布局预测失败：{layout.Error}[/color]"
-                                : string.Join("\n", layout.Rows)
-                                  + "\n" + string.Join("  ", layout.Legend)
-                                  + (layout.Cost >= 0 && mode == 6
-                                      ? $"  [color=#FFA629]6次价格：{layout.Cost}金[/color]"
-                                      : string.Empty);
-                            var grid = new RichTextLabel
-                            {
-                                BbcodeEnabled = true,
-                                FitContent = true,
-                                MouseFilter = MouseFilterEnum.Ignore,
-                                ScrollActive = false,
-                                SizeFlagsHorizontal = SizeFlags.ExpandFill
-                            };
-                            grid.AddThemeFontSizeOverride(ThemeConstants.RichTextLabel.NormalFontSize, 15);
-                            var gridFont = GetThemeFont(ThemeConstants.Label.Font, "Label");
-                            if (gridFont is not null)
-                                grid.AddThemeFontOverride(ThemeConstants.RichTextLabel.NormalFont, gridFont);
-                            grid.Text = text;
-                            layoutBox.AddChild(grid);
-                        }
-
-                        RenderLayout();
-
-                        var modeSelect = new OptionButton
-                        {
-                            MouseFilter = MouseFilterEnum.Stop,
-                            FocusMode = FocusModeEnum.None
+                            BbcodeEnabled = true,
+                            FitContent = true,
+                            MouseFilter = MouseFilterEnum.Ignore,
+                            ScrollActive = false,
+                            SizeFlagsHorizontal = SizeFlags.ExpandFill
                         };
-                        modeSelect.AddThemeFontSizeOverride("font_size", 17);
-                        modeSelect.ApplyLocaleFontSubstitution(FontType.Regular, "font");
-                        modeSelect.AddItem(chinese ? "占卜 3 次（免费）" : "Divine 3 times (free)");
-                        var cost6 = LayoutCost(6);
-                        modeSelect.AddItem(chinese ? $"占卜 6 次（{cost6} 金）" : $"Divine 6 times ({cost6} gold)");
-                        modeSelect.Select(eventChoice?.OptionIndex is 1 ? 1 : 0);
-                        modeSelect.ItemSelected += (OptionButton.ItemSelectedEventHandler)(index =>
-                        {
-                            mode = index == 1 ? 6 : 3;
-                            Update(new RoutePlanChoice.EventOption((int)index));
-                            RenderLayout();
-                        });
-                        choiceBox.AddChild(modeSelect);
+                        grid.AddThemeFontSizeOverride(ThemeConstants.RichTextLabel.NormalFontSize, 15);
+                        var gridFont = GetThemeFont(ThemeConstants.Label.Font, "Label");
+                        if (gridFont is not null)
+                            grid.AddThemeFontOverride(ThemeConstants.RichTextLabel.NormalFont, gridFont);
+                        grid.Text = text;
+                        layoutBox.AddChild(grid);
                     }
+
+                    RenderLayout();
+
+                    var modeSelect = new OptionButton
+                    {
+                        MouseFilter = MouseFilterEnum.Stop,
+                        FocusMode = FocusModeEnum.None
+                    };
+                    modeSelect.AddThemeFontSizeOverride("font_size", 17);
+                    modeSelect.ApplyLocaleFontSubstitution(FontType.Regular, "font");
+                    modeSelect.AddItem(chinese ? "占卜 3 次（免费）" : "Divine 3 times (free)");
+                    var cost6 = LayoutCost(6);
+                    modeSelect.AddItem(chinese ? $"占卜 6 次（{cost6} 金）" : $"Divine 6 times ({cost6} gold)");
+                    modeSelect.Select(eventChoice?.OptionIndex is 1 ? 1 : 0);
+                    modeSelect.ItemSelected += (OptionButton.ItemSelectedEventHandler)(index =>
+                    {
+                        mode = index == 1 ? 6 : 3;
+                        Update(new RoutePlanChoice.EventOption((int)index));
+                        RenderLayout();
+                    });
+                    choiceBox.AddChild(modeSelect);
                 }
             }
             else
             {
-                // Always use the event's complete generated option list as the
-                // source of indices. Random Foreseer intentionally omits
-                // options with no predicted random content, so its content
-                // list is explanatory data and must never define the dropdown.
+                // Use the complete native option list. Event contents shown by
+                // the ordinary map tooltip are explanatory only; plan choices
+                // must be generated from the plan's own shadow state.
                 var canonical = ResolveCanonicalEvent(variant.Event.Id.Entry);
                 if (canonical is not null
-                    && player is not null
-                    && Entry.RandomForeseer is RandomForeseerAdapter execAdapter)
+                    && player is not null)
                 {
-                    var choices = execAdapter.EnumerateEventOptions(player, canonical);
+                    var stateBefore = _lastChain?.StatesBefore.TryGetValue(entry.Coord, out var capturedState) == true
+                        ? capturedState
+                        : null;
+                    var choices = _planEventPredictions.EnumerateEventOptions(player, canonical, stateBefore);
                     var select = new OptionButton
                     {
                         MouseFilter = MouseFilterEnum.Stop,
@@ -683,9 +746,13 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                     for (var optionIndex = 0; optionIndex < choices.Count; optionIndex++)
                     {
                         var option = choices[optionIndex];
+                        var itemIndex = optionIndex + 1;
                         select.AddItem(PlanningPrefix(option.Capability.Kind) + option.Title);
+                        var hoverText = FormatEventOptionHoverTips(option, chinese);
+                        if (hoverText.Length > 0)
+                            select.SetItemTooltip(itemIndex, hoverText);
                         if (option.IsLocked)
-                            select.SetItemDisabled(optionIndex + 1, true);
+                            select.SetItemDisabled(itemIndex, true);
                     }
                     var eventChoice = entry.Choice as RoutePlanChoice.EventOption;
                     var selected = eventChoice is null
@@ -694,7 +761,30 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                     select.Select(selected < 0 ? 0 : selected + 1);
                     choiceBox.AddChild(select);
 
-                    var refreshCapability = AddEventExecutionControls(
+                    if (selected >= 0)
+                    {
+                        var hoverText = FormatEventOptionHoverTips(choices[selected], chinese);
+                        if (hoverText.Length > 0)
+                        {
+                            var details = PreCombatPanelStyles.CreateLabel(
+                                hoverText,
+                                14,
+                                new Color(0.68f, 0.78f, 0.8f));
+                            details.AutowrapMode = TextServer.AutowrapMode.WordSmart;
+                            details.SizeFlagsHorizontal = SizeFlags.ExpandFill;
+                            choiceBox.AddChild(details);
+                        }
+
+                        AddEventCardSelectionControls(
+                            choiceBox,
+                            entry,
+                            choices[selected],
+                            planningPlayer,
+                            chinese,
+                            Update);
+                    }
+
+                    _ = AddEventExecutionControls(
                         choiceBox,
                         variant.Event.Id.Entry,
                         entry,
@@ -708,14 +798,12 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                         if (listIndex < 0)
                         {
                             Update(new RoutePlanChoice.EventOption(-1));
-                            refreshCapability?.Invoke(-1);
                             return;
                         }
                         if (listIndex >= choices.Count)
                             return;
                         var selectedOption = choices[listIndex];
                         Update(new RoutePlanChoice.EventOption(selectedOption.Index));
-                        refreshCapability?.Invoke(selectedOption.Index);
                     });
                 }
             }
@@ -738,7 +826,7 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                     options = PredictionPurityGuard.Execute(
                         run,
                         $"plan-rest-options:{entry.Coord.row}_{entry.Coord.col}",
-                        () => RestSiteOption.Generate(player));
+                        () => RestSiteOption.Generate(planningPlayer ?? player));
                 }
             }
             catch (Exception exception)
@@ -755,11 +843,17 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
             select.AddThemeFontSizeOverride("font_size", 17);
             select.ApplyLocaleFontSubstitution(FontType.Regular, "font");
             select.AddItem(chinese ? "休息点：跳过" : "Rest site: skip");
-            foreach (var option in options)
+            for (var optionIndex = 0; optionIndex < options.Count; optionIndex++)
+            {
+                var option = options[optionIndex];
                 select.AddItem(option.Title.GetFormattedText());
-            select.Select(restChoice is null
-                ? 0
-                : 1 + options.FindIndex(option => option.OptionId == restChoice.OptionId));
+                if (!option.IsEnabled)
+                    select.SetItemDisabled(optionIndex + 1, true);
+            }
+            var selectedRestOption = restChoice is null
+                ? -1
+                : options.FindIndex(option => option.OptionId == restChoice.OptionId);
+            select.Select(selectedRestOption < 0 ? 0 : selectedRestOption + 1);
             select.ItemSelected += (OptionButton.ItemSelectedEventHandler)(index =>
             {
                 if (index <= 0)
@@ -777,37 +871,51 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
             });
             choiceBox.AddChild(select);
 
-            if (restChoice is { OptionId: "SMITH" or "COOK" or "CLONE" or "MEND" }
-                && player is not null)
+            var restOptionId = restChoice?.OptionId ?? string.Empty;
+            // Only Smith and Cook select cards. Clone, Dig, Lift, Kindle,
+            // Hatch, Heal and multiplayer Mend resolve their own target/effect
+            // when the option is chosen and must never expose a fake card
+            // picker in the planning panel.
+            var targetAction = restOptionId is "SMITH" or "COOK";
+            var targetSelected = restChoice?.IsCommitted == true;
+            var actionCommitted = restChoice?.IsCommitted == true;
+            if (actionCommitted)
             {
-                // Source the target list from the PROJECTED deck when a plan
-                // chain exists: cards planned earlier (picked/added) are
-                // visible to later rest-site choices, and cooked cards are
-                // already gone. Live deck is the fallback.
-                IReadOnlyList<(ModelId Id, string Title, bool Upgraded, bool IsUpgradable, bool IsRemovable)> deck;
-                if (chain is not null)
+                // A rest room has one action. Once an action (and, where
+                // required, its target card) is recorded, lock the action
+                // selector so a panel refresh cannot look like a second forge
+                // or cook. Reset is explicit and starts a new plan choice.
+                select.Disabled = true;
+                var reset = PreCombatPanelStyles.CreateButton(
+                    chinese ? "更改休息选择" : "Change rest choice",
+                    180);
+                reset.TooltipText = chinese
+                    ? "每个休息点只能执行一次；点击后清除当前动作并重新选择"
+                    : "Each rest site has one action; clear it before choosing another.";
+                reset.Pressed += () =>
                 {
-                    deck = chain.Deck
-                        .Select(projected =>
-                        {
-                            var model = ModelDb.AllCards.FirstOrDefault(candidate =>
-                                candidate.Id.Entry == projected.Id.Entry);
-                            return (projected.Id,
-                                projected.Title,
-                                projected.Upgraded,
-                                model?.IsUpgradable ?? false,
-                                model?.IsRemovable ?? true);
-                        })
-                        .ToList();
-                }
-                else
-                {
-                    deck = player.Deck.Cards
-                        .Select(card => ((ModelId)card.Id, card.Title, card.IsUpgraded, card.IsUpgradable, card.IsRemovable))
-                        .ToList();
-                }
+                    Update(new RoutePlanChoice.RestSite(string.Empty, null));
+                    RefreshPlan();
+                };
+                choiceBox.AddChild(reset);
+            }
 
-                var filtered = restChoice.OptionId switch
+            if (targetAction && restChoice is not null && planningPlayer is not null)
+            {
+                // Use the state immediately before this node. The final chain
+                // state has already applied this node (and later nodes), which
+                // used to hide the selected smith/cook target after a refresh.
+                var deck = planningPlayer.Deck.Cards
+                    .Select((card, slot) => (
+                        Id: (ModelId)card.Id,
+                        Title: card.Title,
+                        Upgraded: card.IsUpgraded,
+                        IsUpgradable: card.IsUpgradable,
+                        IsRemovable: card.IsRemovable,
+                        Slot: slot))
+                    .ToList();
+
+                var candidates = restOptionId switch
                 {
                     // Eternal cards are neither removable nor upgradable;
                     // forging excludes already-upgraded cards (IsUpgradable
@@ -816,35 +924,237 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                     "COOK" => deck.Where(card => card.IsRemovable).ToList(),
                     _ => deck.ToList()
                 };
-                var target = new OptionButton
+
+                void AddTargetPicker(
+                    int slot,
+                    ModelId? current,
+                    int currentSlot,
+                    ModelId? other,
+                    int otherSlot)
                 {
-                    MouseFilter = MouseFilterEnum.Stop,
-                    FocusMode = FocusModeEnum.None
-                };
-                target.AddThemeFontSizeOverride("font_size", 16);
-                target.ApplyLocaleFontSubstitution(FontType.Regular, "font");
-                target.AddItem(chinese ? "选择目标牌…" : "Pick a card…");
-                foreach (var card in filtered)
-                    target.AddItem($"{card.Title}{(card.Upgraded ? "+" : string.Empty)}");
-                var current = restChoice.TargetCard;
-                var selectedIndex = current is null
-                    ? 0
-                    : filtered.FindIndex(card => card.Id == current) + 1;
-                target.Select(selectedIndex < 0 ? 0 : selectedIndex);
-                target.ItemSelected += (OptionButton.ItemSelectedEventHandler)(index2 =>
-                {
-                    if (index2 <= 0)
-                        return;
-                    Update(new RoutePlanChoice.RestSite(
-                        restChoice.OptionId,
-                        filtered[(int)index2 - 1].Id));
-                });
-                choiceBox.AddChild(target);
+                    var filtered = candidates
+                        .Where(card => otherSlot >= 0
+                            ? card.Slot != otherSlot
+                            : other is not { } otherId || card.Id.Entry != otherId.Entry)
+                        .ToList();
+                    if (current is { } currentId
+                        && !filtered.Any(card => currentSlot >= 0
+                            ? card.Slot == currentSlot
+                            : card.Id.Entry == currentId.Entry))
+                    {
+                        // Preserve a stale target in the display so the user
+                        // can see why the action is locked and explicitly reset
+                        // it instead of silently replacing the card.
+                        var deckIndex = currentSlot >= 0
+                            ? deck.FindIndex(card => card.Slot == currentSlot)
+                            : deck.FindIndex(card => card.Id.Entry == currentId.Entry);
+                        if (deckIndex >= 0)
+                        {
+                            filtered.Insert(0, deck[deckIndex]);
+                        }
+                        else
+                        {
+                            var model = ModelDb.AllCards.FirstOrDefault(card =>
+                                card.Id.Entry == currentId.Entry);
+                                filtered.Insert(0, (
+                                Id: currentId,
+                                Title: model?.Title ?? currentId.Entry,
+                                Upgraded: model?.IsUpgraded ?? false,
+                                IsUpgradable: model?.IsUpgradable ?? false,
+                                IsRemovable: model?.IsRemovable ?? false,
+                                Slot: currentSlot));
+                        }
+                    }
+
+                    var target = new OptionButton
+                    {
+                        MouseFilter = MouseFilterEnum.Stop,
+                        FocusMode = FocusModeEnum.None
+                    };
+                    target.AddThemeFontSizeOverride("font_size", 16);
+                    target.ApplyLocaleFontSubstitution(FontType.Regular, "font");
+                    target.AddItem(slot == 0 && restOptionId == "COOK"
+                        ? (chinese ? "烹饪第 1 张牌…" : "Cook card 1…")
+                        : slot == 1
+                            ? (chinese ? "烹饪第 2 张牌…" : "Cook card 2…")
+                            : (chinese ? "选择目标牌…" : "Pick a card…"));
+                    foreach (var card in filtered)
+                        target.AddItem($"{card.Title}{(card.Upgraded ? "+" : string.Empty)}"
+                                       + (current is { } selected
+                                           && (currentSlot >= 0
+                                               ? card.Slot == currentSlot
+                                               : card.Id.Entry == selected.Entry)
+                                            ? (chinese ? "（已选）" : " (selected)")
+                                            : string.Empty));
+                    var selectedIndex = current is not { } selectedCurrent
+                        ? 0
+                        : (currentSlot >= 0
+                            ? filtered.FindIndex(card => card.Slot == currentSlot)
+                            : filtered.FindIndex(card => card.Id.Entry == selectedCurrent.Entry)) + 1;
+                    target.Select(selectedIndex < 0 ? 0 : selectedIndex);
+                    target.Disabled = targetSelected;
+                    target.TooltipText = targetSelected
+                        ? (chinese
+                            ? "休息动作已确定；如需更改，请先点击“更改休息选择”"
+                            : "Rest action locked; use Change rest choice to choose again.")
+                        : string.Empty;
+                    if (!targetSelected)
+                    {
+                        target.ItemSelected += (OptionButton.ItemSelectedEventHandler)(index2 =>
+                        {
+                            if (index2 <= 0 || (int)index2 - 1 >= filtered.Count)
+                                return;
+                            var selectedCard = filtered[(int)index2 - 1];
+                            var selected = selectedCard.Id;
+                            if (restOptionId == "COOK")
+                            {
+                                var liveRestChoice = plan.Entries
+                                    .FirstOrDefault(item =>
+                                        !item.IsCompleted && item.Coord == entry.Coord)
+                                    ?.Choice as RoutePlanChoice.RestSite
+                                    ?? restChoice;
+                                var next = slot == 0
+                                    ? new RoutePlanChoice.RestSite(restOptionId, selected)
+                                    {
+                                        SecondTargetCard = liveRestChoice.SecondTargetCard,
+                                        TargetCardSlot = selectedCard.Slot,
+                                        SecondTargetCardSlot = liveRestChoice.SecondTargetCardSlot
+                                    }
+                                    : new RoutePlanChoice.RestSite(restOptionId, liveRestChoice.TargetCard)
+                                    {
+                                        SecondTargetCard = selected,
+                                        TargetCardSlot = liveRestChoice.TargetCardSlot,
+                                        SecondTargetCardSlot = selectedCard.Slot
+                                    };
+                                Update(next);
+                                RefreshPlan();
+                            }
+                            else
+                            {
+                                Update(new RoutePlanChoice.RestSite(restOptionId, selected)
+                                {
+                                    TargetCardSlot = selectedCard.Slot
+                                });
+                                RefreshPlan();
+                            }
+                        });
+                    }
+                    choiceBox.AddChild(target);
+                }
+
+                AddTargetPicker(
+                    0,
+                    restChoice.TargetCard,
+                    restChoice.TargetCardSlot,
+                    restChoice.SecondTargetCard,
+                    restChoice.SecondTargetCardSlot);
+                if (restOptionId == "COOK")
+                    AddTargetPicker(
+                        1,
+                        restChoice.SecondTargetCard,
+                        restChoice.SecondTargetCardSlot,
+                        restChoice.TargetCard,
+                        restChoice.TargetCardSlot);
             }
         }
     }
 
-    private readonly Dictionary<MapCoord, RandomForeseerAdapter.EventExecutionOutcome> _eventOutcomes = new();
+    private sealed record PlanningPotion(ModelId Id, string Name);
+
+    private static IReadOnlyList<PlanningPotion> ResolvePlanningPotions(
+        RoutePlanForecastService.PlanChain? chain,
+        RoutePlanEntry entry,
+        Player? planningPlayer,
+        Player? fallback)
+    {
+        if (chain?.PotionSlotsBefore.TryGetValue(entry.Coord, out var slots) == true)
+        {
+            return slots
+                .Select(slot => ResolvePlanningPotion(slot, planningPlayer, fallback))
+                .ToArray();
+        }
+
+        return (planningPlayer?.Potions ?? fallback?.Potions ?? [])
+            .Select(potion => new PlanningPotion(potion.Id, potion.Title.GetFormattedText()))
+            .ToArray();
+    }
+
+    private static PlanningPotion ResolvePlanningPotion(
+        ModelId id,
+        Player? planningPlayer,
+        Player? fallback)
+    {
+        var potion = planningPlayer?.Potions.FirstOrDefault(candidate => SameModelId(candidate.Id, id))
+                     ?? fallback?.Potions.FirstOrDefault(candidate => SameModelId(candidate.Id, id))
+                     ?? ModelDb.AllPotions.FirstOrDefault(candidate => SameModelId(candidate.Id, id))
+                     ?? planningPlayer?.Potions.FirstOrDefault(candidate => SamePotionEntry(candidate.Id, id))
+                     ?? fallback?.Potions.FirstOrDefault(candidate => SamePotionEntry(candidate.Id, id))
+                     ?? ModelDb.AllPotions.FirstOrDefault(candidate => SamePotionEntry(candidate.Id, id));
+        return potion is null
+            ? new PlanningPotion(id, id.Entry)
+            : new PlanningPotion(potion.Id, potion.Title.GetFormattedText());
+    }
+
+    private static bool SameModelId(ModelId left, ModelId right) =>
+        left.Category.Equals(right.Category, StringComparison.OrdinalIgnoreCase)
+        && left.Entry.Equals(right.Entry, StringComparison.OrdinalIgnoreCase);
+
+    private static bool SamePotionEntry(ModelId left, ModelId right) =>
+        left.Entry.Equals(right.Entry, StringComparison.OrdinalIgnoreCase);
+
+    private static string FormatEventOptionHoverTips(
+        PlanningEventPredictionService.EventOptionDescriptor option,
+        bool chinese)
+    {
+        var lines = new List<string>();
+        if (!string.IsNullOrWhiteSpace(option.Description))
+            lines.Add(option.Description);
+        lines.AddRange(option.HoverTips.Where(tip => !lines.Contains(tip, StringComparer.Ordinal)));
+        if (lines.Count == 0)
+            return string.Empty;
+
+        var heading = chinese ? "事件说明：" : "Event details: ";
+        return heading + string.Join("\n", lines);
+    }
+
+    private static Player? ResolvePlanningPlayer(
+        RoutePlanForecastService.PlanChain? chain,
+        RoutePlanEntry entry,
+        Player? fallback)
+    {
+        if (chain is null
+            || !chain.StatesBefore.TryGetValue(entry.Coord, out var snapshot))
+        {
+            return fallback;
+        }
+
+        try
+        {
+            var run = RunState.FromSerializable(snapshot.Run);
+            return run.GetPlayer(snapshot.PlayerNetId) ?? fallback;
+        }
+        catch (Exception exception)
+        {
+            Entry.Logger.Debug($"Planning state restore failed for {entry.Coord}: {exception.Message}");
+            return fallback;
+        }
+    }
+
+    private readonly Dictionary<MapCoord, PlanningEventPredictionService.EventExecutionOutcome> _eventOutcomes = new();
+
+    private IReadOnlyDictionary<MapCoord, RoutePlanForecastService.PlannedEventOutcome> PlannedEventOutcomes()
+    {
+        return _eventOutcomes
+            .Where(pair => pair.Value.Ok
+                           && pair.Value.ShadowRun is not null
+                           && pair.Value.ShadowPlayer is not null)
+            .ToDictionary(
+                pair => pair.Key,
+                pair => new RoutePlanForecastService.PlannedEventOutcome(
+                    pair.Value.ShadowRun!,
+                    pair.Value.ShadowPlayer!.NetId,
+                    pair.Value.Finished));
+    }
 
     private void InvalidateEventOutcomesFrom(RoutePlan plan, RoutePlanEntry changed)
     {
@@ -858,14 +1168,29 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
         }
     }
 
-    private static string PlanningPrefix(RandomForeseerAdapter.EventPlanningKind kind) => kind switch
+    private void PruneEventOutcomes(RoutePlan plan)
     {
-        RandomForeseerAdapter.EventPlanningKind.Exact => "✓ ",
-        RandomForeseerAdapter.EventPlanningKind.RewardChoice => "◇ ",
-        RandomForeseerAdapter.EventPlanningKind.CardOrUiChoice => "◆ ",
-        RandomForeseerAdapter.EventPlanningKind.SpecialCombat => "⚔ ",
-        RandomForeseerAdapter.EventPlanningKind.Minigame => "▦ ",
-        RandomForeseerAdapter.EventPlanningKind.RunEnding => "✕ ",
+        var plannedCoords = plan.Phase == RoutePlanPhase.Active
+            ? plan.Entries
+                .Where(entry => !entry.IsCompleted)
+                .Select(entry => entry.Coord)
+                .ToHashSet()
+            : [];
+        foreach (var coord in _eventOutcomes.Keys.ToArray())
+        {
+            if (!plannedCoords.Contains(coord))
+                _eventOutcomes.Remove(coord);
+        }
+    }
+
+    private static string PlanningPrefix(PlanningEventPredictionService.EventPlanningKind kind) => kind switch
+    {
+        PlanningEventPredictionService.EventPlanningKind.Exact => "✓ ",
+        PlanningEventPredictionService.EventPlanningKind.RewardChoice => "◇ ",
+        PlanningEventPredictionService.EventPlanningKind.CardOrUiChoice => "◆ ",
+        PlanningEventPredictionService.EventPlanningKind.SpecialCombat => "⚔ ",
+        PlanningEventPredictionService.EventPlanningKind.Minigame => "▦ ",
+        PlanningEventPredictionService.EventPlanningKind.RunEnding => "✕ ",
         _ => string.Empty
     };
 
@@ -873,6 +1198,168 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
     {
         return ModelDb.AllEvents.FirstOrDefault(candidate =>
             string.Equals(candidate.Id.Entry, entry, StringComparison.Ordinal));
+    }
+
+    private static bool IsCardSelectionComplete(
+        PlanningEventPredictionService.EventOptionDescriptor option,
+        IReadOnlyList<EventCardPick> picks)
+    {
+        foreach (var selection in option.CardSelections)
+        {
+            var selected = picks
+                .Where(pick => pick.SelectionStep == selection.SelectionStep)
+                .ToArray();
+            if (selected.Length < selection.MinSelect || selected.Length > selection.MaxSelect)
+                return false;
+
+            if (selected.Any(pick => !selection.Candidates.Any(candidate =>
+                    candidate.DeckSlot == pick.DeckSlot
+                    && candidate.CardId.Entry == pick.CardId.Entry)))
+            {
+                return false;
+            }
+
+            if (selected.Select(pick => pick.DeckSlot).Where(slot => slot >= 0).Distinct().Count()
+                != selected.Count(pick => pick.DeckSlot >= 0))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static void AddEventCardSelectionControls(
+        VBoxContainer choiceBox,
+        RoutePlanEntry entry,
+        PlanningEventPredictionService.EventOptionDescriptor option,
+        Player? planningPlayer,
+        bool chinese,
+        Action<RoutePlanChoice> update)
+    {
+        if (option.CardSelections.Count == 0)
+            return;
+
+        var currentChoice = RoutePlanTracker.Current?.Entries
+            .FirstOrDefault(candidate => candidate.Coord == entry.Coord)?.Choice
+            as RoutePlanChoice.EventOption;
+        var currentPicks = currentChoice?.CardPicks.ToList() ?? [];
+
+        foreach (var selection in option.CardSelections)
+        {
+            var header = PreCombatPanelStyles.CreateLabel(
+                $"{selection.Label} ({selection.MinSelect}..{selection.MaxSelect})",
+                16,
+                new Color(0.55f, 0.8f, 0.95f),
+                bold: true);
+            choiceBox.AddChild(header);
+
+            var selectedForStep = currentPicks
+                .Where(pick => pick.SelectionStep == selection.SelectionStep)
+                .OrderBy(pick => pick.SelectionOrder)
+                .ToList();
+            if (selection.Candidates.Count == 0)
+            {
+                choiceBox.AddChild(PreCombatPanelStyles.CreateLabel(
+                    chinese
+                        ? "当前规划状态没有符合条件的卡牌，事件选项将保持锁定。"
+                        : "No eligible cards exist in the current planning state; this event option stays locked.",
+                    15,
+                    new Color(1f, 0.48f, 0.4f)));
+            }
+            var pickerCount = Math.Max(selection.MaxSelect, 1);
+            for (var pickerIndex = 0; pickerIndex < pickerCount; pickerIndex++)
+            {
+                var selectedPick = pickerIndex < selectedForStep.Count
+                    ? selectedForStep[pickerIndex]
+                    : null;
+                var selectedCandidate = selectedPick is null
+                    ? null
+                    : selection.Candidates.FirstOrDefault(candidate =>
+                        candidate.DeckSlot == selectedPick.DeckSlot
+                        && candidate.CardId.Entry == selectedPick.CardId.Entry);
+
+                var candidates = selection.Candidates
+                    .Where(candidate => selectedForStep
+                        .Where((_, index) => index != pickerIndex)
+                        .All(pick => pick.DeckSlot < 0
+                            || candidate.DeckSlot != pick.DeckSlot))
+                    .ToList();
+                if (selectedPick is not null && selectedCandidate is null)
+                {
+                    // Keep a stale pick visible after an upstream plan change;
+                    // the execution button remains disabled until it is fixed.
+                    var staleModel = ModelDb.AllCards.FirstOrDefault(model =>
+                        model.Id.Entry == selectedPick.CardId.Entry);
+                    candidates.Insert(0, new PlanningEventPredictionService.EventCardCandidate(
+                        selectedPick.CardId,
+                        selectedPick.DeckSlot,
+                        staleModel?.Title ?? selectedPick.CardId.Entry,
+                        staleModel?.IsUpgraded ?? false,
+                        staleModel?.Enchantment?.Title.GetFormattedText()));
+                }
+
+                var picker = new OptionButton
+                {
+                    MouseFilter = MouseFilterEnum.Stop,
+                    FocusMode = FocusModeEnum.None
+                };
+                picker.AddThemeFontSizeOverride("font_size", 16);
+                picker.ApplyLocaleFontSubstitution(FontType.Regular, "font");
+                picker.AddItem(pickerIndex == 0 && selection.MaxSelect == 1
+                    ? (chinese ? "选择目标牌…" : "Pick a card…")
+                    : (chinese ? $"第 {pickerIndex + 1} 张…" : $"Card {pickerIndex + 1}…"));
+                foreach (var candidate in candidates)
+                {
+                    var label = candidate.Title + (candidate.Upgraded ? "+" : string.Empty);
+                    if (candidate.Enchantment is { Length: > 0 } enchantment)
+                        label += $" [{enchantment}]";
+                    if (selectedCandidate is not null
+                        && candidate.DeckSlot == selectedCandidate.DeckSlot
+                        && candidate.CardId.Entry == selectedCandidate.CardId.Entry)
+                    {
+                        label += chinese ? "（已选）" : " (selected)";
+                    }
+
+                    picker.AddItem(label);
+                }
+
+                var selectedIndex = selectedCandidate is null
+                    ? 0
+                    : candidates.FindIndex(candidate =>
+                          candidate.DeckSlot == selectedCandidate.DeckSlot
+                          && candidate.CardId.Entry == selectedCandidate.CardId.Entry) + 1;
+                picker.Select(selectedIndex < 0 ? 0 : selectedIndex);
+                picker.ItemSelected += (OptionButton.ItemSelectedEventHandler)(index =>
+                {
+                    var next = currentPicks
+                        .Where(pick => pick.SelectionStep != selection.SelectionStep)
+                        .ToList();
+                    next.AddRange(selectedForStep
+                        .Where((_, indexInStep) => indexInStep != pickerIndex)
+                        .Select((pick, indexInStep) => pick with
+                        {
+                            SelectionOrder = indexInStep >= pickerIndex
+                                ? indexInStep + 1
+                                : indexInStep
+                        }));
+                    if (index > 0 && (int)index - 1 < candidates.Count)
+                    {
+                        var candidate = candidates[(int)index - 1];
+                        next.Add(new EventCardPick(
+                            selection.SelectionStep,
+                            candidate.CardId,
+                            candidate.DeckSlot,
+                            pickerIndex));
+                    }
+
+                    update(new RoutePlanChoice.EventOption(option.Index, next
+                        .OrderBy(pick => pick.SelectionStep)
+                        .ToArray()));
+                });
+                choiceBox.AddChild(picker);
+            }
+        }
     }
 
     /// <summary>
@@ -887,11 +1374,9 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
         Player? player,
         bool chinese,
         RoutePlanForecastService.PlanChain? chain,
-        IReadOnlyList<RandomForeseerAdapter.EventOptionDescriptor> options)
+        IReadOnlyList<PlanningEventPredictionService.EventOptionDescriptor> options)
     {
-        if (ResolveCanonicalEvent(eventName) is not { } canonical
-            || Entry.RandomForeseer is not RandomForeseerAdapter adapter
-            || player is null)
+        if (ResolveCanonicalEvent(eventName) is not { } canonical || player is null)
         {
             return null;
         }
@@ -928,24 +1413,38 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
             }
 
             var kind = option.Capability.Kind;
+            var liveEventChoice = RoutePlanTracker.Current?.Entries
+                .FirstOrDefault(candidate => candidate.Coord == entry.Coord)?.Choice
+                as RoutePlanChoice.EventOption;
+            var cardSelectionComplete = IsCardSelectionComplete(
+                option,
+                liveEventChoice?.CardPicks ?? []);
             capabilityLabel.Text = kind switch
             {
-                RandomForeseerAdapter.EventPlanningKind.Exact => chinese
-                    ? "✓ 可在隔离影子跑局中精确执行；结果可计入资源台账。"
-                    : "✓ Can execute exactly on an isolated shadow run; result can enter the resource ledger.",
-                RandomForeseerAdapter.EventPlanningKind.RewardChoice => chinese
+                PlanningEventPredictionService.EventPlanningKind.Exact => chinese
+                    ? option.CardSelections.Count > 0
+                        ? (cardSelectionComplete
+                            ? "✓ 卡牌选择已完成，可在隔离影子跑局中精确执行。"
+                            : "◆ 请先完成事件中的卡牌选择，再推进后续世界线。")
+                        : "✓ 可在隔离影子跑局中精确执行；结果可计入资源台账。"
+                    : option.CardSelections.Count > 0
+                        ? (cardSelectionComplete
+                            ? "✓ Card selections complete; the event can run exactly on a shadow run."
+                            : "◆ Complete the event card selections before advancing the worldline.")
+                        : "✓ Can execute exactly on an isolated shadow run; result can enter the resource ledger.",
+                PlanningEventPredictionService.EventPlanningKind.RewardChoice => chinese
                     ? "◇ 随机奖励内容可预知，但还需要指定拿取/跳过；未指定前不应推进后续世界线。"
                     : "◇ Reward contents are predictable, but take/skip decisions are still required before advancing the worldline.",
-                RandomForeseerAdapter.EventPlanningKind.CardOrUiChoice => chinese
+                PlanningEventPredictionService.EventPlanningKind.CardOrUiChoice => chinese
                     ? "◆ 还包含卡牌或界面内选择；当前只展示候选内容，不把默认第一项伪装成计划。"
                     : "◆ Contains another card or UI choice; candidates are shown without silently assuming the first one.",
-                RandomForeseerAdapter.EventPlanningKind.SpecialCombat => chinese
+                PlanningEventPredictionService.EventPlanningKind.SpecialCombat => chinese
                     ? "⚔ 特殊战斗：可查看胜利掉落；战损必须单独估算，胜负未定时后续属于条件世界线。"
                     : "⚔ Special combat: victory drops can be shown; damage must be estimated separately and downstream is conditional on winning.",
-                RandomForeseerAdapter.EventPlanningKind.Minigame => chinese
+                PlanningEventPredictionService.EventPlanningKind.Minigame => chinese
                     ? "▦ 小游戏使用专用布局预测。"
                     : "▦ This minigame uses its dedicated layout forecast.",
-                RandomForeseerAdapter.EventPlanningKind.RunEnding => chinese
+                PlanningEventPredictionService.EventPlanningKind.RunEnding => chinese
                     ? "✕ 该选择会结束当前跑局，计划中的后续房间不再成立。"
                     : "✕ This choice ends the run, so later planned rooms are unreachable.",
                 _ => string.Empty
@@ -953,16 +1452,18 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
 
             executeButton.Text = kind switch
             {
-                RandomForeseerAdapter.EventPlanningKind.Exact => chinese ? "执行精确预演" : "Run exact preview",
-                RandomForeseerAdapter.EventPlanningKind.SpecialCombat => chinese ? "查看胜利掉落" : "Show victory drops",
-                RandomForeseerAdapter.EventPlanningKind.RewardChoice => chinese ? "等待奖励取舍" : "Reward choice required",
-                RandomForeseerAdapter.EventPlanningKind.CardOrUiChoice => chinese ? "等待附加选择" : "Extra choice required",
-                RandomForeseerAdapter.EventPlanningKind.RunEnding => chinese ? "此选择终止跑局" : "This ends the run",
+                PlanningEventPredictionService.EventPlanningKind.Exact => chinese ? "执行精确预演" : "Run exact preview",
+                PlanningEventPredictionService.EventPlanningKind.SpecialCombat => chinese ? "查看胜利掉落" : "Show victory drops",
+                PlanningEventPredictionService.EventPlanningKind.RewardChoice => chinese ? "等待奖励取舍" : "Reward choice required",
+                PlanningEventPredictionService.EventPlanningKind.CardOrUiChoice => chinese ? "等待附加选择" : "Extra choice required",
+                PlanningEventPredictionService.EventPlanningKind.RunEnding => chinese ? "此选择终止跑局" : "This ends the run",
                 _ => chinese ? "使用专用预测" : "Use dedicated forecast"
             };
             executeButton.Disabled = kind is not (
-                RandomForeseerAdapter.EventPlanningKind.Exact
-                or RandomForeseerAdapter.EventPlanningKind.SpecialCombat);
+                PlanningEventPredictionService.EventPlanningKind.Exact
+                or PlanningEventPredictionService.EventPlanningKind.SpecialCombat)
+                || (kind == PlanningEventPredictionService.EventPlanningKind.Exact
+                    && !cardSelectionComplete);
             executeButton.TooltipText = capabilityLabel.Text;
         }
 
@@ -987,18 +1488,26 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                 return;
             }
 
-            if (descriptor.Capability.Kind == RandomForeseerAdapter.EventPlanningKind.SpecialCombat)
+            if (descriptor.Capability.Kind == PlanningEventPredictionService.EventPlanningKind.SpecialCombat)
             {
                 // Combat-entry branches: never enter combat — predict the
                 // victory drops instead (basic rewards + resume effects).
                 outcomeLabel.Text = chinese ? "结算胜利掉落…" : "Resolving victory drops…";
                 executeButton.Disabled = true;
+                var revision = _planRevision;
                 _ = Task.Run(() =>
                 {
-                    var drops = adapter.PredictEventCombatVictoryDrops(
-                        player, canonical, requestedOptionIndex);
+                    var activeChain = _lastChain;
+                    var plannedState = activeChain is not null
+                                       && activeChain.StatesBefore.TryGetValue(entry.Coord, out var stateBefore)
+                        ? stateBefore
+                        : null;
+                    var drops = _planEventPredictions.PredictEventCombatVictoryDrops(
+                        player, canonical, requestedOptionIndex, plannedState);
                     SeedOracleDispatcher.Post(() =>
                     {
+                        if (revision != _planRevision)
+                            return;
                         var liveChoice = RoutePlanTracker.Current?.Entries
                             .FirstOrDefault(candidate => candidate.Coord == entry.Coord)?.Choice
                             as RoutePlanChoice.EventOption;
@@ -1016,7 +1525,7 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                 return;
             }
 
-            if (descriptor.Capability.Kind != RandomForeseerAdapter.EventPlanningKind.Exact)
+            if (descriptor.Capability.Kind != PlanningEventPredictionService.EventPlanningKind.Exact)
             {
                 ApplyCapability(requestedOptionIndex);
                 return;
@@ -1024,12 +1533,24 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
 
             outcomeLabel.Text = chinese ? "执行中…" : "Simulating…";
             executeButton.Disabled = true;
+            var executionRevision = _planRevision;
+            var activeChain = _lastChain;
+            var plannedState = activeChain is not null
+                               && activeChain.StatesBefore.TryGetValue(entry.Coord, out var stateBefore)
+                ? stateBefore
+                : null;
             _ = Task.Run(async () =>
             {
-                var outcome = await adapter.ExecuteEventOptionAsync(
-                    player, canonical, requestedOptionIndex, null, chain?.Deck);
+                var outcome = await _planEventPredictions.ExecuteEventOptionAsync(
+                     player,
+                     canonical,
+                     requestedOptionIndex,
+                     choice.CardPicks,
+                     plannedState);
                 SeedOracleDispatcher.Post(() =>
                 {
+                    if (executionRevision != _planRevision)
+                        return;
                     var liveChoice = RoutePlanTracker.Current?.Entries
                         .FirstOrDefault(candidate => candidate.Coord == entry.Coord)?.Choice
                         as RoutePlanChoice.EventOption;
@@ -1042,7 +1563,7 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
 
                     ApplyCapability(requestedOptionIndex);
                     outcomeLabel.Text = DescribeOutcomeText(outcome, chinese);
-                    RefreshLedgerOnly();
+                    RefreshPlan();
                 });
             });
         };
@@ -1064,7 +1585,7 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
     }
 
     private static string DescribeOutcomeText(
-        RandomForeseerAdapter.EventExecutionOutcome outcome,
+        PlanningEventPredictionService.EventExecutionOutcome outcome,
         bool chinese)
     {
         if (!outcome.Ok)
@@ -1139,7 +1660,8 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                         player,
                         plan.Entries,
                         entry => RoutePlanTracker.FindMapPoint(run, entry.Coord),
-                        plan));
+                        plan,
+                        PlannedEventOutcomes()));
             }
             catch (Exception exception)
             {
@@ -1179,6 +1701,9 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
         // plan head (the travelable step that leads into the plan).
         foreach (var variant in variants)
         {
+            if (!MapForecastTooltipBuilder.MatchesPlanChoice(variant, target.Choice))
+                continue;
+
             var coords = variant.Route
                 .Select(choice => choice.Point.coord)
                 .ToArray();
@@ -1208,6 +1733,22 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
         }
 
         return null;
+    }
+
+    private static bool IsAfterPlanEntry(
+        RoutePlan plan,
+        MapCoord earlier,
+        MapCoord target)
+    {
+        var earlierIndex = plan.Entries
+            .Select((entry, index) => (entry.Coord, index))
+            .FirstOrDefault(pair => pair.Coord == earlier)
+            .index;
+        var targetIndex = plan.Entries
+            .Select((entry, index) => (entry.Coord, index))
+            .FirstOrDefault(pair => pair.Coord == target)
+            .index;
+        return targetIndex > earlierIndex;
     }
 
     private static string DescribeRoom(MapPoint? point, bool chinese)
@@ -1270,8 +1811,9 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
         if (variant.Event is { } eventDetails)
         {
             lines.Add($"[gold]{prefix}{(chinese ? "事件" : "Event")} · {eventDetails.Title}[/gold]");
-            if (variant.EventContents is { } eventContents)
-                MapForecastTooltipBuilder.AppendEventContents(lines, eventContents, chinese, " ");
+            lines.Add(chinese
+                ? "事件选项与后续世界线按当前规划状态生成"
+                : "Event options and downstream state use the current plan snapshot");
             return lines;
         }
 
@@ -1323,17 +1865,18 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
 
         if (variant.Encounter is not null)
         {
+            var combatChoice = RoutePlanChoice.AsCombat(choice);
             if (variant.CombatRewards is { HasValue: true } combat)
             {
                 gold += combat.Value!.Gold;
-                potions += choice is RoutePlanChoice.Potion takenPotions
+                potions += combatChoice.PotionChoice is { } takenPotions
                     ? takenPotions.TakenPotions.Count
                     : Math.Min(combat.Value.Potions.Count, Math.Max(0, (player?.MaxPotionCount ?? 3) - (player?.Potions.Count() ?? 0)));
-                if (choice is not RoutePlanChoice.Relic { Take: false })
+                if (combatChoice.TakeRelic)
                     relics += combat.Value.Relics.Count;
             }
 
-            if (choice is RoutePlanChoice.CardReward { Skip: false })
+            if (combatChoice.CardRewardChoice is { Skip: false })
                 cards += 1;
         }
         else if (variant.RoomType == RoomType.Shop && variant.Merchant is { HasValue: true } merchant)
@@ -1361,7 +1904,16 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                 hp = player is null ? 0 : (int)HealRestSiteOption.GetHealAmount(player);
             else if (rest.OptionId == "LIFT")
                 notes.Add("最大生命+");
-            else if (rest.OptionId is "SMITH" or "COOK" or "CLONE" or "MEND" or "HATCH")
+            else if (rest.OptionId == "COOK")
+            {
+                cards = rest.TargetCard is not null && rest.SecondTargetCard is not null
+                    ? -2
+                    : 0;
+                notes.Add(rest.TargetCard is { } first && rest.SecondTargetCard is { } second
+                    ? $"烹饪：{first.Entry}、{second.Entry}，最大生命+5"
+                    : (chinese ? "烹饪：需要两张目标牌" : "cook: two target cards required"));
+            }
+            else if (rest.OptionId is "SMITH" or "CLONE" or "MEND" or "HATCH" or "KINDLE")
                 notes.Add(rest.TargetCard is { } target
                     ? $"{(chinese ? "目标：" : "target: ")}{target.Entry}"
                     : (chinese ? "未选目标牌" : "no target card"));
@@ -1407,13 +1959,13 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
     {
         if (player is null)
             return string.Empty;
-        var potionMax = player.MaxPotionCount;
+        var potionMax = chain?.State.Player.MaxPotionCount ?? player.MaxPotionCount;
 
         var gold = chain?.Gold ?? player.Gold;
         var cards = chain?.Deck.Count ?? player.Deck.Cards.Count;
-        var relics = player.Relics.Count;
+        var relics = chain?.State.Player.Relics.Count ?? player.Relics.Count;
         var potions = chain?.PotionSlots.Count ?? player.Potions.Count();
-        var hp = player.Creature.CurrentHp;
+        var hp = chain?.State.Player.Creature.CurrentHp ?? player.Creature.CurrentHp;
 
         if (plan.Phase == RoutePlanPhase.Active)
         {
@@ -1438,7 +1990,7 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                     };
                 }
                 var estimate = EstimatePlanDelta(entry, variant, player, chinese);
-                if (_eventOutcomes.TryGetValue(entry.Coord, out var eventOutcome))
+                if (chain is null && _eventOutcomes.TryGetValue(entry.Coord, out var eventOutcome))
                 {
                     gold += eventOutcome.GoldDelta;
                     hp += eventOutcome.HpDelta;
@@ -1446,21 +1998,29 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                 if (chain is null)
                     gold += estimate.Gold;
                 if (chain is null) cards += estimate.Cards;
-                relics += estimate.Relics;
+                if (chain is null)
+                    relics += estimate.Relics;
                 if (chain is null) potions += estimate.Potions;
-                hp += estimate.Hp;
+                if (chain is null) hp += estimate.Hp;
             }
         }
 
         var arrow = chinese ? "→" : "->";
+        var blockedNote = chain?.BlockedAtEvent is not null
+            ? (chinese
+                ? "\n⚠ 计划在未完成事件处暂停；后续节点将在事件全部选完后重算"
+                : "\n⚠ Plan paused at an unfinished event; later nodes refresh after all event choices are set.")
+            : string.Empty;
         return chinese
             ? $"当前 金币{player.Gold} 卡{player.Deck.Cards.Count} 遗物{player.Relics.Count}"
               + $" 药水{player.Potions.Count()}/{player.MaxPotionCount} HP{player.Creature.CurrentHp}"
               + $"\n预计到计划终点 金币{gold} 卡{cards} 遗物{relics} 药水{Math.Min(potions, potionMax)}{(potions > potionMax ? "（超出槽位的药水将放弃）" : string.Empty)} HP{hp}（战损未计入）"
+              + blockedNote
             : $"Now  gold {player.Gold}, deck {player.Deck.Cards.Count}, relics {player.Relics.Count}"
               + $", potions {player.Potions.Count()}, HP {player.Creature.CurrentHp}"
               + $"\nAt plan end {arrow} gold {gold}, deck {cards}, relics {relics}, potions {potions}, HP {hp}"
-              + " (combat losses not included)";
+              + " (combat losses not included)"
+              + blockedNote;
     }
 
     private static string FormatCurrentResources(Player? player, bool chinese)

@@ -31,11 +31,17 @@ internal static class NMapPointOnFocusPatch
                 run,
                 $"map:{__instance.Point.coord}",
                 () => Entry.MapForecasts.Predict(run, __instance.Point, __instance._screen.IsTravelEnabled));
+            var displayForecast = RoutePlanPanel.IsPlanMode
+                ? MapForecastTooltipBuilder.NarrowToPlan(
+                    forecast,
+                    RoutePlanTracker.Current,
+                    __instance.Point.coord)
+                : forecast;
             var combatSolver = PreCombatForecastCoordinator.Observe(
                 run,
-                forecast,
+                displayForecast,
                 __instance._screen.IsTravelEnabled);
-            var content = MapForecastTooltipBuilder.Build(forecast, combatSolver);
+            var content = MapForecastTooltipBuilder.Build(displayForecast, combatSolver);
             if (content is null)
                 return;
             if (!RoutePlanPanel.IsPlanMode)

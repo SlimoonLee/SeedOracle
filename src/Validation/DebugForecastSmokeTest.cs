@@ -763,13 +763,12 @@ internal static class DebugForecastSmokeTest
                 () => Entry.MapForecasts.Predict(run, headPoint, isTravelEnabled: false));
         }
 
-        if (Entry.RandomForeseer is RandomForeseerAdapter adapter
-            && (LocalContext.GetMe(run) ?? run.Players.FirstOrDefault()) is { } planPlayer)
+        if ((LocalContext.GetMe(run) ?? run.Players.FirstOrDefault()) is { } planPlayer)
         {
             var chain = PredictionPurityGuard.Execute(
                 run,
                 "self-test:plan-chain",
-                () => new RoutePlanForecastService(adapter).BuildChain(
+                () => new RoutePlanForecastService(new PlanningPredictionService()).BuildChain(
                     run,
                     planPlayer,
                     RoutePlanTracker.Current!.Entries,
@@ -786,7 +785,7 @@ internal static class DebugForecastSmokeTest
             .FirstOrDefault(pair => pair.Next.coord != candidate.coord);
         if (tail.From is not null && tail.Next is not null)
         {
-            var appendError = RoutePlanTracker.ToggleNode(run, tail.Next.Value.coord);
+            var appendError = RoutePlanTracker.ToggleNode(run, tail.Next.coord);
             if (appendError is not null
                 || RoutePlanTracker.Current is not { Entries.Count: 2 })
             {
@@ -794,7 +793,7 @@ internal static class DebugForecastSmokeTest
                     "Seed Oracle route-plan self-test failed to append the second planned room.");
             }
 
-            RoutePlanTracker.ToggleNode(run, tail.Next.Value.coord);
+            RoutePlanTracker.ToggleNode(run, tail.Next.coord);
             if (RoutePlanTracker.Current is not { Entries.Count: 1 })
                 throw new InvalidOperationException(
                     "Seed Oracle route-plan self-test failed to truncate the plan.");

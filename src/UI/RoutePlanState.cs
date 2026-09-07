@@ -23,6 +23,18 @@ internal enum MerchantCategory
 internal sealed record MerchantPick(MerchantCategory Category, int Index);
 
 /// <summary>
+/// A card selected by an event plan. DeckSlot is captured from the shadow
+/// state immediately before the event so duplicate copies remain distinct.
+/// SelectionStep identifies the native card-selection request when an event
+/// asks for more than one card or opens several requests in sequence.
+/// </summary>
+internal sealed record EventCardPick(
+    int SelectionStep,
+    ModelId CardId,
+    int DeckSlot = -1,
+    int SelectionOrder = 0);
+
+/// <summary>
 /// A player intent recorded on one planned room. Choices never touch live
 /// state; they are applied to cloned/shadow state by the forecast pipeline.
 /// </summary>
@@ -38,13 +50,72 @@ internal abstract record RoutePlanChoice
     /// discard first when the slots are full (replacement).</summary>
     internal sealed record Potion(IReadOnlyList<int> TakenPotions, ModelId? DiscardPotion) : RoutePlanChoice;
 
+    /// <summary>
+    /// The three independent decisions exposed by one combat reward screen.
+    /// Older plans stored one of CardReward, Potion, or Relic and consequently
+    /// lost the other decisions as soon as another reward control was used.
+    /// </summary>
+    internal sealed record Combat(
+        CardReward? CardRewardChoice,
+        Potion? PotionChoice,
+        bool TakeRelic) : RoutePlanChoice;
+
     internal sealed record Merchant(IReadOnlyList<MerchantPick> Picks, bool RemoveCard) : RoutePlanChoice;
 
-    internal sealed record EventOption(int OptionIndex) : RoutePlanChoice;
+    internal sealed record EventOption(int OptionIndex, IReadOnlyList<EventCardPick> CardPicks) : RoutePlanChoice
+    {
+        public EventOption(int optionIndex)
+            : this(optionIndex, [])
+        {
+        }
+    }
 
-    internal sealed record RestSite(string OptionId, ModelId? TargetCard) : RoutePlanChoice;
+    internal sealed record RestSite(string OptionId, ModelId? TargetCard) : RoutePlanChoice
+    {
+        /// <summary>
+        /// Cook removes two cards. Smith and the other rest actions leave this
+        /// unset; keeping it optional preserves the existing plan data shape.
+        /// </summary>
+        public ModelId? SecondTargetCard { get; init; }
+
+        /// <summary>
+        /// Zero-based deck slots captured in the state immediately before this
+        /// rest site. ModelId alone cannot distinguish two copies of a card.
+        /// A negative value keeps compatibility with older in-memory choices.
+        /// </summary>
+        public int TargetCardSlot { get; init; } = -1;
+        public int SecondTargetCardSlot { get; init; } = -1;
+
+        /// <summary>
+        /// A rest-site choice is complete once its required targets are known.
+        /// This is kept on the choice itself so stale UI controls cannot mutate
+        /// an already committed action after the panel is rebuilt.
+        /// </summary>
+        public bool IsCommitted => OptionId switch
+        {
+            "" => false,
+            "SMITH" => TargetCard is not null,
+            "COOK" => TargetCard is { } first
+                       && SecondTargetCard is { } second
+                       && (first.Entry != second.Entry
+                           || (TargetCardSlot >= 0
+                               && SecondTargetCardSlot >= 0
+                               && TargetCardSlot != SecondTargetCardSlot)),
+            _ => true
+        };
+    }
 
     internal sealed record Relic(bool Take) : RoutePlanChoice;
+
+    /// <summary>Normalizes legacy single-reward choices into the composite form.</summary>
+    internal static Combat AsCombat(RoutePlanChoice? choice) => choice switch
+    {
+        Combat combat => combat,
+        CardReward card => new Combat(card, null, true),
+        Potion potion => new Combat(null, potion, true),
+        Relic relic => new Combat(null, null, relic.Take),
+        _ => new Combat(null, null, true)
+    };
 }
 
 /// <summary>

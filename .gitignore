@@ -5,6 +5,8 @@
 .reference/
 .tools/
 .test-dependency-staging/
+.release-stage-*/
+.zcode/
 artifacts/
 bin/
 obj/

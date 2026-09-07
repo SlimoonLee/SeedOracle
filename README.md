@@ -44,7 +44,7 @@ Seed Oracle 是《Slay the Spire 2》`0.111.0` 的路线信息前瞻 Mod。它�
 
 ## 当前兼容性
 
-Seed Oracle `0.1.21` 直接依赖作者工坊版 Combat Solver `0.31.2+` 的 public API v5。该 API 已合并到 [Torch1230/CombatSolver](https://github.com/Torch1230/CombatSolver) 作者主线；无需再把本地 API 分支放进游戏 `mods` 目录。旧的无 API 构建会被适配器安全标记为暂不支持，不能用于战前预测。
+Seed Oracle `0.1.22` 直接依赖作者工坊版 Combat Solver `0.31.2+` 的 public API v5。该 API 已合并到 [Torch1230/CombatSolver](https://github.com/Torch1230/CombatSolver) 作者主线；无需再把本地 API 分支放进游戏 `mods` 目录。旧的无 API 构建会被适配器安全标记为暂不支持，不能用于战前预测。
 
 ## 构建
 

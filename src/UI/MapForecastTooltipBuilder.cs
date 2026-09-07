@@ -18,6 +18,151 @@ internal static class MapForecastTooltipBuilder
     private const int MaximumDisplayedRoutesPerGroup = 3;
     private const int MaximumBossPanels = 3;
 
+    /// <summary>
+    /// Narrows a map forecast to the worldline represented by the current
+    /// route plan. Planning mode has an explicit route choice, so showing the
+    /// all-route breakdown here would describe branches the player did not
+    /// select. The target node itself is omitted from RouteVariantForecast.Route
+    /// by the forecasting service; only planned rooms before it are matched.
+    /// </summary>
+    public static MapNodeForecast NarrowToPlan(
+        MapNodeForecast forecast,
+        RoutePlan? plan,
+        MapCoord targetCoord)
+    {
+        var variant = MatchPlanVariant(forecast.RouteVariants, plan, targetCoord)
+                      ?? forecast.RouteVariants.FirstOrDefault();
+        if (variant is null)
+            return forecast;
+
+        var eventForecast = variant.Event is null
+            ? null
+            : Forecast<IReadOnlyList<EventDetails>>.CurrentWorldline(
+                [variant.Event],
+                forecast.Events?.Dependencies
+                    ?? PredictionDependency.EventState | PredictionDependency.PlayerState,
+                forecast.Events?.Reason);
+        var encounterForecast = variant.Encounter is null
+            ? null
+            : Forecast<IReadOnlyList<EncounterDetails>>.CurrentWorldline(
+                [variant.Encounter],
+                forecast.Encounter?.Dependencies
+                    ?? PredictionDependency.EncounterQueue | PredictionDependency.RunSeed | PredictionDependency.Floor,
+                forecast.Encounter?.Reason);
+        var unknownForecast = forecast.Point.PointType == MapPointType.Unknown
+            ? Forecast<RoomType>.CurrentWorldline(
+                variant.RoomType,
+                forecast.UnknownRoom?.Dependencies
+                    ?? PredictionDependency.UnknownMapPoint | PredictionDependency.EventState,
+                forecast.UnknownRoom?.Reason)
+            : null;
+
+        return forecast with
+        {
+            UnknownRoom = unknownForecast,
+            Events = eventForecast,
+            Encounter = encounterForecast,
+            Merchant = variant.Merchant,
+            MonsterHp = variant.Encounter is null ? null : forecast.MonsterHp,
+            RouteVariants = [variant]
+        };
+    }
+
+    private static RouteVariantForecast? MatchPlanVariant(
+        IReadOnlyList<RouteVariantForecast> variants,
+        RoutePlan? plan,
+        MapCoord targetCoord)
+    {
+        if (variants.Count == 0)
+            return null;
+
+        var entries = plan?.Phase == RoutePlanPhase.Active
+            ? plan.Entries
+            : [];
+        var headIndex = 0;
+        while (headIndex < entries.Count && entries[headIndex].IsCompleted)
+            headIndex++;
+
+        // If the hovered node is planned, match the rooms before that entry.
+        // For a node outside the plan, require the whole active plan prefix;
+        // if no route contains it, the caller deliberately falls back to the
+        // first variant while still keeping a single planning tooltip.
+        var targetIndex = -1;
+        for (var index = headIndex; index < entries.Count; index++)
+        {
+            if (entries[index].Coord == targetCoord)
+            {
+                targetIndex = index;
+                break;
+            }
+        }
+
+        var targetChoice = targetIndex >= 0 ? entries[targetIndex].Choice : null;
+        var choiceVariants = variants
+            .Where(variant => MatchesPlanChoice(variant, targetChoice))
+            .ToArray();
+        if (choiceVariants.Length == 0)
+            choiceVariants = variants.ToArray();
+
+        var targetIsPlanned = targetIndex >= 0;
+        var requiredEnd = targetIsPlanned ? targetIndex : entries.Count;
+        if (requiredEnd <= headIndex)
+            return choiceVariants[0];
+
+        foreach (var variant in choiceVariants)
+        {
+            var coords = variant.Route
+                .Select(choice => choice.Point.coord)
+                .ToArray();
+            var plannedIndex = headIndex;
+            var consuming = false;
+            var matched = true;
+            foreach (var coord in coords)
+            {
+                if (plannedIndex < requiredEnd && coord == entries[plannedIndex].Coord)
+                {
+                    consuming = true;
+                    plannedIndex++;
+                }
+                else if (!targetIsPlanned && consuming && plannedIndex >= requiredEnd)
+                {
+                    // The active plan is a prefix of this route. Once that
+                    // prefix is consumed, arbitrary travelable rooms may lead
+                    // to a hovered node that has not been added to the plan.
+                    continue;
+                }
+                else if (!consuming)
+                {
+                    continue;
+                }
+                else
+                {
+                    matched = false;
+                    break;
+                }
+            }
+
+            if (matched && plannedIndex == requiredEnd)
+                return variant;
+        }
+
+        return null;
+    }
+
+    internal static bool MatchesPlanChoice(
+        RouteVariantForecast variant,
+        RoutePlanChoice? choice) => choice switch
+    {
+        RoutePlanChoice.EventOption { OptionIndex: >= 0 } => variant.Event is not null,
+        RoutePlanChoice.Merchant => variant.Merchant is not null,
+        RoutePlanChoice.RestSite { OptionId: { Length: > 0 } } => variant.RoomType == RoomType.RestSite,
+        RoutePlanChoice.CardReward => variant.CombatRewards is not null || variant.Encounter is not null,
+        RoutePlanChoice.Potion => variant.CombatRewards is not null || variant.Merchant is not null,
+        RoutePlanChoice.Relic => variant.CombatRewards is not null || variant.Treasure is not null,
+        RoutePlanChoice.Combat => variant.CombatRewards is not null || variant.Encounter is not null,
+        _ => true
+    };
+
     public static MapForecastTooltip? Build(
         MapNodeForecast forecast,
         PreCombatForecastDisplay? combatSolver = null)
