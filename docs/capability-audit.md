@@ -8,7 +8,7 @@
 |---|---:|---|
 | Slay the Spire 2 | `0.111.0` / `41cef1ea` | live `sts2.dll`、`sts2.xml` 与 `release_info.json` |
 | Random Foreseer | `0.13.11` / `a8ccb72953b9d300a4b39c67c28b73aba1b5c445` | Workshop `3747531952/lib/0.13.11`；仓库 release tag 与 build-info 一致 |
-| Combat Solver | 作者工坊条目 `3790899961`，manifest `0.31.2`，包含 public API v5 | Seed Oracle 已直接对工坊 DLL 编译验证；本地 API DLL 仅留作离线备份，不再部署进游戏目录 |
+| Combat Solver | public API v5 最低门槛 `0.31.2`；清单使用 `min_version` 下限，更新的主 Mod 版本仍满足依赖 | 本次审计用作者工坊条目 `3790899961` 的 `0.31.2` DLL 编译验证；版本号是验证样本，不是精确锁定 |
 
 审计顺序采用 live 游戏程序集、live Mod 程序集、与 live 提交完全一致的源码。反编译仅用于确认当前 `sts2.dll` 的实际实现。
 
@@ -31,7 +31,7 @@
 | 未进入商店的初始库存 | RF 只提供补货预测，没有完整初始库存入口 | 部分复用 RF 的 `RunPredictionContext`、卡牌预测与 Hook Mirrors | 是，集中反射兼容 | 从当前起第 N 次进店的顺序生成、遗物、药水、价格与路线投射 |
 | 当前战斗 Intent | Combat Solver `IntentForecaster` | 无公开 API | 仅能力探测 | 否 |
 | 当前战斗 Root / 搜索 | Combat Solver `CombatRootSnapshot`、`CombatSearchCoordinator` | 仍不公开，均为 `internal` | public API 不暴露这些类型 | 否 |
-| 战前战损、worker 状态与假设样本 | Combat Solver public PreCombat API v5 | 主进程只捕获/复核完整存档；开战、样本 RNG 与搜索位于静音、可复用的独立 headless 进程 | 是，编译期契约 | 确定路线逐项计算与缓存；显示 PID/工作集/私有内存；保活 2/10/30 分钟、一直维持、自动关闭、手动关闭及预热；0～10 次当前幕弱怪/强怪/精英/指定怪组/Boss 假设样本 |
+| 战前战损、worker 状态与假设样本 | Combat Solver public PreCombat API v5（最低门槛 `0.31.2`） | 主进程只捕获/复核完整存档；开战、样本 RNG 与搜索位于静音、可复用的独立 headless 进程 | 是，编译期契约 | 确定路线逐项计算与缓存；显示 PID/工作集/私有内存；保活 2/10/30 分钟、一直维持、自动关闭、手动关闭及预热；0～10 次当前幕弱怪/强怪/精英/指定怪组/Boss 假设样本 |
 | 准确度与依赖传播 | 无 | 否 | 否 | 是 |
 | 地图 HoverTip | 游戏 `NMapPoint.OnFocus` | Harmony Postfix | 否 | 是 |
 | 三幕先古 / Boss 总览 | 游戏跑局中已生成的 `ActModel.Ancient`、`BossEncounter`、`SecondBossEncounter` 与先古历史 | 只读；未访问先古在序列化影子跑局生成初始选项 | 否 | 地图顶部常驻三栏，未来状态相关选项明确标注条件预测 |
@@ -71,7 +71,7 @@ RF 的事件选项预测原本只服务于已经进入的事件。Seed Oracle �
 
 作者主线中的 `CombatSolver.Api.PreCombatForecastApi` v5 已在合并提交 `0552b33` 中可用。它没有尝试从未来 Encounter 手工拼装不完整 Root，而是把规范化完整跑局、Encounter、目标楼层/列坐标、节点类型和已确定的连续非战斗地图历史交给独立游戏进程；worker 精确恢复跑局、补记结构性路径历史并应用可选入战 HP 后，通过原生入口建立战斗，再复用上述内部 Root 与搜索管线。独立的 `SimulateAsync` 在精确恢复校验后才替换隔离战斗 RNG；状态接口只读返回 worker 进程、内存信息和可空空闲期限。
 
-`CombatSolverAdapter` 直接依赖该编译期契约，并在启动时检查 `ApiVersion >= 5` 与 `IsAvailable`。当前 Seed Oracle 构建直接引用作者工坊条目 `3790899961` 的 `0.31.2` DLL；仅有旧无 API 构建时会保持不支持，不会退回到不安全的内部入口。
+`CombatSolverAdapter` 直接依赖该编译期契约，并在启动时检查 `ApiVersion >= 5` 与 `IsAvailable`；规划模拟再通过反射探测 v6 方法。`SeedOracle.json` 的 `min_version` 只表达 v5 最低门槛，更新的 Combat Solver 主 Mod 版本无需改 SeedOracle 清单；仅有旧无 API 构建时会保持不支持，不会退回到不安全的内部入口。本次编译验证使用作者工坊条目 `3790899961` 的 `0.31.2` DLL，属于验证样本而非精确依赖锁定。
 
 ## 已确认的游戏行为
 
