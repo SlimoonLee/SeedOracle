@@ -56,8 +56,6 @@ internal sealed partial class RandomForeseerAdapter
     private static readonly HashSet<string> EventExecutionDenyList = new(StringComparer.Ordinal)
     {
         "CrystalSphere",     // minigame screen + network messages (has its own layout viewer)
-        "BattlewornDummy",   // EnterCombatWithoutExitingEvent: needs synchronizer + room push
-        "PunchOff",
         "Amalgamator",       // option effects await frame/UI signals: sync-block deadlocks
     };
 
@@ -83,9 +81,6 @@ internal sealed partial class RandomForeseerAdapter
         ("RoomFullOfCheese", "INITIAL.options.GORGE", EventPlanningKind.CardOrUiChoice),
         ("BrainLeech", "RIP", EventPlanningKind.CardOrUiChoice),
 
-        // These are represented explicitly instead of attempting to enter a
-        // room/scene from the map planner.
-        ("DenseVegetation", "FIGHT", EventPlanningKind.SpecialCombat),
         ("Trial", "DOUBLE_DOWN", EventPlanningKind.RunEnding),
     ];
 
@@ -126,11 +121,6 @@ internal sealed partial class RandomForeseerAdapter
     {
         if (entryName.Contains("CrystalSphere", StringComparison.Ordinal))
             return new EventPlanningCapability(EventPlanningKind.Minigame, "crystal_sphere");
-        if (entryName.Contains("BattlewornDummy", StringComparison.Ordinal)
-            || entryName.Contains("PunchOff", StringComparison.Ordinal))
-        {
-            return new EventPlanningCapability(EventPlanningKind.SpecialCombat, "event_combat");
-        }
         if (entryName.Contains("Amalgamator", StringComparison.Ordinal))
             return new EventPlanningCapability(EventPlanningKind.CardOrUiChoice, "awaits_ui_frames");
 
@@ -180,7 +170,7 @@ internal sealed partial class RandomForeseerAdapter
         try
         {
             var snapshot = plannedRunSnapshot ?? RunManager.Instance.ToSave(preFinishedRoom: null);
-            var shadowRun = RunState.FromSerializable(snapshot);
+            var shadowRun = PlanningPredictionService.RestoreRun(snapshot);
             var shadowPlayer = shadowRun.GetPlayer(plannedPlayerNetId ?? livePlayer.NetId)
                                ?? throw new InvalidOperationException(
                                    $"shadow snapshot lacks player {livePlayer.NetId}");
@@ -214,7 +204,7 @@ internal sealed partial class RandomForeseerAdapter
             // RF event hooks can consult their per-run prediction state while
             // initial options are generated. Keep the context alive through
             // the option execution as well as initialization.
-            var routeState = CreateRouteRewardState(shadowPlayer);
+            var routeState = _contextConstructor!.Invoke([shadowPlayer]);
             InitShadowEventOn(shadowRun, shadowPlayer, canonicalEvent, out var shadowEvent);
             GC.KeepAlive(routeState);
 
@@ -395,7 +385,7 @@ internal sealed partial class RandomForeseerAdapter
     {
         var (shadowRun, shadowPlayer) = PrepareShadowRun(livePlayer);
         ActiveShadowPlayer = shadowPlayer;
-        var routeState = CreateRouteRewardState(shadowPlayer);
+        var routeState = _contextConstructor!.Invoke([shadowPlayer]);
         InitShadowEventOn(shadowRun, shadowPlayer, canonical, out shadowEvent);
         GC.KeepAlive(routeState);
         return shadowRun;
@@ -405,7 +395,7 @@ internal sealed partial class RandomForeseerAdapter
     {
         ActiveShadowPlayer = null;
         var snapshot = RunManager.Instance.ToSave(preFinishedRoom: null);
-        var shadowRun = RunState.FromSerializable(snapshot);
+        var shadowRun = PlanningPredictionService.RestoreRun(snapshot);
         var shadowPlayer = shadowRun.GetPlayer(livePlayer.NetId)
                            ?? throw new InvalidOperationException("shadow snapshot lacks player");
         return (shadowRun, shadowPlayer);
@@ -439,7 +429,7 @@ internal sealed partial class RandomForeseerAdapter
         try
         {
             var snapshot = RunManager.Instance.ToSave(preFinishedRoom: null);
-            var shadowRun = RunState.FromSerializable(snapshot);
+            var shadowRun = PlanningPredictionService.RestoreRun(snapshot);
             var shadowPlayer = shadowRun.GetPlayer(livePlayer.NetId)
                                ?? throw new InvalidOperationException("shadow snapshot lacks player");
             EnterShadowIsolation(shadowPlayer);
@@ -538,84 +528,6 @@ internal sealed partial class RandomForeseerAdapter
                 DivinationCount = divinationCount,
                 Error = root.Message
             };
-        }
-        finally
-        {
-            ExitShadowIsolation();
-        }
-    }
-
-    /// <summary>
-    /// Victory-drop prediction for combat-entry event branches (audit §4a):
-    /// no combat is entered; basic rewards come from the cloned reward
-    /// pipeline over the event's own encounter, and per-event resume effects
-    /// are mirrored exactly as the option closures perform them.
-    /// </summary>
-    internal sealed class EventCombatDrops
-    {
-        public Forecast<CombatRewardDetails>? Rewards { get; set; }
-        public List<string> Labels { get; } = [];
-        public string? Error { get; set; }
-    }
-
-    internal EventCombatDrops PredictEventCombatVictoryDrops(
-        Player livePlayer,
-        EventModel canonicalEvent,
-        int optionIndex)
-    {
-        var drops = new EventCombatDrops();
-        try
-        {
-            var encounter = canonicalEvent.CanonicalEncounter
-                            ?? throw new InvalidOperationException("event has no encounter");
-            var snapshot = RunManager.Instance.ToSave(preFinishedRoom: null);
-            var shadowRun = RunState.FromSerializable(snapshot);
-            var shadowPlayer = shadowRun.GetPlayer(livePlayer.NetId)
-                               ?? throw new InvalidOperationException("shadow snapshot lacks player");
-            EnterShadowIsolation(shadowPlayer);
-
-            var mutableEncounter = encounter.ToMutable();
-            mutableEncounter.GenerateMonstersWithSlots(shadowRun);
-            drops.Rewards = PredictCombatRewards(shadowPlayer, [RoomType.Monster], mutableEncounter);
-
-            var entryName = canonicalEvent.GetType().Name;
-            switch (entryName)
-            {
-                case "BattlewornDummy":
-                    if (optionIndex == 0)
-                    {
-                        var pool = shadowPlayer.Character.PotionPool
-                            .GetUnlockedPotions(shadowPlayer.UnlockState)
-                            .Concat(ModelDb.PotionPool<SharedPotionPool>()
-                                .GetUnlockedPotions(shadowPlayer.UnlockState));
-                        var potion = shadowPlayer.PlayerRng.Rewards.NextItem(pool);
-                        drops.Labels.Add(potion is null
-                            ? "战后药水：无可用"
-                            : $"战后药水：{potion!.Title.GetFormattedText()}");
-                    }
-                    else if (optionIndex == 1)
-                    {
-                        drops.Labels.Add("战后：随机强化 2 张可升级牌（牌组变化随 M4 线程生效）");
-                    }
-                    else if (optionIndex == 2)
-                    {
-                        var relic = RelicFactory.PullNextRelicFromFront(shadowPlayer);
-                        drops.Labels.Add(relic is null
-                            ? "战后遗物：无"
-                            : $"战后遗物：{relic.Title.GetFormattedText()}");
-                    }
-                    break;
-                case "PunchOff":
-                    drops.Labels.Add("额外奖励：遗物 + 药水（接受时结算）");
-                    break;
-            }
-
-            return drops;
-        }
-        catch (Exception exception)
-        {
-            drops.Error = exception.GetBaseException().Message;
-            return drops;
         }
         finally
         {

@@ -2,6 +2,7 @@ using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Map;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Runs;
+using MegaCrit.Sts2.Core.Saves;
 
 namespace SeedOracle.Integration;
 
@@ -10,6 +11,7 @@ internal interface ICombatSolverAdapter
     IntegrationStatus Status { get; }
 
     bool SupportsPreCombatForecast { get; }
+    bool SupportsPlanningSimulation { get; }
 
     string CaptureLiveStateToken(RunState run);
 
@@ -28,6 +30,18 @@ internal interface ICombatSolverAdapter
         RunState run,
         EncounterModel encounter,
         RoomType roomType,
+        ulong sampleSeed,
+        CombatSolverForecastOptions options,
+        CancellationToken cancellationToken = default);
+
+    Task<CombatSolverForecastResult> SimulatePlanningAsync(
+        RunState liveRun,
+        SerializableRun plannedRun,
+        EncounterModel encounter,
+        int targetActFloor,
+        int targetMapColumn,
+        RoomType roomType,
+        MapPointType mapPointType,
         ulong sampleSeed,
         CombatSolverForecastOptions options,
         CancellationToken cancellationToken = default);

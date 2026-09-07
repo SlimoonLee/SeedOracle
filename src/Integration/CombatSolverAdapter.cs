@@ -1,9 +1,11 @@
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using CombatSolver.Api;
 using MegaCrit.Sts2.Core.Map;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Runs;
+using MegaCrit.Sts2.Core.Saves;
 
 namespace SeedOracle.Integration;
 
@@ -12,12 +14,15 @@ internal sealed class CombatSolverAdapter : ICombatSolverAdapter
     public IntegrationStatus Status { get; }
 
     public bool SupportsPreCombatForecast { get; }
+    public bool SupportsPlanningSimulation { get; }
 
     public CombatSolverAdapter()
     {
         var assembly = typeof(global::CombatSolver.Entry).Assembly;
         SupportsPreCombatForecast = PreCombatForecastApi.ApiVersion >= 5
                                     && PreCombatForecastApi.IsAvailable;
+        SupportsPlanningSimulation = SupportsPreCombatForecast
+            && typeof(PreCombatForecastApi).GetMethod("SimulatePlanningAsync") is not null;
 
         Status = new IntegrationStatus(
             "CombatSolver",
@@ -32,7 +37,8 @@ internal sealed class CombatSolverAdapter : ICombatSolverAdapter
                 ["reusable_isolated_worker"] = SupportsPreCombatForecast,
                 ["isolated_worker_audio_muted"] = SupportsPreCombatForecast,
                 ["precombat_worker_memory_status"] = SupportsPreCombatForecast,
-                ["hypothetical_combat_samples"] = SupportsPreCombatForecast
+                ["hypothetical_combat_samples"] = SupportsPreCombatForecast,
+                ["planning_shadow_combat_samples"] = SupportsPlanningSimulation
             });
     }
 
@@ -101,6 +107,7 @@ internal sealed class CombatSolverAdapter : ICombatSolverAdapter
                 MapPointType.Monster => PreCombatMapPointKind.Normal,
                 MapPointType.Elite => PreCombatMapPointKind.Elite,
                 MapPointType.Boss => PreCombatMapPointKind.Boss,
+                MapPointType.Ancient => PreCombatMapPointKind.Event,
                 MapPointType.Unknown => PreCombatMapPointKind.Unknown,
                 _ => throw new ArgumentOutOfRangeException(nameof(mapPointType), mapPointType, null)
             },
@@ -125,6 +132,82 @@ internal sealed class CombatSolverAdapter : ICombatSolverAdapter
             cancellationToken: cancellationToken);
         return ToForecastResult(result);
     }
+
+    public Task<CombatSolverForecastResult> SimulatePlanningAsync(
+        RunState liveRun,
+        SerializableRun plannedRun,
+        EncounterModel encounter,
+        int targetActFloor,
+        int targetMapColumn,
+        RoomType roomType,
+        MapPointType mapPointType,
+        ulong sampleSeed,
+        CombatSolverForecastOptions options,
+        CancellationToken cancellationToken = default)
+    {
+        if (!SupportsPlanningSimulation)
+            return Task.FromResult(UnsupportedPlanningResult());
+
+        return SimulatePlanningCoreAsync(liveRun, plannedRun, encounter, targetActFloor,
+            targetMapColumn, roomType, mapPointType, sampleSeed, options, cancellationToken);
+    }
+
+    // Keep the v6 member reference out of the fallback path when a v5 DLL is loaded.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static async Task<CombatSolverForecastResult> SimulatePlanningCoreAsync(
+        RunState liveRun,
+        SerializableRun plannedRun,
+        EncounterModel encounter,
+        int targetActFloor,
+        int targetMapColumn,
+        RoomType roomType,
+        MapPointType mapPointType,
+        ulong sampleSeed,
+        CombatSolverForecastOptions options,
+        CancellationToken cancellationToken)
+    {
+
+        PreCombatForecastResult result = await PreCombatForecastApi.SimulatePlanningAsync(
+            liveRun,
+            plannedRun,
+            encounter,
+            targetActFloor,
+            targetMapColumn,
+            ToRoomKind(roomType),
+            mapPointType switch
+            {
+                MapPointType.Monster => PreCombatMapPointKind.Normal,
+                MapPointType.Elite => PreCombatMapPointKind.Elite,
+                MapPointType.Boss => PreCombatMapPointKind.Boss,
+                MapPointType.Ancient => PreCombatMapPointKind.Event,
+                MapPointType.Unknown => PreCombatMapPointKind.Unknown,
+                _ => throw new ArgumentOutOfRangeException(nameof(mapPointType), mapPointType, null)
+            },
+            new PreCombatSimulationOptions
+            {
+                SearchBudgetMilliseconds = options.SearchBudgetMilliseconds,
+                OverallTimeoutMilliseconds = options.OverallTimeoutMilliseconds,
+                MaxDegreeOfParallelism = options.MaxDegreeOfParallelism,
+                SampleSeed = sampleSeed,
+                CloseWorkerAfterRequest = options.CloseWorkerAfterRequest,
+                WorkerIdleTimeoutMilliseconds = options.WorkerIdleTimeoutMilliseconds,
+            },
+            cancellationToken);
+        return ToForecastResult(result);
+    }
+
+    private static CombatSolverForecastResult UnsupportedPlanningResult() => new(
+        false,
+        PreCombatForecastStatus.Unsupported.ToString(),
+        null,
+        [],
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        "Combat Solver planning simulation API v6 is unavailable.");
 
     public async Task<CombatSolverForecastResult> SimulateAsync(
         RunState run,

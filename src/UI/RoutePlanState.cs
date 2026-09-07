@@ -3,6 +3,7 @@ using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Map;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Runs;
+using MegaCrit.Sts2.Core.Rooms;
 
 namespace SeedOracle.UI;
 
@@ -34,6 +35,33 @@ internal sealed record EventCardPick(
     int DeckSlot = -1,
     int SelectionOrder = 0);
 
+internal sealed record EventPlanStep(string TextKey, IReadOnlyList<EventCardPick> CardPicks, bool? TakeRewards = null)
+{
+    public CombatSimulationReference? SimulationReference { get; init; }
+    public RoutePlanChoice.Combat? CombatRewards { get; init; }
+}
+
+internal sealed record CombatSimulationPotionUse(
+    string Id,
+    string Title,
+    int Turn,
+    int Slot);
+
+internal sealed record CombatSimulationReference(
+    int SampleCount,
+    int SelectedSampleIndex,
+    ulong SampleSeed,
+    int ProjectedHpLoss,
+    int? FinalHp,
+    IReadOnlyList<CombatSimulationPotionUse> PotionUses,
+    string EncounterId,
+    string StateToken,
+    RoomType RoomType,
+    int TargetFloor,
+    int TargetColumn);
+
+internal sealed record CardRewardPick(int CardIndex = -1, ModelId? CardId = null, string? AlternativeId = null);
+
 /// <summary>
 /// A player intent recorded on one planned room. Choices never touch live
 /// state; they are applied to cloned/shadow state by the forecast pipeline.
@@ -44,26 +72,47 @@ internal abstract record RoutePlanChoice
     {
     }
 
-    internal sealed record CardReward(int BundleIndex, int CardIndex, bool Skip) : RoutePlanChoice;
+    internal sealed record CardReward(int BundleIndex, IReadOnlyList<CardRewardPick> Steps) : RoutePlanChoice;
 
     /// <summary>Potion pickup from rewards: indices taken, plus the potion to
     /// discard first when the slots are full (replacement).</summary>
-    internal sealed record Potion(IReadOnlyList<int> TakenPotions, ModelId? DiscardPotion) : RoutePlanChoice;
+    internal sealed record Potion(
+        IReadOnlyList<int> TakenPotions,
+        ModelId? DiscardPotion) : RoutePlanChoice;
 
     /// <summary>
-    /// The three independent decisions exposed by one combat reward screen.
-    /// Older plans stored one of CardReward, Potion, or Relic and consequently
-    /// lost the other decisions as soon as another reward control was used.
+    /// Card groups, potions and relics are independent decisions.
     /// </summary>
     internal sealed record Combat(
-        CardReward? CardRewardChoice,
+        IReadOnlyList<CardReward> CardRewardChoices,
         Potion? PotionChoice,
-        bool TakeRelic) : RoutePlanChoice;
+        bool TakeRelic) : RoutePlanChoice
+    {
+        public CombatSimulationReference? SimulationReference { get; init; }
+
+        internal CardReward ChoiceForGroup(int groupIndex) =>
+            CardRewardChoices.FirstOrDefault(choice => choice.BundleIndex == groupIndex)
+            ?? new CardReward(groupIndex, []);
+
+        internal Combat WithCardRewardChoice(CardReward choice) =>
+            this with
+            {
+                CardRewardChoices = CardRewardChoices
+                    .Where(existing => existing.BundleIndex != choice.BundleIndex)
+                    .Append(choice)
+                    .OrderBy(existing => existing.BundleIndex)
+                    .ToArray()
+            };
+    }
 
     internal sealed record Merchant(IReadOnlyList<MerchantPick> Picks, bool RemoveCard) : RoutePlanChoice;
 
     internal sealed record EventOption(int OptionIndex, IReadOnlyList<EventCardPick> CardPicks) : RoutePlanChoice
     {
+        public CombatSimulationReference? SimulationReference { get; init; }
+        public Combat CombatRewards { get; init; } = new([], null, true);
+        public IReadOnlyList<EventPlanStep> PreviousSteps { get; init; } = [];
+        public bool? TakeRewards { get; init; }
         public EventOption(int optionIndex)
             : this(optionIndex, [])
         {
@@ -111,10 +160,10 @@ internal abstract record RoutePlanChoice
     internal static Combat AsCombat(RoutePlanChoice? choice) => choice switch
     {
         Combat combat => combat,
-        CardReward card => new Combat(card, null, true),
-        Potion potion => new Combat(null, potion, true),
-        Relic relic => new Combat(null, null, relic.Take),
-        _ => new Combat(null, null, true)
+        CardReward card => new Combat([card], null, true),
+        Potion potion => new Combat([], potion, true),
+        Relic relic => new Combat([], null, relic.Take),
+        _ => new Combat([], null, true)
     };
 }
 

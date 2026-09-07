@@ -2,7 +2,6 @@ using System.Collections;
 using System.Reflection;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Players;
-using MegaCrit.Sts2.Core.Entities.Rngs;
 using MegaCrit.Sts2.Core.Events;
 using MegaCrit.Sts2.Core.Helpers;
 using MegaCrit.Sts2.Core.HoverTips;
@@ -46,22 +45,18 @@ internal sealed partial class RandomForeseerAdapter
             throw new ArgumentException("The resolved route must end in an event room.", nameof(resolvedRooms));
 
         var bridge = EventPredictionBridge.Value;
-        if (!SupportsRouteRewards || !bridge.IsAvailable)
+        if (_contextConstructor is null || !bridge.IsAvailable)
             return null;
 
         try
         {
-            var snapshot = RunManager.Instance.ToSave(preFinishedRoom: null);
-            var shadowRun = RunState.FromSerializable(snapshot);
-            var shadowPlayer = shadowRun.GetPlayer(player.NetId)
-                               ?? throw new InvalidOperationException(
-                                   $"Could not find player {player.NetId} in the prediction snapshot.");
-
-            var routeState = CreateRouteRewardState(shadowPlayer);
-            AdvanceRoomsBeforeTarget(routeState, resolvedRooms);
-            ApplyRouteStateToShadowPlayer(routeState, shadowRun);
-
-            var details = PredictInitialEventContents(bridge, shadowPlayer, eventModel);
+            var planning = new PlanningPredictionService();
+            var state = planning.CreateState((RunState)player.RunState, player);
+            using var isolation = ShadowIsolation.Enter(state.Player);
+            planning.AdvanceRoomsBeforeTarget(state, resolvedRooms);
+            var context = _contextConstructor.Invoke([state.Player]);
+            var details = PredictInitialEventContents(bridge, state.Player, eventModel);
+            GC.KeepAlive(context);
             if (details.Options.Count == 0)
                 return null;
 
@@ -82,43 +77,6 @@ internal sealed partial class RandomForeseerAdapter
                 $"Random Foreseer adapter rejected the future event state: {root.Message}",
                 EventContentDependencies);
         }
-    }
-
-    private void ApplyRouteStateToShadowPlayer(RouteRewardState state, RunState shadowRun)
-    {
-        var playerSave = state.Player.ToSerializable();
-        playerSave.Rng.Rngs[PlayerRngType.Rewards] = state.Rewards.ToSerializable();
-        playerSave.Rng.Rngs[PlayerRngType.Shops] = state.Shops.ToSerializable();
-        playerSave.RelicGrabBag = state.PlayerRelicGrabBag.ToSerializable();
-
-        var cardRarityOdds = _contextType?.GetProperty("CardRarityOdds", AnyInstance)?.GetValue(state.Context)
-                             ?? throw new MissingMemberException(_contextType?.FullName, "CardRarityOdds");
-        playerSave.Odds.CardRarityOddsValue = (float)(cardRarityOdds.GetType()
-            .GetProperty("CurrentValue", AnyInstance)?.GetValue(cardRarityOdds)
-            ?? throw new MissingMemberException(cardRarityOdds.GetType().FullName, "CurrentValue"));
-        playerSave.Odds.PotionRewardOddsValue = state.PotionRewardOdds.CurrentValue;
-
-        var simulatedDeck = _contextType?.GetProperty("Deck", AnyInstance)?.GetValue(state.Context)
-                            ?? throw new MissingMemberException(_contextType?.FullName, "Deck");
-        var predictedCards = (IEnumerable?)(simulatedDeck.GetType()
-            .GetProperty("Cards", AnyInstance)?.GetValue(simulatedDeck))
-                             ?? throw new MissingMemberException(simulatedDeck.GetType().FullName, "Cards");
-        playerSave.Deck = predictedCards.Cast<object>()
-            .Select(predicted => (CardModel?)(predicted.GetType()
-                .GetProperty("Preview", AnyInstance)?.GetValue(predicted)))
-            .OfType<CardModel>()
-            .Select(card => card.ToSerializable())
-            .ToList();
-
-        state.Player.SyncWithSerializedPlayer(playerSave);
-        shadowRun.SharedRelicGrabBag.LoadFromSerializable(state.SharedRelicGrabBag.ToSerializable());
-
-        var sharedRng = _contextType?.GetProperty("SharedRng", AnyInstance)?.GetValue(state.Context)
-                        ?? throw new MissingMemberException(_contextType?.FullName, "SharedRng");
-        var niche = (MegaCrit.Sts2.Core.Random.Rng?)(sharedRng.GetType()
-            .GetProperty("Niche", AnyInstance)?.GetValue(sharedRng))
-                    ?? throw new MissingMemberException(sharedRng.GetType().FullName, "Niche");
-        shadowRun.Rng.Niche.LoadFromSerializable(niche.ToSerializable());
     }
 
     private static EventContentDetails PredictInitialEventContents(

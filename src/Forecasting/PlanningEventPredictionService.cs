@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Reflection;
 using MegaCrit.Sts2.Core.CardSelection;
 using MegaCrit.Sts2.Core.Commands;
@@ -12,8 +13,11 @@ using MegaCrit.Sts2.Core.GameActions.Multiplayer;
 using MegaCrit.Sts2.Core.Helpers;
 using MegaCrit.Sts2.Core.HoverTips;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Models.CardPools;
 using MegaCrit.Sts2.Core.Models.PotionPools;
+using MegaCrit.Sts2.Core.Multiplayer.Game;
 using MegaCrit.Sts2.Core.Random;
+using MegaCrit.Sts2.Core.Rewards;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.Core.Saves;
@@ -32,8 +36,6 @@ namespace SeedOracle.Forecasting;
 /// </summary>
 internal sealed class PlanningEventPredictionService
 {
-    private static int _brainLeechEnumerationLogged;
-
     internal enum EventPlanningKind
     {
         Exact,
@@ -82,7 +84,8 @@ internal sealed class PlanningEventPredictionService
         bool IsLocked,
         EventPlanningCapability Capability,
         IReadOnlyList<EventCardSelectionDescriptor> CardSelections,
-        IReadOnlyList<string> HoverTips)
+        IReadOnlyList<string> HoverTips,
+        string? CombatEncounterId = null)
     {
         public EventOptionDescriptor(
             int index,
@@ -122,6 +125,12 @@ internal sealed class PlanningEventPredictionService
         public RunState? ShadowRun { get; set; }
         public Player? ShadowPlayer { get; set; }
         public EventModel? ShadowEvent { get; set; }
+        public IReadOnlyList<EventPlanStep> CompletedSteps { get; set; } = [];
+        public string? CombatEncounterId { get; set; }
+        public bool CombatShouldResumeAfterCombat { get; set; }
+        public IReadOnlyList<Reward> CombatExtraRewards { get; set; } = [];
+        public CombatRewardDetails? CombatRewards { get; set; }
+        public PlanningPredictionService.StateSnapshot? BeforeCombatRewards { get; set; }
     }
 
     internal sealed record PlayerSnapshot(
@@ -140,11 +149,102 @@ internal sealed class PlanningEventPredictionService
         public string? Error { get; init; }
     }
 
-    internal sealed class EventCombatDrops
+    internal PlanningPredictionService.StateSnapshot CaptureCombatState(EventExecutionOutcome outcome)
     {
-        public Forecast<CombatRewardDetails>? Rewards { get; set; }
-        public List<string> Labels { get; } = [];
-        public string? Error { get; set; }
+        if (outcome.ShadowRun is null || outcome.ShadowPlayer is null)
+            throw new InvalidOperationException("事件战斗尚未生成影子状态。");
+        return new PlanningPredictionService.StateSnapshot(
+            PlanningPredictionService.CreateSerializableRun(outcome.ShadowRun),
+            outcome.ShadowPlayer.NetId,
+            0,
+            0,
+            0,
+            false,
+            false,
+            0);
+    }
+
+    internal async Task<bool> ApplyCombatSimulationToEventOutcomeAsync(
+        EventExecutionOutcome outcome,
+        PlanningPredictionService.StateSnapshot combatState,
+        CombatSimulationReference reference,
+        EncounterModel encounter,
+        RoutePlanChoice.Combat rewardChoice)
+    {
+        if (outcome.ShadowRun is null || outcome.ShadowPlayer is null)
+            return false;
+        var planning = new PlanningPredictionService();
+        // Rewards and the event retain their owning player, so resolve on
+        // this fresh execution graph instead of swapping only its RunState.
+        var state = new PlanningPredictionService.State
+        {
+            Run = outcome.ShadowRun,
+            Player = outcome.ShadowPlayer
+        };
+        using var isolation = ShadowIsolation.Enter(state.Player, automateRewards: true);
+        if (!planning.ApplyCombatSimulationReference(
+                state,
+                combatState,
+                reference,
+                encounter,
+                encounter.RoomType))
+        {
+            return false;
+        }
+        outcome.BeforeCombatRewards = planning.Capture(state);
+        var room = new CombatRoom(encounter.ToMutable(), state.Run)
+        {
+            ParentEventId = outcome.ShadowEvent!.Id,
+            ShouldResumeParentEventAfterCombat = outcome.CombatShouldResumeAfterCombat
+        };
+        foreach (var reward in outcome.CombatExtraRewards)
+            room.AddExtraReward(state.Player, reward);
+        var before = RoutePlanResourceSnapshot.Capture(state.Player);
+        var resolvedRewards = new CombatRewardDetails(0, [], [], []);
+        void ApplyRewards(CombatRewardDetails generated)
+        {
+            var groupOffset = resolvedRewards.CardRewardGroups.Count;
+            var potionOffset = resolvedRewards.Potions.Count;
+            var choice = rewardChoice with
+            {
+                CardRewardChoices = rewardChoice.CardRewardChoices
+                    .Where(pick => pick.BundleIndex >= groupOffset)
+                    .Select(pick => pick with { BundleIndex = pick.BundleIndex - groupOffset }).ToArray(),
+                PotionChoice = rewardChoice.PotionChoice is { } potions
+                    ? potions with { TakenPotions = potions.TakenPotions
+                        .Where(index => index >= potionOffset).Select(index => index - potionOffset).ToArray() }
+                    : null
+            };
+            var applied = RoutePlanForecastService.ApplyCombatRewards(state, generated, choice, before);
+            resolvedRewards = new CombatRewardDetails(
+                resolvedRewards.Gold + applied.Gold,
+                resolvedRewards.CardRewardGroups.Concat(applied.CardRewardGroups).ToArray(),
+                resolvedRewards.Potions.Concat(applied.Potions).ToArray(),
+                resolvedRewards.Relics.Concat(applied.Relics).ToArray()) { AppliedDelta = applied.AppliedDelta };
+        }
+        using (var generated = planning.GenerateCombatRewards(state, encounter.RoomType, encounter, room))
+            ApplyRewards(generated);
+
+        if (outcome.CombatShouldResumeAfterCombat)
+        {
+            // Resume can offer another native reward set (including cards).
+            // Keep its group and potion indices continuous with combat drops.
+            using var rewardHandler = ShadowIsolation.UseRewardHandler(async rewards =>
+            {
+                await rewards.GenerateWithoutOffering();
+                using var generated = PlanningPredictionService.DescribeRewards(rewards);
+                ApplyRewards(generated);
+            });
+            using var selector = ShadowIsolation.UseSelector(new ScriptedCardSelector([]));
+            await outcome.ShadowEvent.Resume(room);
+        }
+        outcome.CombatRewards = resolvedRewards;
+        outcome.Finished = !outcome.CombatShouldResumeAfterCombat || outcome.ShadowEvent.IsFinished;
+        outcome.NextOptions.Clear();
+        if (!outcome.Finished)
+            foreach (var option in outcome.ShadowEvent.CurrentOptions)
+                outcome.NextOptions.Add((option.TextKey, option.Title.GetFormattedText()));
+        return true;
     }
 
     private static readonly MethodInfo GenerateInitialEventOptionsMethod = typeof(EventModel)
@@ -157,12 +257,13 @@ internal sealed class PlanningEventPredictionService
         .Single(method => method.Name == "SetEventState"
                           && method.GetParameters().Length == 2);
 
+    private static readonly FieldInfo CombatSynchronizerField = typeof(EventModel)
+        .GetField("_combatSynchronizer", BindingFlags.Instance | BindingFlags.NonPublic)
+        ?? throw new MissingFieldException(typeof(EventModel).FullName, "_combatSynchronizer");
+
     private static readonly HashSet<string> EventExecutionDenyList = new(StringComparer.Ordinal)
     {
         "CrystalSphere",
-        "BattlewornDummy",
-        "PunchOff",
-        "Amalgamator"
     };
 
     private static readonly (string Event, string Key, EventPlanningKind Kind)[] OptionDenyList =
@@ -175,9 +276,6 @@ internal sealed class PlanningEventPredictionService
         ("TheLegendsWereTrue", "INITIAL.options.SLOWLY_FIND_AN_EXIT", EventPlanningKind.RewardChoice),
         ("WhisperingHollow", "GOLD", EventPlanningKind.RewardChoice),
         ("WarHistorianRepy", "UNLOCK_CHEST", EventPlanningKind.RewardChoice),
-        ("RoomFullOfCheese", "INITIAL.options.GORGE", EventPlanningKind.CardOrUiChoice),
-        ("BrainLeech", "RIP", EventPlanningKind.CardOrUiChoice),
-        ("DenseVegetation", "FIGHT", EventPlanningKind.SpecialCombat),
         ("Trial", "DOUBLE_DOWN", EventPlanningKind.RunEnding)
     ];
 
@@ -195,20 +293,9 @@ internal sealed class PlanningEventPredictionService
     {
         if (entryName.Contains("CrystalSphere", StringComparison.Ordinal))
             return new EventPlanningCapability(EventPlanningKind.Minigame, "crystal_sphere");
-        if (entryName.Contains("BattlewornDummy", StringComparison.Ordinal)
-            || entryName.Contains("PunchOff", StringComparison.Ordinal))
-        {
-            return new EventPlanningCapability(EventPlanningKind.SpecialCombat, "event_combat");
-        }
+        // Native discovery upgrades this to Exact once the selector is reached.
         if (entryName.Contains("Amalgamator", StringComparison.Ordinal))
             return new EventPlanningCapability(EventPlanningKind.CardOrUiChoice, "awaits_ui_frames");
-
-        // These options open a native card-selection screen, but the planner
-        // can provide the same card list and replay the selected deck slots on
-        // an isolated shadow run. They are therefore exact once the UI has a
-        // complete card pick recorded.
-        if (HasSupportedCardSelection(entryName, option.TextKey))
-            return new EventPlanningCapability(EventPlanningKind.Exact, "card_selection");
 
         foreach (var (denyEvent, denyKey, kind) in OptionDenyList)
         {
@@ -232,13 +319,20 @@ internal sealed class PlanningEventPredictionService
     internal IReadOnlyList<EventOptionDescriptor> EnumerateEventOptions(
         Player livePlayer,
         EventModel canonical,
-        PlanningPredictionService.StateSnapshot? plannedState = null)
+        PlanningPredictionService.StateSnapshot? plannedState = null,
+        int plannedOptionIndex = -1,
+        IReadOnlyList<EventCardPick>? plannedCardPicks = null,
+        IReadOnlyList<EventPlanStep>? previousSteps = null)
     {
         try
         {
-            _ = InitializeShadowEvent(livePlayer, canonical, plannedState, out var shadowEvent);
-            var shadowPlayer = shadowEvent.Owner
-                               ?? throw new InvalidOperationException("shadow event has no owner");
+            var snapshot = plannedState?.Run ?? RunManager.Instance.ToSave(preFinishedRoom: null);
+            var shadowRun = PlanningPredictionService.RestoreRun(snapshot);
+            var shadowPlayer = shadowRun.GetPlayer(plannedState?.PlayerNetId ?? livePlayer.NetId)
+                               ?? throw new InvalidOperationException("shadow snapshot lacks player");
+            using var isolation = ShadowIsolation.Enter(shadowPlayer, automateRewards: true);
+            InitShadowEventOn(shadowRun, shadowPlayer, canonical, out var shadowEvent);
+            ReplayPreviousStepsAsync(shadowEvent, previousSteps).GetAwaiter().GetResult();
             var entryName = canonical.GetType().Name;
             var descriptors = new List<EventOptionDescriptor>();
             foreach (var (option, index) in shadowEvent.CurrentOptions.Select((option, index) => (option, index)))
@@ -249,12 +343,33 @@ internal sealed class PlanningEventPredictionService
                 // amounts in the native action description are resolved.
                 shadowEvent.DynamicVars.AddTo(option.Title);
                 shadowEvent.DynamicVars.AddTo(option.Description);
-                var selections = BuildCardSelections(
-                    entryName,
-                    option.TextKey,
-                    shadowEvent,
-                    shadowPlayer);
-                var capability = selections.Count > 0
+                // CardSelectCmd exposes every native deck/grid/reward request
+                // through ICardSelector. Probe the option on a fresh shadow
+                // run so generated cards and event-specific filters come from
+                // the game itself instead of an ever-growing event table.
+                var declaredCapability = GetEventPlanningCapability(entryName, option);
+                var combatEncounterId = option.IsLocked
+                    ? null
+                    : TryCaptureNativeEventCombat(
+                        livePlayer,
+                        canonical,
+                        index,
+                        plannedState,
+                        plannedOptionIndex == index ? plannedCardPicks : null,
+                        previousSteps);
+                var selections = option.IsLocked
+                                     || declaredCapability.Kind is EventPlanningKind.Minigame or EventPlanningKind.RunEnding
+                    ? []
+                    : TryCaptureNativeCardSelections(
+                        livePlayer,
+                        canonical,
+                        index,
+                        plannedState,
+                        plannedOptionIndex == index ? plannedCardPicks : null,
+                        previousSteps) ?? [];
+                var capability = combatEncounterId is not null
+                    ? new EventPlanningCapability(EventPlanningKind.SpecialCombat, "event_combat")
+                    : selections.Count > 0
                     ? new EventPlanningCapability(EventPlanningKind.Exact, "card_selection")
                     : GetEventPlanningCapability(entryName, option);
                 descriptors.Add(new EventOptionDescriptor(
@@ -265,16 +380,10 @@ internal sealed class PlanningEventPredictionService
                     option.IsLocked,
                     capability,
                     selections,
-                    BuildOptionHoverTips(option)));
+                    BuildOptionHoverTips(option),
+                    combatEncounterId));
 
-                if (IsGeneratedCardSelection(entryName, option.TextKey)
-                    && Interlocked.Exchange(ref _brainLeechEnumerationLogged, 1) == 0)
-                {
-                    Entry.Logger.Info(
-                        $"[PlanEvent] BrainLeech card choice recognized: key={option.TextKey}, "
-                        + $"candidates={selections.FirstOrDefault()?.Candidates.Count ?? 0}, "
-                        + $"capability={capability.Kind}");
-                }
+
             }
 
             return descriptors;
@@ -284,20 +393,7 @@ internal sealed class PlanningEventPredictionService
             Entry.Logger.Error($"[PlanEvent] option enumeration failed: {exception}");
             return [];
         }
-        finally
-        {
-            ShadowIsolation.Exit();
-        }
     }
-
-    private static bool HasSupportedCardSelection(string entryName, string textKey) =>
-        IsGeneratedCardSelection(entryName, textKey)
-        || BuildCardSelectionRule(entryName, textKey) is not null;
-
-    private static bool IsGeneratedCardSelection(string entryName, string textKey) =>
-        textKey.Contains("SHARE_KNOWLEDGE", StringComparison.OrdinalIgnoreCase)
-        && (entryName.Contains("BrainLeech", StringComparison.OrdinalIgnoreCase)
-            || textKey.Contains("BRAIN_LEECH", StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
     /// Event options carry native hover tips for their costs, rewards, and
@@ -383,247 +479,58 @@ internal sealed class PlanningEventPredictionService
         return result.ToString();
     }
 
-    private enum CardSelectionRuleKind
-    {
-        Remove,
-        Upgrade,
-        Transform,
-        Enchant,
-        GenericTransform
-    }
-
-    private sealed record CardSelectionRule(
-        CardSelectionRuleKind Kind,
-        int MinSelect,
-        int MaxSelect,
-        string? EnchantmentEntry,
-        int EnchantmentAmount,
-        CardType? TypeFilter,
-        bool BasicOnly);
-
     /// <summary>
-    /// Maps native event actions to the card-selection request they make. The
-    /// game keeps these filters in private event methods, so this small table
-    /// mirrors the shipped event source and is intentionally keyed by the
-    /// stable event/option text keys rather than localized text.
+    /// Runs one event option on an isolated copy with a selector that records
+    /// every request made by the native CardSelectCmd implementation. The
+    /// selector returns the first legal cards only to let later requests in
+    /// the same option materialize (for example two consecutive reward grids).
+    /// The copy is discarded, so this probe never advances the live run.
     /// </summary>
-    private static CardSelectionRule? BuildCardSelectionRule(string entryName, string textKey)
+    private static IReadOnlyList<EventCardSelectionDescriptor>? TryCaptureNativeCardSelections(
+        Player livePlayer,
+        EventModel canonical,
+        int optionIndex,
+        PlanningPredictionService.StateSnapshot? plannedState,
+        IReadOnlyList<EventCardPick>? plannedCardPicks,
+        IReadOnlyList<EventPlanStep>? previousSteps)
     {
-        var key = textKey.ToUpperInvariant();
-        if (entryName.Equals("AromaOfChaos", StringComparison.Ordinal))
-            return key.Contains("LET_GO")
-                ? TransformRule(1)
-                : key.Contains("MAINTAIN_CONTROL") ? UpgradeRule(1) : null;
-        if (entryName.Equals("DoorsOfLightAndDark", StringComparison.Ordinal))
-            return key.Contains("DARK") ? RemoveRule(1) : null;
-        if (entryName.Equals("FieldOfManSizedHoles", StringComparison.Ordinal))
-            return key.Contains("RESIST")
-                ? RemoveRule(2)
-                : key.Contains("ENTER_YOUR_HOLE") ? EnchantRule("PerfectFit", 1, 1) : null;
-        if (entryName.Equals("GraveOfTheForgotten", StringComparison.Ordinal))
-            return key.Contains("CONFRONT") ? EnchantRule("SoulsPower", 1, 1) : null;
-        if (entryName.Equals("LuminousChoir", StringComparison.Ordinal))
-            return key.Contains("REACH_INTO_THE_FLESH") ? RemoveRule(2) : null;
-        if (entryName.Equals("MorphicGrove", StringComparison.Ordinal))
-            return key.Contains("GROUP") ? TransformRule(2) : null;
-        if (entryName.Equals("SapphireSeed", StringComparison.Ordinal))
-            return key.Contains("EAT")
-                ? UpgradeRule(1)
-                : key.Contains("PLANT") ? EnchantRule("Sown", 1, 1) : null;
-        if (entryName.Equals("SelfHelpBook", StringComparison.Ordinal))
+        RecordingCardSelector? selector = null;
+        try
         {
-            if (key.Contains("READ_THE_BACK"))
-                return EnchantRule("Sharp", 1, 1, CardType.Attack, 2);
-            if (key.Contains("READ_PASSAGE"))
-                return EnchantRule("Nimble", 1, 1, CardType.Skill, 2);
-            if (key.Contains("READ_ENTIRE_BOOK"))
-                return EnchantRule("Swift", 1, 1, CardType.Power, 2);
-        }
-        if (entryName.Equals("SpiralingWhirlpool", StringComparison.Ordinal))
-            return key.Contains("OBSERVE") ? EnchantRule("Spiral", 1, 1) : null;
-        if (entryName.Equals("SpiritGrafter", StringComparison.Ordinal))
-            return key.Contains("REJECTION") ? UpgradeRule(1) : null;
-        if (entryName.Equals("StoneOfAllTime", StringComparison.Ordinal))
-            return key.Contains("PUSH") ? EnchantRule("Vigorous", 1, 1, null, 8) : null;
-        if (entryName.Equals("Symbiote", StringComparison.Ordinal))
-            return key.Contains("APPROACH")
-                ? EnchantRule("Corrupted", 1, 1)
-                : key.Contains("KILL_WITH_FIRE") ? TransformRule(2) : null;
-        if (entryName.Equals("WaterloggedScriptorium", StringComparison.Ordinal))
-        {
-            if (key.Contains("TENTACLE_QUILL"))
-                return EnchantRule("Steady", 1, 1);
-            if (key.Contains("PRICKLY_SPONGE"))
-                return EnchantRule("Steady", 2, 2);
-        }
-        if (entryName.Equals("Wellspring", StringComparison.Ordinal))
-            return key.Contains("BATHE") ? RemoveRule(1) : null;
-        if (entryName.Equals("WhisperingHollow", StringComparison.Ordinal))
-            return key.Contains("HUG") ? TransformRule(1) : null;
-        if (entryName.Equals("WoodCarvings", StringComparison.Ordinal))
-        {
-            if (key.Contains("SNAKE"))
-                return EnchantRule("Slither", 1, 1);
-            if (key.Contains("BIRD") || key.Contains("TORUS"))
-                return new CardSelectionRule(CardSelectionRuleKind.GenericTransform, 1, 1, null, 0, null, true);
-        }
-        if (entryName.Equals("ZenWeaver", StringComparison.Ordinal))
-        {
-            if (key.Contains("EMOTIONAL_AWARENESS"))
-                return RemoveRule(1);
-            if (key.Contains("ARACHNID_ACUPUNCTURE"))
-                return RemoveRule(2);
-        }
-        if (entryName.Equals("Trial", StringComparison.Ordinal))
-        {
-            if (key.Contains("MERCHANT") && key.Contains("INNOCENT"))
-                return UpgradeRule(2);
-            if (key.Contains("NONDESCRIPT") && key.Contains("INNOCENT"))
-                return TransformRule(2);
-        }
-        if (entryName.Equals("EndlessConveyor", StringComparison.Ordinal))
-            return key.Contains("JELLY_LIVER") ? TransformRule(1) : null;
+            var snapshot = plannedState?.Run ?? RunManager.Instance.ToSave(preFinishedRoom: null);
+            var shadowRun = PlanningPredictionService.RestoreRun(snapshot);
+            var shadowPlayer = shadowRun.GetPlayer(plannedState?.PlayerNetId ?? livePlayer.NetId)
+                               ?? throw new InvalidOperationException("shadow snapshot lacks player");
+            using var isolation = ShadowIsolation.Enter(shadowPlayer, automateRewards: true);
 
-        return null;
+            InitShadowEventOn(shadowRun, shadowPlayer, canonical, out var shadowEvent);
+            ReplayPreviousStepsAsync(shadowEvent, previousSteps).GetAwaiter().GetResult();
+            if (optionIndex < 0 || optionIndex >= shadowEvent.CurrentOptions.Count)
+                throw new ArgumentOutOfRangeException(nameof(optionIndex));
 
-        static CardSelectionRule RemoveRule(int count) =>
-            new(CardSelectionRuleKind.Remove, count, count, null, 0, null, false);
-        static CardSelectionRule UpgradeRule(int count) =>
-            new(CardSelectionRuleKind.Upgrade, count, count, null, 0, null, false);
-        static CardSelectionRule TransformRule(int count) =>
-            new(CardSelectionRuleKind.Transform, count, count, null, 0, null, false);
-        static CardSelectionRule EnchantRule(
-            string entry,
-            int minSelect,
-            int maxSelect,
-            CardType? type = null,
-            int amount = 1) =>
-            new(CardSelectionRuleKind.Enchant, minSelect, maxSelect, entry, amount, type, false);
-    }
-
-    private static IReadOnlyList<EventCardSelectionDescriptor> BuildCardSelections(
-        string entryName,
-        string textKey,
-        EventModel shadowEvent,
-        Player shadowPlayer)
-    {
-        if (IsGeneratedCardSelection(entryName, textKey))
-            return BuildGeneratedCardSelection(shadowEvent, shadowPlayer);
-
-        var rule = BuildCardSelectionRule(entryName, textKey);
-        if (rule is null)
-            return [];
-
-        EnchantmentModel? enchantment = null;
-        if (rule.EnchantmentEntry is { } enchantmentEntry)
-        {
-            enchantment = ModelDb.DebugEnchantments.FirstOrDefault(model =>
-                model.Id.Entry.Equals(enchantmentEntry, StringComparison.OrdinalIgnoreCase));
-            if (enchantment is null)
-                return [];
-        }
-
-        var candidates = shadowPlayer.Deck.Cards
-            .Select((card, slot) => (Card: card, Slot: slot))
-            .Where(pair =>
+            selector = new RecordingCardSelector(shadowPlayer, plannedCardPicks);
+            using var combatCapture = ShadowIsolation.CaptureEventCombats();
+            using (ShadowIsolation.UseSelector(selector))
             {
-                var card = pair.Card;
-                if (rule.TypeFilter is { } type && card.Type != type)
-                    return false;
-                if (rule.BasicOnly && card.Rarity != CardRarity.Basic)
-                    return false;
-                return rule.Kind switch
-                {
-                    CardSelectionRuleKind.Remove => card.IsRemovable,
-                    CardSelectionRuleKind.Upgrade => card.IsUpgradable,
-                    CardSelectionRuleKind.Transform => card.IsTransformable,
-                    CardSelectionRuleKind.GenericTransform => card.IsTransformable,
-                    CardSelectionRuleKind.Enchant => enchantment?.CanEnchant(card) == true,
-                    _ => false
-                };
-            })
-            .Select(pair => new EventCardCandidate(
-                pair.Card.Id,
-                pair.Slot,
-                pair.Card.Title,
-                pair.Card.IsUpgraded,
-                pair.Card.Enchantment?.Title.GetFormattedText()))
-            .ToArray();
-
-        var enchantmentAmount = rule.EnchantmentAmount;
-        if (entryName.Equals("StoneOfAllTime", StringComparison.Ordinal)
-            && rule.EnchantmentEntry is "Vigorous")
-        {
-            try
-            {
-                enchantmentAmount = shadowEvent.DynamicVars["PushVigorousAmount"].IntValue;
+                shadowEvent.CurrentOptions[optionIndex].Chosen().GetAwaiter().GetResult();
             }
-            catch
-            {
-                // Keep the canonical fallback for older event builds.
-            }
+
+            return selector.ToDescriptors();
         }
-
-        var kind = rule.Kind switch
+        catch (Exception exception)
         {
-            CardSelectionRuleKind.Remove => EventCardSelectionKind.Remove,
-            CardSelectionRuleKind.Upgrade => EventCardSelectionKind.Upgrade,
-            CardSelectionRuleKind.Transform or CardSelectionRuleKind.GenericTransform => EventCardSelectionKind.Transform,
-            CardSelectionRuleKind.Enchant => EventCardSelectionKind.Enchant,
-            _ => EventCardSelectionKind.Generic
-        };
-        var label = kind switch
-        {
-            EventCardSelectionKind.Remove => "删除 / Remove",
-            EventCardSelectionKind.Upgrade => "强化 / Upgrade",
-            EventCardSelectionKind.Transform => "转化 / Transform",
-            EventCardSelectionKind.Enchant => $"附魔 {enchantment?.Title.GetFormattedText()}"
-                                               + (enchantmentAmount > 1 ? $" x{enchantmentAmount}" : string.Empty)
-                                               + " / Enchant",
-            _ => "选择卡牌 / Choose card"
-        };
-        return [new EventCardSelectionDescriptor(
-            0,
-            kind,
-            label,
-            rule.MinSelect,
-            rule.MaxSelect,
-             candidates)];
-    }
-
-    /// <summary>
-    /// Brain Leech creates five fresh character cards, then asks the player to
-    /// add exactly one to the deck. Generate them from the same shadow state
-    /// and native reward options used by the event so the card list and RNG
-    /// remain aligned with execution.
-    /// </summary>
-    private static IReadOnlyList<EventCardSelectionDescriptor> BuildGeneratedCardSelection(
-        EventModel shadowEvent,
-        Player shadowPlayer)
-    {
-        var count = shadowEvent.DynamicVars["FromCardChoiceCount"].IntValue;
-        var cards = CardFactory.CreateForReward(
-                shadowPlayer,
-                count,
-                CardCreationOptions.ForNonCombatWithDefaultOdds(
-                    new[] { shadowPlayer.Character.CardPool }))
-            .ToList();
-        var candidates = cards
-            .Select(result => new EventCardCandidate(
-                result.Card.Id,
-                -1,
-                result.Card.Title,
-                result.Card.IsUpgraded,
-                result.Card.Enchantment?.Title.GetFormattedText()))
-            .ToArray();
-
-        return [new EventCardSelectionDescriptor(
-            0,
-            EventCardSelectionKind.Generic,
-            "加入牌组 / Add to deck",
-            1,
-            1,
-            candidates)];
+            var root = exception.GetBaseException();
+            Entry.Logger.Debug(
+                $"[PlanEvent] native card request probe failed for {canonical.Id.Entry}[{optionIndex}]: "
+                + $"{root.GetType().Name}: {root.Message}");
+            // Event effects can throw after a native request has already been
+            // emitted (BrainLeech RIP is the important case: the reward
+            // action may not finish in a synchronous probe). Keep the request
+            // list instead of discarding it with the exception.
+            return selector is { } recorded && recorded.Count > 0
+                ? recorded.ToDescriptors()
+                : null;
+        }
     }
 
     internal async Task<EventExecutionOutcome> ExecuteEventOptionAsync(
@@ -631,7 +538,12 @@ internal sealed class PlanningEventPredictionService
         EventModel canonicalEvent,
         int optionIndex,
         IReadOnlyList<EventCardPick>? plannedCardPicks,
-        PlanningPredictionService.StateSnapshot? plannedState = null)
+        PlanningPredictionService.StateSnapshot? plannedState = null,
+        EventOptionDescriptor? plannedDescriptor = null,
+        IReadOnlyList<EventPlanStep>? previousSteps = null,
+        bool? takeRewards = null,
+        CombatSimulationReference? simulationReference = null,
+        RoutePlanChoice.Combat? combatRewards = null)
     {
         var outcome = new EventExecutionOutcome();
         var entryName = canonicalEvent.GetType().Name;
@@ -641,18 +553,18 @@ internal sealed class PlanningEventPredictionService
             return outcome;
         }
 
-        var previousCheck = NonInteractiveMode.AutoSlayerCheck;
-        NonInteractiveMode.AutoSlayerCheck = () => true;
         try
         {
             var snapshot = plannedState?.Run ?? RunManager.Instance.ToSave(preFinishedRoom: null);
-            var shadowRun = RunState.FromSerializable(snapshot);
+            var shadowRun = PlanningPredictionService.RestoreRun(snapshot);
             var shadowPlayer = shadowRun.GetPlayer(plannedState?.PlayerNetId ?? livePlayer.NetId)
                                ?? throw new InvalidOperationException(
                                    $"shadow snapshot lacks player {livePlayer.NetId}");
-            ShadowIsolation.Enter(shadowPlayer);
+            using var isolation = ShadowIsolation.Enter(shadowPlayer, automateRewards: true);
 
             InitShadowEventOn(shadowRun, shadowPlayer, canonicalEvent, out var shadowEvent);
+            var before = Capture(shadowPlayer);
+            await ReplayPreviousStepsAsync(shadowEvent, previousSteps);
             var options = shadowEvent.CurrentOptions;
             if (optionIndex < 0 || optionIndex >= options.Count)
             {
@@ -665,15 +577,32 @@ internal sealed class PlanningEventPredictionService
                 outcome.DenyReason = "该事件选项当前已锁定，计划状态可能已经变化";
                 return outcome;
             }
+            if (plannedDescriptor is not null && (plannedDescriptor.Index != optionIndex
+                || plannedDescriptor.TextKey != options[optionIndex].TextKey))
+            {
+                outcome.DenyReason = "事件选项已变化，请重新选择后再预演。";
+                return outcome;
+            }
 
-            var capability = GetEventPlanningCapability(entryName, options[optionIndex]);
-            if (capability.Kind != EventPlanningKind.Exact)
+            // The descriptor was generated from the same node snapshot and
+            // contains the native selector requests for this exact option.
+            // Prefer it over the legacy event capability table so a newly
+            // shipped event can execute as soon as its native selector is
+            // discoverable.
+            var capability = plannedDescriptor is not null
+                ? plannedDescriptor.Capability
+                : GetEventPlanningCapability(entryName, options[optionIndex]);
+            var canPrepareCombat = capability.Kind == EventPlanningKind.SpecialCombat
+                                   && plannedDescriptor?.CombatEncounterId is not null;
+            if (capability.Kind != EventPlanningKind.Exact
+                && !(capability.Kind == EventPlanningKind.RewardChoice && takeRewards is not null)
+                && !canPrepareCombat)
             {
                 outcome.DenyReason = capability.Kind switch
                 {
                     EventPlanningKind.RewardChoice => "该选项还需要指定奖励取舍，暂不推进后续世界线",
                     EventPlanningKind.CardOrUiChoice => "该选项还需要指定卡牌或界面选择，暂不推进后续世界线",
-                    EventPlanningKind.SpecialCombat => "该选项会进入特殊战斗，请改用胜利掉落/战损估算",
+                    EventPlanningKind.SpecialCombat => "该选项会进入特殊战斗，请先运行模拟战斗",
                     EventPlanningKind.Minigame => "该选项会进入小游戏，请改用专用布局预测",
                     EventPlanningKind.RunEnding => "该选项会终止当前跑局",
                     _ => "该选项暂时无法无头预演"
@@ -681,39 +610,88 @@ internal sealed class PlanningEventPredictionService
                 return outcome;
             }
 
-            var before = Capture(shadowPlayer);
-            using (CardSelectCmd.PushSelector(new ScriptedCardSelector(plannedCardPicks)))
+            var selectedTextKey = options[optionIndex].TextKey;
+            using var combatCapture = ShadowIsolation.CaptureEventCombats();
+            using (ShadowIsolation.UseSelector(new ScriptedCardSelector(plannedCardPicks), takeRewards ?? true))
             {
                 await options[optionIndex].Chosen();
             }
 
-            var after = Capture(shadowPlayer);
-            FillDeltas(outcome, before, after);
-            outcome.Finished = shadowEvent.IsFinished;
-            foreach (var option in shadowEvent.CurrentOptions)
-                outcome.NextOptions.Add((option.TextKey, option.Title.GetFormattedText()));
+            var combatRequest = ShadowIsolation.CurrentEventCombatCaptures is { Count: > 0 }
+                ? ShadowIsolation.CurrentEventCombatCaptures[^1]
+                : null;
+            outcome.CombatEncounterId = combatRequest?.Encounter.Id.Entry;
+            outcome.CombatShouldResumeAfterCombat = combatRequest?.ShouldResumeAfterCombat ?? false;
+            outcome.CombatExtraRewards = combatRequest?.ExtraRewards ?? [];
+            outcome.Finished = combatRequest is null && shadowEvent.IsFinished;
+            if (combatRequest is null)
+                foreach (var option in shadowEvent.CurrentOptions)
+                    outcome.NextOptions.Add((option.TextKey, option.Title.GetFormattedText()));
             outcome.Ok = true;
             outcome.ShadowRun = shadowRun;
             outcome.ShadowPlayer = shadowPlayer;
             outcome.ShadowEvent = shadowEvent;
+            outcome.CompletedSteps = (previousSteps ?? [])
+                .Append(new EventPlanStep(selectedTextKey, (plannedCardPicks ?? []).ToArray(), takeRewards)
+                {
+                    SimulationReference = simulationReference,
+                    CombatRewards = combatRewards
+                }).ToArray();
+            if (combatRequest is not null && simulationReference is not null
+                && !await ApplyCombatSimulationToEventOutcomeAsync(
+                    outcome, CaptureCombatState(outcome), simulationReference, combatRequest.Encounter,
+                    combatRewards ?? new RoutePlanChoice.Combat([], null, true)))
+            {
+                outcome.Ok = false;
+                outcome.DenyReason = "模拟战斗参照已过期，请重新模拟当前规划状态";
+            }
+            FillDeltas(outcome, before, Capture(shadowPlayer));
             return outcome;
         }
         catch (CardSelectionRequiredException)
         {
+            outcome.Ok = false;
             outcome.DenyReason = "该选项还需要指定卡牌，当前计划不会默认选择第一张牌";
             return outcome;
         }
         catch (Exception exception)
         {
+            outcome.Ok = false;
             var root = exception.GetBaseException();
             outcome.DenyReason = $"无头执行失败，已降级：{root.Message}";
             Entry.Logger.Error($"[PlanEvent] exec {entryName}[{optionIndex}] failed: {exception}");
             return outcome;
         }
-        finally
+    }
+
+    private static async Task ReplayPreviousStepsAsync(EventModel model, IReadOnlyList<EventPlanStep>? steps)
+    {
+        foreach (var step in steps ?? [])
         {
-            NonInteractiveMode.AutoSlayerCheck = previousCheck;
-            ShadowIsolation.Exit();
+            var option = model.CurrentOptions.FirstOrDefault(candidate => candidate.TextKey == step.TextKey);
+            if (model.IsFinished || option is null || option.IsLocked)
+                throw new InvalidOperationException($"事件路径已失效：{step.TextKey}，请从事件起点重新选择。");
+            using var selector = ShadowIsolation.UseSelector(new ScriptedCardSelector(step.CardPicks), step.TakeRewards ?? true);
+            using var capture = ShadowIsolation.CaptureEventCombats();
+            await option.Chosen();
+            if (ShadowIsolation.CurrentEventCombatCaptures is { Count: > 0 } captures)
+            {
+                var request = captures[^1];
+                var service = new PlanningEventPredictionService();
+                var outcome = new EventExecutionOutcome
+                {
+                    ShadowRun = (RunState)model.Owner!.RunState,
+                    ShadowPlayer = model.Owner,
+                    ShadowEvent = model,
+                    CombatShouldResumeAfterCombat = request.ShouldResumeAfterCombat,
+                    CombatExtraRewards = request.ExtraRewards
+                };
+                if (step.SimulationReference is null
+                    || !await service.ApplyCombatSimulationToEventOutcomeAsync(
+                        outcome, service.CaptureCombatState(outcome), step.SimulationReference,
+                        request.Encounter, step.CombatRewards ?? new RoutePlanChoice.Combat([], null, true)))
+                    throw new InvalidOperationException("前置事件战斗尚未完成模拟或参照已失效。");
+            }
         }
     }
 
@@ -726,10 +704,10 @@ internal sealed class PlanningEventPredictionService
         try
         {
             var snapshot = plannedState?.Run ?? RunManager.Instance.ToSave(preFinishedRoom: null);
-            var shadowRun = RunState.FromSerializable(snapshot);
+            var shadowRun = PlanningPredictionService.RestoreRun(snapshot);
             var shadowPlayer = shadowRun.GetPlayer(plannedState?.PlayerNetId ?? livePlayer.NetId)
                                ?? throw new InvalidOperationException("shadow snapshot lacks player");
-            ShadowIsolation.Enter(shadowPlayer);
+            using var isolation = ShadowIsolation.Enter(shadowPlayer);
 
             var shadowEvent = canonical.ToMutable();
             shadowEvent.Owner = shadowPlayer;
@@ -811,106 +789,6 @@ internal sealed class PlanningEventPredictionService
                 Error = exception.GetBaseException().Message
             };
         }
-        finally
-        {
-            ShadowIsolation.Exit();
-        }
-    }
-
-    internal EventCombatDrops PredictEventCombatVictoryDrops(
-        Player livePlayer,
-        EventModel canonicalEvent,
-        int optionIndex,
-        PlanningPredictionService.StateSnapshot? plannedState = null)
-    {
-        var drops = new EventCombatDrops();
-        try
-        {
-            var encounter = canonicalEvent.CanonicalEncounter
-                            ?? throw new InvalidOperationException("event has no encounter");
-            var snapshot = plannedState?.Run ?? RunManager.Instance.ToSave(preFinishedRoom: null);
-            var planning = new PlanningPredictionService();
-            var state = planning.Restore(new PlanningPredictionService.StateSnapshot(
-                snapshot,
-                plannedState?.PlayerNetId ?? livePlayer.NetId,
-                plannedState?.MerchantVisits ?? 0,
-                plannedState?.CombatsAdvanced ?? 0,
-                plannedState?.TreasureRoomsAdvanced ?? 0,
-                plannedState?.LavaRockTriggered ?? false,
-                plannedState?.WongosTicketTriggered ?? false,
-                plannedState?.HistoricalTreasureRooms ?? 0));
-            ShadowIsolation.Enter(state.Player);
-
-            var mutableEncounter = encounter.ToMutable();
-            mutableEncounter.GenerateMonstersWithSlots(state.Run);
-            state.CombatsAdvanced++;
-            var rewards = planning.GenerateCombatRewards(state, RoomType.Monster, mutableEncounter);
-            drops.Rewards = Forecast<CombatRewardDetails>.CurrentWorldline(
-                rewards,
-                PredictionDependency.Rewards
-                | PredictionDependency.RelicGrabBag
-                | PredictionDependency.CardRarityOdds
-                | PredictionDependency.PlayerState,
-                "Native event-combat victory reward simulation.");
-
-            var entryName = canonicalEvent.GetType().Name;
-            switch (entryName)
-            {
-                case "BattlewornDummy":
-                    if (optionIndex == 0)
-                    {
-                        var pool = state.Player.Character.PotionPool
-                            .GetUnlockedPotions(state.Player.UnlockState)
-                            .Concat(ModelDb.PotionPool<SharedPotionPool>()
-                                .GetUnlockedPotions(state.Player.UnlockState));
-                        var potion = state.Player.PlayerRng.Rewards.NextItem(pool);
-                        drops.Labels.Add(potion is null
-                            ? "战后药水：无可用"
-                            : $"战后药水：{potion.Title.GetFormattedText()}");
-                    }
-                    else if (optionIndex == 1)
-                    {
-                        drops.Labels.Add("战后：随机强化 2 张可升级牌（牌组变化需在事件选项确定后接入）");
-                    }
-                    else if (optionIndex == 2)
-                    {
-                        var relic = RelicFactory.PullNextRelicFromFront(state.Player);
-                        drops.Labels.Add(relic is null
-                            ? "战后遗物：无"
-                            : $"战后遗物：{relic.Title.GetFormattedText()}");
-                    }
-                    break;
-                case "PunchOff":
-                    drops.Labels.Add("额外奖励：遗物 + 药水（接受时结算）");
-                    break;
-            }
-
-            return drops;
-        }
-        catch (Exception exception)
-        {
-            drops.Error = exception.GetBaseException().Message;
-            return drops;
-        }
-        finally
-        {
-            ShadowIsolation.Exit();
-        }
-    }
-
-    private RunState InitializeShadowEvent(
-        Player livePlayer,
-        EventModel canonical,
-        PlanningPredictionService.StateSnapshot? plannedState,
-        out EventModel shadowEvent)
-    {
-        var snapshot = plannedState?.Run ?? RunManager.Instance.ToSave(preFinishedRoom: null);
-        var shadowRun = RunState.FromSerializable(snapshot);
-        var shadowPlayer = shadowRun.GetPlayer(plannedState?.PlayerNetId ?? livePlayer.NetId)
-                           ?? throw new InvalidOperationException("shadow snapshot lacks player");
-        ShadowIsolation.Enter(shadowPlayer);
-        InitShadowEventOn(shadowRun, shadowPlayer, canonical, out shadowEvent);
-        return shadowRun;
     }
 
     private static void InitShadowEventOn(
@@ -922,6 +800,9 @@ internal sealed class PlanningEventPredictionService
         _ = shadowRun;
         shadowEvent = canonical.ToMutable();
         shadowEvent.Owner = shadowPlayer;
+        CombatSynchronizerField.SetValue(
+            shadowEvent,
+            new EventCombatSynchronizer(shadowRun, shadowRun));
         var playerSlot = shadowEvent.IsShared
             ? 0
             : shadowPlayer.RunState.GetPlayerSlotIndex(shadowPlayer);
@@ -930,6 +811,42 @@ internal sealed class PlanningEventPredictionService
             + StringHelper.GetDeterministicHashCode(shadowEvent.Id.Entry));
         shadowEvent.CalculateVars();
         _ = GenerateAndSetInitialOptions(shadowEvent, "planning");
+    }
+
+    private static string? TryCaptureNativeEventCombat(
+        Player livePlayer,
+        EventModel canonical,
+        int optionIndex,
+        PlanningPredictionService.StateSnapshot? plannedState,
+        IReadOnlyList<EventCardPick>? plannedCardPicks,
+        IReadOnlyList<EventPlanStep>? previousSteps)
+    {
+        try
+        {
+            var snapshot = plannedState?.Run ?? RunManager.Instance.ToSave(preFinishedRoom: null);
+            var shadowRun = PlanningPredictionService.RestoreRun(snapshot);
+            var shadowPlayer = shadowRun.GetPlayer(plannedState?.PlayerNetId ?? livePlayer.NetId)
+                               ?? throw new InvalidOperationException("shadow snapshot lacks player");
+            using var isolation = ShadowIsolation.Enter(shadowPlayer, automateRewards: true);
+            InitShadowEventOn(shadowRun, shadowPlayer, canonical, out var shadowEvent);
+            ReplayPreviousStepsAsync(shadowEvent, previousSteps).GetAwaiter().GetResult();
+            if (optionIndex < 0 || optionIndex >= shadowEvent.CurrentOptions.Count)
+                return null;
+
+            using var capture = ShadowIsolation.CaptureEventCombats();
+            using var selector = ShadowIsolation.UseSelector(new RecordingCardSelector(shadowPlayer, plannedCardPicks));
+            shadowEvent.CurrentOptions[optionIndex].Chosen().GetAwaiter().GetResult();
+            return ShadowIsolation.CurrentEventCombatCaptures is { Count: > 0 } captures
+                ? captures[^1].Encounter.Id.Entry
+                : null;
+        }
+        catch (Exception exception)
+        {
+            Entry.Logger.Debug(
+                $"[PlanEvent] native combat probe failed for {canonical.Id.Entry}[{optionIndex}]: "
+                + $"{exception.GetBaseException().GetType().Name}: {exception.GetBaseException().Message}");
+            return null;
+        }
     }
 
     /// <summary>
@@ -990,20 +907,23 @@ internal sealed class PlanningEventPredictionService
     {
     }
 
-    private sealed class ScriptedCardSelector : ICardSelector
+    private sealed class RecordingCardSelector : ICardSelector
     {
-        private readonly IReadOnlyList<IReadOnlyList<EventCardPick>> selections;
-        private int selectionIndex;
+        private readonly Player owner;
+        private readonly List<RecordedRequest> requests = [];
+        private readonly IReadOnlyDictionary<int, IReadOnlyList<EventCardPick>> plannedSelections;
+        private int selectionStep;
 
-        public ScriptedCardSelector(IReadOnlyList<EventCardPick>? picks)
+        internal RecordingCardSelector(Player owner, IReadOnlyList<EventCardPick>? plannedPicks)
         {
-            selections = (picks ?? [])
+            this.owner = owner;
+            plannedSelections = (plannedPicks ?? [])
                 .GroupBy(pick => Math.Max(pick.SelectionStep, 0))
-                .OrderBy(group => group.Key)
-                .Select(group => (IReadOnlyList<EventCardPick>)group
-                    .OrderBy(pick => pick.SelectionOrder)
-                    .ToArray())
-                .ToArray();
+                .ToDictionary(
+                    group => group.Key,
+                    group => (IReadOnlyList<EventCardPick>)group
+                        .OrderBy(pick => pick.SelectionOrder)
+                        .ToArray());
         }
 
         public Task<IEnumerable<CardModel>> GetSelectedCards(
@@ -1012,13 +932,211 @@ internal sealed class PlanningEventPredictionService
             int maxSelect)
         {
             var list = options.ToList();
-            if (list.Count == 0)
-                return Task.FromResult((IEnumerable<CardModel>)Array.Empty<CardModel>());
+            var step = selectionStep++;
+            requests.Add(new RecordedRequest(
+                IsReward: false,
+                InferSelectionKind(isReward: false),
+                minSelect,
+                maxSelect,
+                list.Select(ToCandidate).ToArray()));
 
-            if (selectionIndex >= selections.Count)
-                throw new CardSelectionRequiredException();
+            if (TryResolvePlannedCards(step, list, minSelect, maxSelect, out var planned))
+                return Task.FromResult<IEnumerable<CardModel>>(planned);
 
-            var picks = selections[selectionIndex++];
+            // Until a step is planned, select the first legal entries only to
+            // expose subsequent requests. A later refresh re-probes with the
+            // user's actual earlier picks.
+            var count = minSelect <= 0
+                ? 0
+                : Math.Min(Math.Min(minSelect, maxSelect), list.Count);
+            return Task.FromResult<IEnumerable<CardModel>>(list.Take(count).ToArray());
+        }
+
+        public CardRewardSelection GetSelectedCardReward(
+            IReadOnlyList<CardCreationResult> options,
+            IReadOnlyList<CardRewardAlternative> alternatives)
+        {
+            var step = selectionStep++;
+            requests.Add(new RecordedRequest(
+                IsReward: true,
+                EventCardSelectionKind.Generic,
+                1,
+                1,
+                options.Select(result => result.Card).Select(ToCandidate).ToArray()));
+
+            if (plannedSelections.TryGetValue(step, out var picks)
+                && picks.Count == 1)
+            {
+                var pick = picks[0];
+                var selected = options
+                    .Select(option => option.Card)
+                    .FirstOrDefault(card => SameCard(card, pick));
+                if (selected is not null)
+                    return new CardRewardSelection { card = selected };
+            }
+
+            if (options.Count > 0)
+            {
+                return new CardRewardSelection { card = options[0].Card };
+            }
+
+            return alternatives.Count > 0
+                ? new CardRewardSelection { alternative = alternatives[0] }
+                : default;
+        }
+
+        internal IReadOnlyList<EventCardSelectionDescriptor> ToDescriptors() =>
+            requests
+                .Select((request, step) => new EventCardSelectionDescriptor(
+                    step,
+                    request.Kind,
+                    SelectionLabel(request.Kind, request.IsReward),
+                    request.MinSelect,
+                    request.MaxSelect,
+                    request.Candidates))
+                .ToArray();
+
+        internal int Count => requests.Count;
+
+        private bool TryResolvePlannedCards(
+            int step,
+            IReadOnlyList<CardModel> options,
+            int minSelect,
+            int maxSelect,
+            out IReadOnlyList<CardModel> selected)
+        {
+            selected = [];
+            if (!plannedSelections.TryGetValue(step, out var picks)
+                || picks.Count < minSelect
+                || picks.Count > maxSelect)
+            {
+                return false;
+            }
+
+            var resolved = new List<CardModel>(picks.Count);
+            foreach (var pick in picks)
+            {
+                var card = options.FirstOrDefault(candidate =>
+                    !resolved.Contains(candidate) && SameCard(candidate, pick));
+                if (card is null)
+                    return false;
+                resolved.Add(card);
+            }
+
+            selected = resolved;
+            return true;
+        }
+
+        private bool SameCard(CardModel card, EventCardPick pick)
+        {
+            if (!card.Id.Entry.Equals(pick.CardId.Entry, StringComparison.OrdinalIgnoreCase))
+                return false;
+            if (pick.DeckSlot < 0)
+                return true;
+            return ReferenceEquals(card.Owner, owner)
+                   && pick.DeckSlot < owner.Deck.Cards.Count
+                   && ReferenceEquals(owner.Deck.Cards[pick.DeckSlot], card);
+        }
+
+        private EventCardCandidate ToCandidate(CardModel card)
+        {
+            var deckSlot = -1;
+            try
+            {
+                if (ReferenceEquals(card.Owner, owner))
+                {
+                    for (var index = 0; index < owner.Deck.Cards.Count; index++)
+                    {
+                        if (ReferenceEquals(owner.Deck.Cards[index], card))
+                        {
+                            deckSlot = index;
+                            break;
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // Generated cards can be detached from a deck; they keep the
+                // -1 marker and are identified by their model ID.
+            }
+
+            return new EventCardCandidate(
+                card.Id,
+                deckSlot,
+                card.Title,
+                card.IsUpgraded,
+                card.Enchantment?.Title.GetFormattedText());
+        }
+
+        private static EventCardSelectionKind InferSelectionKind(bool isReward)
+        {
+            if (isReward)
+                return EventCardSelectionKind.Generic;
+
+            var frames = new StackTrace().GetFrames();
+            var methods = frames is null
+                ? []
+                : frames
+                    .Select(frame => frame.GetMethod()?.Name ?? string.Empty)
+                    .ToArray();
+            if (methods.Any(name => name.Contains("FromDeckForRemoval", StringComparison.Ordinal)))
+                return EventCardSelectionKind.Remove;
+            if (methods.Any(name => name.Contains("FromDeckForUpgrade", StringComparison.Ordinal)))
+                return EventCardSelectionKind.Upgrade;
+            if (methods.Any(name => name.Contains("FromDeckForTransformation", StringComparison.Ordinal)))
+                return EventCardSelectionKind.Transform;
+            if (methods.Any(name => name.Contains("FromDeckForEnchantment", StringComparison.Ordinal)))
+                return EventCardSelectionKind.Enchant;
+            return EventCardSelectionKind.Generic;
+        }
+
+        private static string SelectionLabel(EventCardSelectionKind kind, bool isReward) =>
+            isReward
+                ? "卡牌奖励 / Card reward"
+                : kind switch
+                {
+                    EventCardSelectionKind.Remove => "删除 / Remove",
+                    EventCardSelectionKind.Upgrade => "强化 / Upgrade",
+                    EventCardSelectionKind.Transform => "转化 / Transform",
+                    EventCardSelectionKind.Enchant => "附魔 / Enchant",
+                    _ => "选择卡牌 / Choose card"
+                };
+
+        private sealed record RecordedRequest(
+            bool IsReward,
+            EventCardSelectionKind Kind,
+            int MinSelect,
+            int MaxSelect,
+            IReadOnlyList<EventCardCandidate> Candidates);
+    }
+
+    private sealed class ScriptedCardSelector : ICardSelector
+    {
+        private readonly IReadOnlyDictionary<int, IReadOnlyList<EventCardPick>> selections;
+        private int selectionIndex;
+
+        public ScriptedCardSelector(IReadOnlyList<EventCardPick>? picks)
+        {
+            selections = (picks ?? [])
+                .GroupBy(pick => Math.Max(pick.SelectionStep, 0))
+                .ToDictionary(group => group.Key,
+                    group => (IReadOnlyList<EventCardPick>)group
+                        .OrderBy(pick => pick.SelectionOrder).ToArray());
+        }
+
+        public Task<IEnumerable<CardModel>> GetSelectedCards(
+            IEnumerable<CardModel> options,
+            int minSelect,
+            int maxSelect)
+        {
+            var list = options.ToList();
+            if (!selections.TryGetValue(selectionIndex++, out var picks))
+            {
+                if (minSelect > 0)
+                    throw new CardSelectionRequiredException();
+                picks = [];
+            }
             if (picks.Count < minSelect || picks.Count > maxSelect)
             {
                 throw new InvalidOperationException(
@@ -1045,13 +1163,8 @@ internal sealed class PlanningEventPredictionService
             IReadOnlyList<CardCreationResult> options,
             IReadOnlyList<CardRewardAlternative> alternatives)
         {
-            if (options.Count == 0)
-                return default;
-
-            if (selectionIndex >= selections.Count)
+            if (!selections.TryGetValue(selectionIndex++, out var picks))
                 throw new CardSelectionRequiredException();
-
-            var picks = selections[selectionIndex++];
             if (picks.Count != 1)
                 throw new InvalidOperationException("卡牌奖励计划必须只选择一张牌。");
             var pick = picks[0];
@@ -1075,8 +1188,7 @@ internal sealed class PlanningEventPredictionService
                     !selected.Contains(card)
                     && DeckIndex(card) == pick.DeckSlot
                     && card.Id.Entry == pick.CardId.Entry);
-                if (slotMatch is not null)
-                    return slotMatch;
+                return slotMatch;
             }
 
             return options.FirstOrDefault(card =>

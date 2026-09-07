@@ -4,7 +4,7 @@
     <Sts2DataDir>$(Sts2Dir)\data_sts2_windows_x86_64</Sts2DataDir>
     <RitsuLibDir>$(Sts2Dir)\mods\STS2-RitsuLib</RitsuLibDir>
     <RandomForeseerDir>$(Sts2Dir)\mods\RandomForeseer</RandomForeseerDir>
-    <!-- Use the author's Steam Workshop build; keep the API fork out of the game mods directory. -->
+    <!-- Point this at a CombatSolver build with the API level used by the adapter; keep SeedOracle output separate. -->
     <CombatSolverDir>C:\path\to\Steam\steamapps\workshop\content\2868840\3790899961</CombatSolverDir>
   </PropertyGroup>
 </Project>

@@ -1,4 +1,7 @@
 using MegaCrit.Sts2.Core.Entities.Players;
+using MegaCrit.Sts2.Core.Entities.CardRewardAlternatives;
+using MegaCrit.Sts2.Core.Entities.Cards;
+using MegaCrit.Sts2.Core.Entities.Rewards;
 using MegaCrit.Sts2.Core.Entities.Relics;
 using MegaCrit.Sts2.Core.Entities.RestSite;
 using MegaCrit.Sts2.Core.Factories;
@@ -6,6 +9,8 @@ using MegaCrit.Sts2.Core.Map;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Enchantments;
 using MegaCrit.Sts2.Core.Rooms;
+using MegaCrit.Sts2.Core.Rewards;
+using MegaCrit.Sts2.Core.TestSupport;
 using MegaCrit.Sts2.Core.Runs;
 using SeedOracle.Api;
 using SeedOracle.Integration;
@@ -33,6 +38,7 @@ internal sealed class RoutePlanForecastService(PlanningPredictionService plannin
         public RelicModel? PulledRelic { get; set; }
         public int GoldDelta { get; set; }
         public string? Note { get; set; }
+        public PlanningPredictionService.StateSnapshot? BeforeCombatRewards { get; set; }
     }
 
     internal sealed record ProjectedCard(ModelId Id, string Title, bool Upgraded);
@@ -52,17 +58,15 @@ internal sealed class RoutePlanForecastService(PlanningPredictionService plannin
         public required Dictionary<MapCoord, PlanNodeOutcome> Outcomes { get; init; }
         public required Dictionary<MapCoord, PlanningPredictionService.StateSnapshot> StatesBefore { get; init; }
         public MapCoord? BlockedAtEvent { get; set; }
-
-        /// <summary>Virtual potion slots threaded along the plan (by potion id);
-        /// takes replace/evict per the recorded choice, never touching live state.</summary>
-        public required List<ModelId> PotionSlots { get; init; }
+        public MapCoord? BlockedAtNode { get; set; }
 
         /// <summary>
-        /// Potion slots immediately before each planned node. The UI uses this
-        /// explicit virtual ledger instead of falling back to the live player
-        /// when a serialized shadow player cannot be restored for display.
+        /// Potion slots threaded along the plan. The shadow player's native
+        /// slots are the only mutable source of truth; this property is a
+        /// snapshot view for callers that need the current count.
         /// </summary>
-        public required Dictionary<MapCoord, IReadOnlyList<ModelId>> PotionSlotsBefore { get; init; }
+        public IReadOnlyList<ModelId> PotionSlots =>
+            PlanningPredictionService.GetPotionSlotIds(State);
 
         /// <summary>Projected deck threaded along the plan: planned card
         /// pickups add, forge upgrades, cook removals — downstream choices
@@ -93,8 +97,6 @@ internal sealed class RoutePlanForecastService(PlanningPredictionService plannin
             State = state,
             Outcomes = new Dictionary<MapCoord, PlanNodeOutcome>(),
             StatesBefore = new Dictionary<MapCoord, PlanningPredictionService.StateSnapshot>(),
-            PotionSlotsBefore = new Dictionary<MapCoord, IReadOnlyList<ModelId>>(),
-            PotionSlots = state.Player.Potions.Select(potion => potion.Id).ToList(),
             Deck = state.Player.Deck.Cards
                 .Select(card => new ProjectedCard(card.Id, card.Title, card.IsUpgraded))
                 .ToList()
@@ -113,7 +115,6 @@ internal sealed class RoutePlanForecastService(PlanningPredictionService plannin
                 var roomType = RoutePlanPanelControl.RoomFromPointType(point.PointType);
                 var outcome = new PlanNodeOutcome();
                 chain.StatesBefore[entry.Coord] = planning.Capture(state);
-                chain.PotionSlotsBefore[entry.Coord] = chain.PotionSlots.ToArray();
 
             // An event preview is executed against the state immediately
             // before this node. Join its serialized result here so all later
@@ -130,12 +131,10 @@ internal sealed class RoutePlanForecastService(PlanningPredictionService plannin
                     }
 
                     planning.ApplyEventState(state, eventOutcome.ShadowRun, eventOutcome.PlayerNetId);
-                    ShadowIsolation.Enter(state.Player);
+                    ShadowIsolation.ReplaceCurrent(state.Player);
                     chain.Deck.Clear();
                     chain.Deck.AddRange(state.Player.Deck.Cards.Select(card =>
                         new ProjectedCard(card.Id, card.Title, card.IsUpgraded)));
-                    chain.PotionSlots.Clear();
-                    chain.PotionSlots.AddRange(state.Player.Potions.Select(potion => potion.Id));
                     potionMax = state.Player.MaxPotionCount;
                     gold = state.Player.Gold;
                     outcome.Note = eventOutcome.Finished
@@ -143,7 +142,8 @@ internal sealed class RoutePlanForecastService(PlanningPredictionService plannin
                         : "事件预演已接入；仍有后续选项待确定";
                 }
                 else if (eventOutcomes is not null
-                         && entry.Choice is RoutePlanChoice.EventOption { OptionIndex: >= 0 })
+                         && entry.Choice is RoutePlanChoice.EventOption pendingEvent
+                         && (pendingEvent.OptionIndex >= 0 || pendingEvent.PreviousSteps.Count > 0))
                 {
                     // A selected event has not changed the threaded state until
                     // its exact shadow preview succeeds. Do not show later rooms
@@ -159,11 +159,14 @@ internal sealed class RoutePlanForecastService(PlanningPredictionService plannin
             // Resolve the plan-matching worldline: it carries the real
             // encounter (gold ranges, monster slots) and resolved rooms.
                 EncounterModel? nodeEncounter = null;
-                if (roomType is RoomType.Monster or RoomType.Elite or RoomType.Boss)
+                if (roomType is RoomType.Monster or RoomType.Elite or RoomType.Boss
+                    || point.PointType == MapPointType.Unknown)
                 {
                     var exploration = RouteStateExplorer.Explore(run, point);
                     var worldlines = RouteWorldlinePredictor.Predict(run, point, exploration.Paths);
-                    nodeEncounter = MatchWorldlineEncounter(worldlines, allEntries, headIndex, index);
+                    var worldline = MatchWorldline(worldlines, allEntries, headIndex, index);
+                    nodeEncounter = worldline?.TargetEncounter;
+                    roomType = worldline?.TargetRoomType ?? roomType;
                 }
 
                 switch (roomType)
@@ -172,9 +175,28 @@ internal sealed class RoutePlanForecastService(PlanningPredictionService plannin
                 case RoomType.Elite:
                 case RoomType.Boss:
                 {
-                    state.CombatsAdvanced++;
-                    var rewards = planning.GenerateCombatRewards(state, roomType, nodeEncounter);
+                    var before = RoutePlanResourceSnapshot.Capture(state.Player);
                     var combatChoice = RoutePlanChoice.AsCombat(entry.Choice);
+                    if (combatChoice.SimulationReference is { } simulationReference
+                        && (nodeEncounter is null
+                            || simulationReference.TargetFloor != entry.Coord.row + 1
+                            || simulationReference.TargetColumn != entry.Coord.col
+                            || !planning.ApplyCombatSimulationReference(
+                            state,
+                            chain.StatesBefore[entry.Coord],
+                            simulationReference,
+                            nodeEncounter,
+                            roomType)))
+                    {
+                        outcome.Note = "模拟战斗参照已过期，请重新模拟当前规划状态";
+                        chain.Outcomes[entry.Coord] = outcome;
+                        chain.BlockedAtNode = entry.Coord;
+                        break;
+                    }
+                    state.CombatsAdvanced++;
+                    outcome.BeforeCombatRewards = planning.Capture(state);
+                    using var generated = planning.GenerateCombatRewards(state, roomType, nodeEncounter);
+                    var rewards = ApplyCombatRewards(state, generated, combatChoice, before);
                     outcome.CombatRewards = Forecast<CombatRewardDetails>.Branch(
                         rewards,
                         PredictionDependency.Rewards
@@ -182,50 +204,13 @@ internal sealed class RoutePlanForecastService(PlanningPredictionService plannin
                         | PredictionDependency.RelicGrabBag
                         | PredictionDependency.PlayerState,
                         "按计划推进到该战斗的胜利掉落；实际拿取与用药后应重算。");
-                    gold += rewards.Gold;
-                    outcome.GoldDelta += rewards.Gold;
-
-                    if (combatChoice.TakeRelic)
-                    {
-                        foreach (var relic in rewards.Relics)
-                            planning.AddRelic(state, relic.Id);
-                    }
-
-                    if (combatChoice.CardRewardChoice is { Skip: false } cardPick)
-                    {
-                        outcome.Note = "+1卡";
-                        // Thread the picked card into the projected deck so
-                        // later smith/cook targets and event decks see it.
-                        var flat = 0;
-                        var done = false;
-                        foreach (var bundle in rewards.CardRewards)
-                        {
-                            foreach (var card in bundle)
-                            {
-                                if (done)
-                                    break;
-                                if (flat == cardPick.CardIndex)
-                                {
-                                    chain.Deck.Add(new ProjectedCard(card.Id, card.Name, card.Item.IsUpgraded));
-                                    planning.AddCard(state, card.Id, card.Item.IsUpgraded);
-                                    done = true;
-                                }
-
-                                flat++;
-                            }
-
-                            if (done)
-                                break;
-                        }
-                    }
-
-                    ApplyPotionTakes(
-                        chain,
-                        potionMax,
-                        rewards.Potions,
-                        combatChoice.PotionChoice,
-                        outcome);
-                    planning.SetPotionSlots(state, chain.PotionSlots);
+                    gold = state.Player.Gold;
+                    outcome.GoldDelta = gold - before.Gold;
+                    chain.Deck.Clear();
+                    chain.Deck.AddRange(state.Player.Deck.Cards.Select(card =>
+                        new ProjectedCard(card.Id, card.Title, card.IsUpgraded)));
+                    if (rewards.CardRewardGroups.Any(group => group.Steps.Any(step => step.RejectedChoice)))
+                        outcome.Note = "卡牌奖励已变化，失效的选择未执行，请重新选择";
                     break;
                 }
                 case RoomType.Shop:
@@ -260,15 +245,13 @@ internal sealed class RoutePlanForecastService(PlanningPredictionService plannin
                                 // MerchantPotionEntry tries to procure the potion before
                                 // charging gold. With no replacement choice on the shop
                                 // screen, a full belt therefore rejects the purchase.
-                                if (chain.PotionSlots.Count >= potionMax)
+                                if (!planning.AddPotion(state, itemId))
                                 {
                                     rejectedPurchases++;
                                     continue;
                                 }
 
                                 gold -= item.Cost;
-                                chain.PotionSlots.Add(itemId);
-                                planning.SetPotionSlots(state, chain.PotionSlots);
                                 outcome.Note = (outcome.Note is null ? "" : outcome.Note + "；") + "+1药水";
                                 continue;
                             }
@@ -335,6 +318,8 @@ internal sealed class RoutePlanForecastService(PlanningPredictionService plannin
                 state.Player.Gold = gold;
 
                 chain.Outcomes[entry.Coord] = outcome;
+                if (chain.BlockedAtNode is not null)
+                    break;
             }
 
             chain.Gold = gold;
@@ -343,6 +328,111 @@ internal sealed class RoutePlanForecastService(PlanningPredictionService plannin
         finally
         {
             ShadowIsolation.Exit();
+        }
+    }
+
+    internal static CombatRewardDetails ApplyCombatRewards(
+        PlanningPredictionService.State state,
+        CombatRewardDetails rewards,
+        RoutePlanChoice.Combat combatChoice,
+        RoutePlanResourceSnapshot? before = null)
+    {
+        before ??= RoutePlanResourceSnapshot.Capture(state.Player);
+        using var scope = ShadowIsolation.Enter(state.Player, automateRewards: true);
+        var groups = new List<CombatCardRewardGroup>();
+        var groupIndex = 0;
+        var potionIndex = 0;
+        var discardUsed = false;
+        foreach (var card in rewards.NativeCardRewards)
+        {
+            card.Player.RelicObtained -= card.OnRelicObtained;
+            card.Player.RelicObtained += card.OnRelicObtained;
+        }
+        foreach (var reward in rewards.NativeRewards)
+        {
+            if (reward is CardReward)
+            {
+                var selector = new PlannedCardRewardSelector(combatChoice.ChoiceForGroup(groupIndex++).Steps);
+                using var selectorScope = ShadowIsolation.UseSelector(selector);
+                if (!reward.SelectUnsynchronized().GetAwaiter().GetResult())
+                    reward.OnSkipped();
+                groups.Add(new CombatCardRewardGroup(selector.Steps));
+                continue;
+            }
+            var take = reward is not RelicReward || combatChoice.TakeRelic;
+            if (reward is PotionReward)
+            {
+                take = combatChoice.PotionChoice?.TakenPotions.Contains(potionIndex++) ?? true;
+                if (take && !state.Player.HasOpenPotionSlots && !discardUsed
+                    && combatChoice.PotionChoice?.DiscardPotion is { } discardId)
+                {
+                    var discard = state.Player.Potions.FirstOrDefault(potion => potion.Id == discardId);
+                    if (discard is not null)
+                    {
+                        state.Player.DiscardPotionInternal(discard, silent: true);
+                        discardUsed = true;
+                    }
+                }
+            }
+            using var noImplicitPicks = ShadowIsolation.UseSelector(new PlannedCardRewardSelector([]));
+            if (!take || !reward.SelectUnsynchronized().GetAwaiter().GetResult())
+                reward.OnSkipped();
+        }
+        return rewards.Detach() with
+        {
+            CardRewardGroups = groups,
+            AppliedDelta = new RewardResourceDelta(
+                state.Player.Gold - before.Gold,
+                state.Player.Deck.Cards.Count - before.DeckCards.Count,
+                state.Player.Relics.Count - before.Relics.Count,
+                state.Player.Potions.Count() - before.Potions.Count,
+                state.Player.Creature.CurrentHp - before.Hp)
+        };
+    }
+
+    private sealed class PlannedCardRewardSelector(IReadOnlyList<CardRewardPick> picks) : ICardSelector
+    {
+        public List<CardRewardStepDetails> Steps { get; } = [];
+        private bool rejected;
+
+        public Task<IEnumerable<CardModel>> GetSelectedCards(
+            IEnumerable<CardModel> options,
+            int minSelect,
+            int maxSelect) =>
+            throw new InvalidOperationException("奖励还需要选择牌组目标，当前计划无法自动确定该选择。");
+
+        public CardRewardSelection GetSelectedCardReward(
+            IReadOnlyList<CardCreationResult> options,
+            IReadOnlyList<CardRewardAlternative> alternatives)
+        {
+            var pick = !rejected && Steps.Count < picks.Count ? picks[Steps.Count] : null;
+            var selectedIndex = -1;
+            CardRewardSelection selection = default;
+            if (pick?.AlternativeId is { } alternativeId)
+            {
+                var index = alternatives.ToList().FindIndex(item => item.OptionId == alternativeId);
+                if (index >= 0)
+                {
+                    selectedIndex = options.Count + index;
+                    selection.alternative = alternatives[index];
+                }
+            }
+            else if (pick is { CardIndex: >= 0 } && pick.CardIndex < options.Count)
+            {
+                var card = options[pick.CardIndex].Card;
+                if (pick.CardId is null || card.Id == pick.CardId)
+                {
+                    selectedIndex = pick.CardIndex;
+                    selection.card = card;
+                }
+            }
+            rejected |= pick is not null && selectedIndex < 0;
+            Steps.Add(new CardRewardStepDetails(
+                options.Select(option => new RewardItemDetails(ForecastItemDetails.Card(option.Card))).ToArray(),
+                alternatives.Select(alternative => new CardRewardAlternativeDetails(
+                    alternative.OptionId, alternative.Title.GetFormattedText(), alternative.AfterSelected)).ToArray(),
+                selectedIndex, rejected));
+            return selection;
         }
     }
 
@@ -456,7 +546,7 @@ internal sealed class RoutePlanForecastService(PlanningPredictionService plannin
     /// or take-everything by default; a recorded discard frees one slot once.
     /// Over-capacity potions are dropped with a note — never invented space.
     /// </summary>
-    private static void ApplyPotionTakes(
+    internal void ApplyPotionTakes(
         PlanChain chain,
         int max,
         IReadOnlyList<RewardItemDetails> potions,
@@ -466,32 +556,35 @@ internal sealed class RoutePlanForecastService(PlanningPredictionService plannin
         if (potions.Count == 0)
             return;
 
+        var state = chain.State;
         var taken = choice?.TakenPotions ?? Enumerable.Range(0, potions.Count).ToList();
         var discardUsed = false;
         var gained = 0;
         var dropped = 0;
-        foreach (var index in taken)
+        foreach (var index in taken.Distinct())
         {
             if (index < 0 || index >= potions.Count)
                 continue;
 
-            if (chain.PotionSlots.Count >= max)
+            var potionId = potions[index].Id;
+            var discard = PlanningPredictionService.GetPotionSlotIds(state).Count >= max
+                          && !discardUsed
+                          && choice?.DiscardPotion is { } discardId
+                ? discardId
+                : (ModelId?)null;
+            var added = planning.AddPotion(state, potionId, discard);
+            if (added)
             {
-                if (choice?.DiscardPotion is { } discard
-                    && !discardUsed
-                    && RemovePotionSlot(chain.PotionSlots, discard))
-                {
+                if (discard is not null)
                     discardUsed = true;
-                }
-                else
-                {
-                    dropped++;
-                    continue;
-                }
+                gained++;
+                Entry.Logger.Debug(
+                    $"[PlanPotion] applied {potionId.Category}.{potionId.Entry}; "
+                    + $"slots={string.Join(',', PlanningPredictionService.GetPotionSlotIds(state).Select(id => id.Entry))}");
             }
+            else
+                dropped++;
 
-            chain.PotionSlots.Add(potions[index].Id);
-            gained++;
         }
 
         if (gained > 0)
@@ -501,23 +594,12 @@ internal sealed class RoutePlanForecastService(PlanningPredictionService plannin
                            + $"药水槽已满，放弃 {dropped} 瓶";
     }
 
-    private static bool RemovePotionSlot(List<ModelId> slots, ModelId discard)
-    {
-        var index = slots.FindIndex(slot => slot.Entry.Equals(
-            discard.Entry,
-            StringComparison.OrdinalIgnoreCase));
-        if (index < 0)
-            return false;
-        slots.RemoveAt(index);
-        return true;
-    }
-
     /// <summary>
     /// Picks the worldline whose route passes through the planned rooms
     /// (head..index-1) in order — extras allowed only before the plan head —
     /// and yields the target's real encounter model.
     /// </summary>
-    private static EncounterModel? MatchWorldlineEncounter(
+    private static RouteWorldline? MatchWorldline(
         IReadOnlyList<RouteWorldline> worldlines,
         IReadOnlyList<RoutePlanEntry> entries,
         int headIndex,
@@ -550,7 +632,7 @@ internal sealed class RoutePlanForecastService(PlanningPredictionService plannin
             }
 
             if (matched && plannedIndex == index)
-                return line.TargetEncounter;
+                return line;
         }
 
         return null;

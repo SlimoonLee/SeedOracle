@@ -28,6 +28,9 @@ internal static class DebugForecastSmokeTest
                 Environment.GetEnvironmentVariable(EnvironmentVariable),
                 "1",
                 StringComparison.Ordinal)
+            // A retained worker inherits the parent's environment. Its map
+            // load belongs to one combat request, not a fresh UI test run.
+            || Environment.GetEnvironmentVariable("COMBATSOLVER_PRECOMBAT_WORKER") == "1"
             || Interlocked.Exchange(ref _hasRun, 1) != 0)
         {
             return;
@@ -430,8 +433,8 @@ internal static class DebugForecastSmokeTest
             || preCombatPanel.DisplayedTargetCount != preCombatTargets.Count
             || preCombatPanel.ManualCalculationButtonCount != preCombatTargets.Count
             || preCombatPanel.RouteBadgeCount != preCombatTargets.Count
-            || preCombatPanel.SimulationSampleOptionCount != 11
-            || preCombatPanel.SimulationTargetOptionCount != 6
+            || preCombatPanel.SimulationSampleOptionCount != 10
+            || preCombatPanel.SimulationTargetOptionCount != 7
             || !preCombatPanel.HasSimulationDisclaimer
             || preCombatPanel.WorkerRetentionOptionCount != 5
             || !preCombatPanel.HasExpectedWorkerRetentionOptions

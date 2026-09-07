@@ -20,6 +20,7 @@ internal sealed partial class PreCombatForecastPanelControl
         SpecificNormal = 4,
         SpecificElite = 5,
         CurrentBoss = 6,
+        SpecificEvent = 7,
     }
 
     private enum WorkerRetentionPolicy
@@ -197,6 +198,7 @@ internal sealed partial class PreCombatForecastPanelControl
         _simulationTargetSelect.AddItem("指定普通怪组", (int)SimulationTargetKind.SpecificNormal);
         _simulationTargetSelect.AddItem("指定精英怪组", (int)SimulationTargetKind.SpecificElite);
         _simulationTargetSelect.AddItem("本幕 Boss", (int)SimulationTargetKind.CurrentBoss);
+        _simulationTargetSelect.AddItem("指定事件战斗", (int)SimulationTargetKind.SpecificEvent);
         _simulationTargetSelect.ItemSelected += _ => RefreshSimulationEncounterChoices();
         controls.AddChild(_simulationTargetSelect);
 
@@ -206,10 +208,10 @@ internal sealed partial class PreCombatForecastPanelControl
 
         controls.AddChild(PreCombatPanelStyles.CreateLabel("次数", 15, StsColors.cream));
         _simulationCountSelect = CreateOptionButton(118f);
-        for (var count = 0; count <= 10; count++)
-            _simulationCountSelect.AddItem(count == 0 ? "0 次" : $"{count} 次", count);
-        _simulationCountSelect.Selected = 0;
-        _simulationCountSelect.TooltipText = "一次手动任务最多运行 10 个独立假设样本；0 次用于清空结果，不会启动 worker。";
+        for (var count = 1; count <= 10; count++)
+            _simulationCountSelect.AddItem($"{count} 次", count);
+        _simulationCountSelect.Selected = 2;
+        _simulationCountSelect.TooltipText = "默认 3 次，可选 1～10 个独立假设样本。";
         controls.AddChild(_simulationCountSelect);
 
         _simulationStartButton = PreCombatPanelStyles.CreateButton("开始模拟", 108f);
@@ -217,7 +219,7 @@ internal sealed partial class PreCombatForecastPanelControl
         controls.AddChild(_simulationStartButton);
 
         _simulationSummary = PreCombatPanelStyles.CreateLabel(
-            "选择 0～10 次后手动开始；模拟不会读取或推进真实战斗随机数。",
+            "默认 3 次，可选 1～10 次后手动开始；模拟不会推进真实战斗随机数。",
             15,
             StsColors.cream);
         _simulationSummary.AutowrapMode = TextServer.AutowrapMode.WordSmart;
@@ -285,6 +287,10 @@ internal sealed partial class PreCombatForecastPanelControl
                     new SimulationEncounterChoice(encounter, $"[强] {LocalizedEncounterTitle(encounter)}"))),
             SimulationTargetKind.SpecificElite => run.Act.AllEliteEncounters
                 .Select(encounter => new SimulationEncounterChoice(encounter, LocalizedEncounterTitle(encounter))),
+            SimulationTargetKind.SpecificEvent => ModelDb.All.OfType<EncounterModel>()
+                .Where(encounter => encounter.RoomType is RoomType.Monster or RoomType.Elite or RoomType.Boss)
+                .Except(ModelDb.Acts.SelectMany(act => act.AllEncounters))
+                .Select(encounter => new SimulationEncounterChoice(encounter, LocalizedEncounterTitle(encounter))),
             SimulationTargetKind.CurrentBoss =>
             [new SimulationEncounterChoice(run.Act.BossEncounter, LocalizedEncounterTitle(run.Act.BossEncounter))],
             _ => [],
@@ -333,13 +339,8 @@ internal sealed partial class PreCombatForecastPanelControl
         }
 
         int sampleCount = (int)_simulationCountSelect.GetSelectedId();
-        if (sampleCount == 0)
-        {
-            ClearSimulationResults();
-            _simulationResultStateToken = null;
-            SetSimulationSummary("已清空模拟结果；0 次不会启动后台 worker。", StsColors.cream);
+        if (sampleCount is < 1 or > 10)
             return;
-        }
 
         RunState run = _screen._runState;
         string stateToken;
@@ -394,7 +395,7 @@ internal sealed partial class PreCombatForecastPanelControl
             SimulationTargetKind.RandomWeak => run.Act.AllWeakEncounters.ToArray(),
             SimulationTargetKind.RandomRegular => run.Act.AllRegularEncounters.ToArray(),
             SimulationTargetKind.RandomElite => run.Act.AllEliteEncounters.ToArray(),
-            SimulationTargetKind.SpecificNormal or SimulationTargetKind.SpecificElite
+            SimulationTargetKind.SpecificNormal or SimulationTargetKind.SpecificElite or SimulationTargetKind.SpecificEvent
                 => ResolveSelectedSimulationEncounter(),
             SimulationTargetKind.CurrentBoss => [run.Act.BossEncounter],
             _ => [],
@@ -409,6 +410,7 @@ internal sealed partial class PreCombatForecastPanelControl
             SimulationTargetKind.RandomElite => "随机本幕精英",
             SimulationTargetKind.SpecificNormal => "指定普通怪组",
             SimulationTargetKind.SpecificElite => "指定精英怪组",
+            SimulationTargetKind.SpecificEvent => "指定事件战斗",
             SimulationTargetKind.CurrentBoss => "本幕 Boss",
             _ => "模拟",
         };

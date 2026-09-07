@@ -1,0 +1,316 @@
+planning-potion-roundtrip PASS: EXPLOSIVE_AMPOULE,STRENGTH_POTION
+planning-potion-chain PASS: default pickup, explicit skip, full belt, replacement, earlier snapshot isolation
+native-combat-reward-groups PASS: independent picks/skip, stale choices, White Star rarity, Candy+Wheel [4,3], two sacrifices, reroll-then-pick, snapshot/RNG replay, map/planner parity
+event-audit AromaOfChaos:
+  option 0: AROMA_OF_CHAOS.pages.INITIAL.options.LET_GO; kind=Exact; locked=False; requests=1..1/10
+  option 0 OK: gold 0 hp 0 cards[编译冲击] relics[] potions[] next[] finished=True
+  option 1: AROMA_OF_CHAOS.pages.INITIAL.options.MAINTAIN_CONTROL; kind=Exact; locked=False; requests=1..1/8
+  option 1 OK: gold 0 hp 0 cards[打击++] relics[] potions[] next[] finished=True
+event-audit ByrdonisNest:
+  option 0: BYRDONIS_NEST.pages.INITIAL.options.EAT; kind=Exact; locked=False; requests=
+  option 0 OK: gold 0 hp +7 cards[] relics[] potions[] next[] finished=True
+  option 1: BYRDONIS_NEST.pages.INITIAL.options.TAKE; kind=Exact; locked=False; requests=
+  option 1 OK: gold 0 hp 0 cards[多尼斯异鸟蛋] relics[] potions[] next[] finished=True
+event-audit DenseVegetation:
+  option 0: DENSE_VEGETATION.pages.INITIAL.options.TRUDGE_ON; kind=Exact; locked=False; requests=
+  option 0 OK: gold +84 hp -8 cards[] relics[] potions[] next[] finished=True
+  option 1: DENSE_VEGETATION.pages.INITIAL.options.REST; kind=RewardChoice; locked=False; requests=
+  option 1 OK: gold 0 hp 0 cards[] relics[] potions[] next[战！] finished=False
+  option 1 REWARD-SKIP PASS
+event-audit JungleMazeAdventure:
+  option 0: JUNGLE_MAZE_ADVENTURE.pages.INITIAL.options.SOLO_QUEST; kind=Exact; locked=False; requests=
+  option 0 OK: gold +140 hp -18 cards[] relics[] potions[] next[] finished=True
+  option 1: JUNGLE_MAZE_ADVENTURE.pages.INITIAL.options.JOIN_FORCES; kind=Exact; locked=False; requests=
+  option 1 OK: gold +38 hp 0 cards[] relics[] potions[] next[] finished=True
+event-audit LuminousChoir:
+  option 0: LUMINOUS_CHOIR.pages.INITIAL.options.REACH_INTO_THE_FLESH; kind=Exact; locked=False; requests=2..2/10
+  option 0 OK: gold 0 hp 0 cards[孢子心灵] relics[] potions[] next[] finished=True
+  option 1: LUMINOUS_CHOIR.pages.INITIAL.options.OFFER_TRIBUTE_LOCKED; kind=Exact; locked=True; requests=
+  option 1 DEGRADED: 该事件选项当前已锁定，计划状态可能已经变化
+event-audit MorphicGrove:
+  option 0: MORPHIC_GROVE.pages.INITIAL.options.GROUP; kind=Exact; locked=False; requests=2..2/10
+  option 0 OK: gold -99 hp 0 cards[弹幕齐射,热修复] relics[] potions[] next[] finished=True
+  option 1: MORPHIC_GROVE.pages.INITIAL.options.LONER; kind=Exact; locked=False; requests=
+  option 1 OK: gold 0 hp +5 cards[] relics[] potions[] next[] finished=True
+event-audit SapphireSeed:
+  option 0: SAPPHIRE_SEED.pages.INITIAL.options.EAT; kind=Exact; locked=False; requests=1..1/8
+  option 0 OK: gold 0 hp 0 cards[打击++] relics[] potions[] next[] finished=True
+  option 1: SAPPHIRE_SEED.pages.INITIAL.options.PLANT; kind=Exact; locked=False; requests=1..1/10
+  option 1 OK: gold 0 hp 0 cards[] relics[] potions[] next[] finished=True
+event-audit SunkenStatue:
+  option 0: SUNKEN_STATUE.pages.INITIAL.options.GRAB_SWORD; kind=Exact; locked=False; requests=
+  option 0 OK: gold 0 hp 0 cards[] relics[石之剑] potions[] next[] finished=True
+  option 1: SUNKEN_STATUE.pages.INITIAL.options.DIVE_INTO_WATER; kind=Exact; locked=False; requests=
+  option 1 OK: gold +105 hp -7 cards[] relics[] potions[] next[] finished=True
+event-audit TabletOfTruth:
+  option 0: TABLET_OF_TRUTH.pages.INITIAL.options.DECIPHER_1; kind=Exact; locked=False; requests=
+  option 0 OK: gold 0 hp -3 cards[打击++] relics[] potions[] next[继续解读|放弃] finished=False
+  option 1: TABLET_OF_TRUTH.pages.INITIAL.options.SMASH; kind=Exact; locked=False; requests=
+  option 1 OK: gold 0 hp 0 cards[] relics[] potions[] next[] finished=True
+event-audit UnrestSite:
+  option 0: UNREST_SITE.pages.INITIAL.options.REST; kind=Exact; locked=False; requests=
+  option 0 OK: gold 0 hp 0 cards[睡眠不佳] relics[] potions[] next[] finished=True
+  option 1: UNREST_SITE.pages.INITIAL.options.KILL; kind=Exact; locked=False; requests=
+  option 1 OK: gold 0 hp -8 cards[] relics[药水腰带] potions[] next[] finished=True
+event-audit Wellspring:
+  option 0: WELLSPRING.pages.INITIAL.options.BOTTLE; kind=RewardChoice; locked=False; requests=
+  option 0 OK: gold 0 hp 0 cards[] relics[] potions[甲虫汁] next[] finished=True
+  option 0 REWARD-SKIP PASS
+  option 1: WELLSPRING.pages.INITIAL.options.BATHE; kind=Exact; locked=False; requests=1..1/10
+  option 1 OK: gold 0 hp 0 cards[愧疚] relics[] potions[] next[] finished=True
+event-audit WhisperingHollow:
+  option 0: WHISPERING_HOLLOW.pages.INITIAL.options.GOLD; kind=RewardChoice; locked=False; requests=
+  option 0 OK: gold -39 hp 0 cards[] relics[] potions[消亡粉末,瓶装潜能] next[] finished=True
+  option 0 REWARD-SKIP PASS
+  option 1: WHISPERING_HOLLOW.pages.INITIAL.options.HUG; kind=Exact; locked=False; requests=1..1/10
+  option 1 OK: gold 0 hp -9 cards[扫荡射线] relics[] potions[] next[] finished=True
+event-audit WoodCarvings:
+  option 0: WOOD_CARVINGS.pages.INITIAL.options.BIRD; kind=Exact; locked=False; requests=1..1/10
+  option 0 OK: gold 0 hp 0 cards[啄击] relics[] potions[] next[] finished=True
+  option 1: WOOD_CARVINGS.pages.INITIAL.options.SNAKE; kind=Exact; locked=False; requests=1..1/10
+  option 1 OK: gold 0 hp 0 cards[] relics[] potions[] next[] finished=True
+  option 2: WOOD_CARVINGS.pages.INITIAL.options.TORUS; kind=Exact; locked=False; requests=1..1/10
+  option 2 OK: gold 0 hp 0 cards[坚韧之环] relics[] potions[] next[] finished=True
+event-audit AbyssalBaths:
+  option 0: ABYSSAL_BATHS.pages.INITIAL.options.IMMERSE; kind=Exact; locked=False; requests=
+  option 0 OK: gold 0 hp -1 cards[] relics[] potions[] next[沉溺|离开浴场] finished=False
+  option 1: ABYSSAL_BATHS.pages.INITIAL.options.ABSTAIN; kind=Exact; locked=False; requests=
+  option 1 OK: gold 0 hp 0 cards[] relics[] potions[] next[] finished=True
+event-audit DrowningBeacon:
+  option 0: DROWNING_BEACON.pages.INITIAL.options.BOTTLE; kind=RewardChoice; locked=False; requests=
+  option 0 OK: gold 0 hp 0 cards[] relics[] potions[发光水] next[] finished=True
+  option 0 REWARD-SKIP PASS
+  option 1: DROWNING_BEACON.pages.INITIAL.options.CLIMB; kind=Exact; locked=False; requests=
+  option 1 OK: gold 0 hp -13 cards[] relics[菲涅耳透镜] potions[] next[] finished=True
+event-audit EndlessConveyor:
+  option 0: ENDLESS_CONVEYOR.pages.ALL.options.CAVIAR; kind=Exact; locked=False; requests=
+  option 0 OK: gold -40 hp +4 cards[] relics[] potions[] next[从传送带上拿份可疑调味料|离开] finished=False
+  option 1: ENDLESS_CONVEYOR.pages.INITIAL.options.OBSERVE_CHEF; kind=Exact; locked=False; requests=
+  option 1 OK: gold 0 hp 0 cards[双重释放++] relics[] potions[] next[] finished=True
+event-audit PunchOff:
+  option 0: PUNCH_OFF.pages.INITIAL.options.NAB; kind=Exact; locked=False; requests=
+  option 0 OK: gold 0 hp 0 cards[受伤] relics[药水腰带] potions[] next[] finished=True
+  option 1: PUNCH_OFF.pages.INITIAL.options.I_CAN_TAKE_THEM; kind=Exact; locked=False; requests=
+  option 1 OK: gold 0 hp 0 cards[] relics[] potions[] next[战斗] finished=False
+event-audit SpiralingWhirlpool:
+  option 0: SPIRALING_WHIRLPOOL.pages.INITIAL.options.OBSERVE; kind=Exact; locked=False; requests=1..1/8
+  option 0 OK: gold 0 hp 0 cards[] relics[] potions[] next[] finished=True
+  option 1: SPIRALING_WHIRLPOOL.pages.INITIAL.options.DRINK; kind=Exact; locked=False; requests=
+  option 1 OK: gold 0 hp 0 cards[] relics[] potions[] next[] finished=True
+event-audit SunkenTreasury:
+  option 0: SUNKEN_TREASURY.pages.INITIAL.options.FIRST_CHEST; kind=Exact; locked=False; requests=
+  option 0 OK: gold +65 hp 0 cards[] relics[] potions[] next[] finished=True
+  option 1: SUNKEN_TREASURY.pages.INITIAL.options.SECOND_CHEST; kind=Exact; locked=False; requests=
+  option 1 OK: gold +312 hp 0 cards[贪婪] relics[] potions[] next[] finished=True
+event-audit DoorsOfLightAndDark:
+  option 0: DOORS_OF_LIGHT_AND_DARK.pages.INITIAL.options.LIGHT; kind=Exact; locked=False; requests=
+  option 0 OK: gold 0 hp 0 cards[打击++,防御++] relics[] potions[] next[] finished=True
+  option 1: DOORS_OF_LIGHT_AND_DARK.pages.INITIAL.options.DARK; kind=Exact; locked=False; requests=1..1/10
+  option 1 OK: gold 0 hp 0 cards[] relics[] potions[] next[] finished=True
+event-audit TrashHeap:
+  option 0: TRASH_HEAP.pages.INITIAL.options.DIVE_IN; kind=Exact; locked=False; requests=
+  option 0 OK: gold 0 hp -8 cards[] relics[捕梦网] potions[] next[] finished=True
+  option 1: TRASH_HEAP.pages.INITIAL.options.GRAB; kind=Exact; locked=False; requests=
+  option 1 OK: gold +100 hp 0 cards[双持] relics[] potions[] next[] finished=True
+event-audit WaterloggedScriptorium:
+  option 0: WATERLOGGED_SCRIPTORIUM.pages.INITIAL.options.BLOODY_INK; kind=Exact; locked=False; requests=
+  option 0 OK: gold 0 hp +6 cards[] relics[] potions[] next[] finished=True
+  option 1: WATERLOGGED_SCRIPTORIUM.pages.INITIAL.options.TENTACLE_QUILL; kind=Exact; locked=False; requests=1..1/10
+  option 1 OK: gold -55 hp 0 cards[] relics[] potions[] next[] finished=True
+  option 2: WATERLOGGED_SCRIPTORIUM.pages.INITIAL.options.PRICKLY_SPONGE; kind=Exact; locked=False; requests=2..2/10
+  option 2 OK: gold -99 hp 0 cards[] relics[] potions[] next[] finished=True
+event-audit Amalgamator:
+  option 0: AMALGAMATOR.pages.INITIAL.options.COMBINE_STRIKES; kind=Exact; locked=False; requests=2..2/4
+  option 0 OK: gold 0 hp 0 cards[究极打击] relics[] potions[] next[] finished=True
+  option 1: AMALGAMATOR.pages.INITIAL.options.COMBINE_DEFENDS; kind=Exact; locked=False; requests=2..2/4
+  option 1 OK: gold 0 hp 0 cards[究极防御] relics[] potions[] next[] finished=True
+event-audit Bugslayer:
+  option 0: BUGSLAYER.pages.INITIAL.options.EXTERMINATION; kind=Exact; locked=False; requests=
+  option 0 OK: gold 0 hp 0 cards[杀灭] relics[] potions[] next[] finished=True
+  option 1: BUGSLAYER.pages.INITIAL.options.SQUASH; kind=Exact; locked=False; requests=
+  option 1 OK: gold 0 hp 0 cards[压扁] relics[] potions[] next[] finished=True
+event-audit ColorfulPhilosophers:
+  option 0: COLORFUL_PHILOSOPHERS.pages.INITIAL.options.NECROBINDER; kind=Exact; locked=False; requests=1..1/3,1..1/3,1..1/3
+  option 0 OK: gold 0 hp 0 cards[玷污,纠缠,虚空之唤] relics[] potions[] next[] finished=True
+  option 1: COLORFUL_PHILOSOPHERS.pages.INITIAL.options.IRONCLAD; kind=Exact; locked=False; requests=1..1/3,1..1/3,1..1/3
+  option 1 OK: gold 0 hp 0 cards[血墙,地狱之刃,壁垒] relics[] potions[] next[] finished=True
+  option 2: COLORFUL_PHILOSOPHERS.pages.INITIAL.options.REGENT; kind=Exact; locked=False; requests=1..1/3,1..1/3,1..1/3
+  option 2 OK: gold 0 hp 0 cards[天穹之力,环绕轨道,锻打成型] relics[] potions[] next[] finished=True
+event-audit ColossalFlower:
+  option 0: COLOSSAL_FLOWER.pages.INITIAL.options.EXTRACT_CURRENT_PRIZE_1; kind=Exact; locked=False; requests=
+  option 0 OK: gold +35 hp 0 cards[] relics[] potions[] next[] finished=True
+  option 1: COLOSSAL_FLOWER.pages.INITIAL.options.REACH_DEEPER_1; kind=Exact; locked=False; requests=
+  option 1 OK: gold 0 hp -5 cards[] relics[] potions[] next[采集花蜜|深入探索] finished=False
+event-audit FieldOfManSizedHoles:
+  option 0: FIELD_OF_MAN_SIZED_HOLES.pages.INITIAL.options.RESIST; kind=Exact; locked=False; requests=2..2/10
+  option 0 OK: gold 0 hp 0 cards[凡庸] relics[] potions[] next[] finished=True
+  option 1: FIELD_OF_MAN_SIZED_HOLES.pages.INITIAL.options.ENTER_YOUR_HOLE; kind=Exact; locked=False; requests=1..1/10
+  option 1 OK: gold 0 hp 0 cards[] relics[] potions[] next[] finished=True
+event-audit InfestedAutomaton:
+  option 0: INFESTED_AUTOMATON.pages.INITIAL.options.STUDY; kind=Exact; locked=False; requests=
+  option 0 OK: gold 0 hp 0 cards[烟囱] relics[] potions[] next[] finished=True
+  option 1: INFESTED_AUTOMATON.pages.INITIAL.options.TOUCH_CORE; kind=Exact; locked=False; requests=
+  option 1 OK: gold 0 hp 0 cards[超频] relics[] potions[] next[] finished=True
+event-audit LostWisp:
+  option 0: LOST_WISP.pages.INITIAL.options.CLAIM; kind=Exact; locked=False; requests=
+  option 0 OK: gold 0 hp 0 cards[腐朽] relics[迷失鬼火] potions[] next[] finished=True
+  option 1: LOST_WISP.pages.INITIAL.options.SEARCH; kind=Exact; locked=False; requests=
+  option 1 OK: gold +53 hp 0 cards[] relics[] potions[] next[] finished=True
+event-audit SpiritGrafter:
+  option 0: SPIRIT_GRAFTER.pages.INITIAL.options.LET_IT_IN; kind=Exact; locked=False; requests=
+  option 0 OK: gold 0 hp 0 cards[羽化] relics[] potions[] next[] finished=True
+  option 1: SPIRIT_GRAFTER.pages.INITIAL.options.REJECTION; kind=Exact; locked=False; requests=1..1/8
+  option 1 OK: gold 0 hp -10 cards[打击++] relics[] potions[] next[] finished=True
+event-audit TheLanternKey:
+  option 0: THE_LANTERN_KEY.pages.INITIAL.options.RETURN_THE_KEY; kind=Exact; locked=False; requests=
+  option 0 OK: gold +100 hp 0 cards[] relics[] potions[] next[] finished=True
+  option 1: THE_LANTERN_KEY.pages.INITIAL.options.KEEP_THE_KEY; kind=Exact; locked=False; requests=
+  option 1 OK: gold 0 hp 0 cards[] relics[] potions[] next[战斗] finished=False
+event-audit ZenWeaver:
+  option 0: ZEN_WEAVER.pages.INITIAL.options.BREATHING_TECHNIQUES; kind=Exact; locked=False; requests=
+  option 0 OK: gold -50 hp 0 cards[开悟,开悟] relics[] potions[] next[] finished=True
+  option 1: ZEN_WEAVER.pages.INITIAL.options.LOCKED; kind=Exact; locked=True; requests=
+  option 1 DEGRADED: 该事件选项当前已锁定，计划状态可能已经变化
+  option 2: ZEN_WEAVER.pages.INITIAL.options.LOCKED; kind=Exact; locked=True; requests=
+  option 2 DEGRADED: 该事件选项当前已锁定，计划状态可能已经变化
+event-audit BattlewornDummy:
+  option 0: BATTLEWORN_DUMMY.pages.INITIAL.options.SETTING_1; kind=SpecialCombat; locked=False; requests=
+  option 0 OK: gold 0 hp 0 cards[] relics[] potions[] next[] finished=False
+  option 1: BATTLEWORN_DUMMY.pages.INITIAL.options.SETTING_2; kind=SpecialCombat; locked=False; requests=
+  option 1 OK: gold 0 hp 0 cards[] relics[] potions[] next[] finished=False
+  option 2: BATTLEWORN_DUMMY.pages.INITIAL.options.SETTING_3; kind=SpecialCombat; locked=False; requests=
+  option 2 OK: gold 0 hp 0 cards[] relics[] potions[] next[] finished=False
+event-audit GraveOfTheForgotten:
+  option 0: GRAVE_OF_THE_FORGOTTEN.pages.INITIAL.options.CONFRONT_LOCKED; kind=Exact; locked=True; requests=
+  option 0 DEGRADED: 该事件选项当前已锁定，计划状态可能已经变化
+  option 1: GRAVE_OF_THE_FORGOTTEN.pages.INITIAL.options.ACCEPT; kind=Exact; locked=False; requests=
+  option 1 OK: gold 0 hp 0 cards[] relics[遗忘之魂] potions[] next[] finished=True
+event-audit HungryForMushrooms:
+  option 0: HUNGRY_FOR_MUSHROOMS.pages.INITIAL.options.BIG_MUSHROOM; kind=Exact; locked=False; requests=
+  option 0 OK: gold 0 hp +20 cards[] relics[大蘑菇] potions[] next[] finished=True
+  option 1: HUNGRY_FOR_MUSHROOMS.pages.INITIAL.options.FRAGRANT_MUSHROOM; kind=Exact; locked=False; requests=
+  option 1 OK: gold 0 hp -15 cards[打击++,双重释放++] relics[芳香蘑菇] potions[] next[] finished=True
+event-audit Reflections:
+  option 0: REFLECTIONS.pages.INITIAL.options.TOUCH_A_MIRROR; kind=Exact; locked=False; requests=
+  option 0 OK: gold 0 hp 0 cards[打击++,双重释放++] relics[] potions[] next[] finished=True
+  option 1: REFLECTIONS.pages.INITIAL.options.SHATTER; kind=Exact; locked=False; requests=
+  option 1 OK: gold 0 hp 0 cards[打击,打击,打击,打击++,防御,防御,防御,防御++,电击,双重释放,霉运] relics[] potions[] next[] finished=True
+event-audit RoundTeaParty:
+  option 0: ROUND_TEA_PARTY.pages.INITIAL.options.ENJOY_TEA; kind=Exact; locked=False; requests=
+  option 0 OK: gold 0 hp 0 cards[] relics[王室猛毒] potions[] next[] finished=True
+  option 1: ROUND_TEA_PARTY.pages.INITIAL.options.PICK_FIGHT; kind=Exact; locked=False; requests=
+  option 1 OK: gold 0 hp 0 cards[] relics[] potions[] next[继续] finished=False
+event-audit Trial:
+  option 0: TRIAL.pages.INITIAL.options.ACCEPT; kind=Exact; locked=False; requests=
+  option 0 OK: gold 0 hp 0 cards[] relics[] potions[] next[判决：有罪|判决：无罪] finished=False
+  option 1: TRIAL.pages.INITIAL.options.REJECT; kind=Exact; locked=False; requests=
+  option 1 OK: gold 0 hp 0 cards[] relics[] potions[] next[接受|坚持到底] finished=False
+event-audit TinkerTime:
+  option 0: TINKER_TIME.pages.INITIAL.options.CHOOSE_CARD_TYPE; kind=Exact; locked=False; requests=
+  option 0 OK: gold 0 hp 0 cards[] relics[] potions[] next[装置|武器] finished=False
+event-audit BrainLeech:
+  option 0: BRAIN_LEECH.pages.INITIAL.options.SHARE_KNOWLEDGE; kind=Exact; locked=False; requests=1..1/5
+  option 0 OK: gold 0 hp 0 cards[快速检索] relics[] potions[] next[] finished=True
+  option 1: BRAIN_LEECH.pages.INITIAL.options.RIP; kind=Exact; locked=False; requests=1..1/3
+  option 1 OK: gold 0 hp -5 cards[箭雨] relics[] potions[] next[] finished=True
+event-audit CrystalSphere:
+  option 0: CRYSTAL_SPHERE.pages.INITIAL.options.UNCOVER_FUTURE; kind=Minigame; locked=False; requests=
+  option 0 DEGRADED: 该事件无法无头预演
+  option 1: CRYSTAL_SPHERE.pages.INITIAL.options.PAYMENT_PLAN; kind=Minigame; locked=False; requests=
+  option 1 DEGRADED: 该事件无法无头预演
+event-audit DollRoom:
+  option 0: DOLL_ROOM.pages.INITIAL.options.RANDOM; kind=Exact; locked=False; requests=
+  option 0 OK: gold 0 hp 0 cards[] relics[抱抱先生] potions[] next[] finished=True
+  option 1: DOLL_ROOM.pages.INITIAL.options.TAKE_SOME_TIME; kind=Exact; locked=False; requests=
+  option 1 OK: gold 0 hp -5 cards[] relics[] potions[] next[抱抱先生|宾邦] finished=False
+  option 2: DOLL_ROOM.pages.INITIAL.options.EXAMINE; kind=Exact; locked=False; requests=
+  option 2 OK: gold 0 hp -15 cards[] relics[] potions[] next[抱抱先生|宾邦|风的女儿] finished=False
+event-audit FakeMerchant:
+  ENUMERATION EMPTY
+event-audit PotionCourier:
+  option 0: POTION_COURIER.pages.INITIAL.options.GRAB_POTIONS; kind=RewardChoice; locked=False; requests=
+  option 0 OK: gold 0 hp 0 cards[] relics[] potions[污浊药水,污浊药水,污浊药水] next[] finished=True
+  option 0 REWARD-SKIP PASS
+  option 1: POTION_COURIER.pages.INITIAL.options.RANSACK; kind=RewardChoice; locked=False; requests=
+  option 1 OK: gold 0 hp 0 cards[] relics[] potions[熔炉的祝福] next[] finished=True
+  option 1 REWARD-SKIP PASS
+event-audit RanwidTheElder:
+  option 0: RANWID_THE_ELDER.pages.INITIAL.options.POTION_LOCKED; kind=Exact; locked=True; requests=
+  option 0 DEGRADED: 该事件选项当前已锁定，计划状态可能已经变化
+  option 1: RANWID_THE_ELDER.pages.INITIAL.options.GOLD; kind=Exact; locked=False; requests=
+  option 1 OK: gold -99 hp 0 cards[] relics[药水腰带] potions[] next[] finished=True
+  option 2: RANWID_THE_ELDER.pages.INITIAL.options.RELIC_LOCKED; kind=Exact; locked=True; requests=
+  option 2 DEGRADED: 该事件选项当前已锁定，计划状态可能已经变化
+event-audit RelicTrader:
+  option 0: PROCEED; kind=Exact; locked=False; requests=
+  option 0 OK: gold 0 hp 0 cards[] relics[] potions[] next[] finished=True
+event-audit RoomFullOfCheese:
+  option 0: ROOM_FULL_OF_CHEESE.pages.INITIAL.options.GORGE; kind=Exact; locked=False; requests=2..2/8
+  option 0 OK: gold 0 hp 0 cards[光束射线,飞跃] relics[] potions[] next[] finished=True
+  option 1: ROOM_FULL_OF_CHEESE.pages.INITIAL.options.SEARCH; kind=Exact; locked=False; requests=
+  option 1 OK: gold 0 hp -14 cards[] relics[天选芝士] potions[] next[] finished=True
+event-audit SelfHelpBook:
+  option 0: SELF_HELP_BOOK.pages.INITIAL.options.READ_THE_BACK; kind=Exact; locked=False; requests=1..1/4
+  option 0 OK: gold 0 hp 0 cards[] relics[] potions[] next[] finished=True
+  option 1: SELF_HELP_BOOK.pages.INITIAL.options.READ_PASSAGE; kind=Exact; locked=False; requests=1..1/4
+  option 1 OK: gold 0 hp 0 cards[] relics[] potions[] next[] finished=True
+  option 2: SELF_HELP_BOOK.pages.INITIAL.options.READ_ENTIRE_BOOK_LOCKED; kind=Exact; locked=True; requests=
+  option 2 DEGRADED: 该事件选项当前已锁定，计划状态可能已经变化
+event-audit SlipperyBridge:
+  option 0: SLIPPERY_BRIDGE.pages.INITIAL.options.OVERCOME; kind=Exact; locked=False; requests=
+  option 0 OK: gold 0 hp 0 cards[] relics[] potions[] next[] finished=True
+  option 1: SLIPPERY_BRIDGE.pages.INITIAL.options.HOLD_ON_0; kind=Exact; locked=False; requests=
+  option 1 OK: gold 0 hp -3 cards[] relics[] potions[] next[跨越|再撑一会] finished=False
+event-audit StoneOfAllTime:
+  option 0: STONE_OF_ALL_TIME.pages.INITIAL.options.LIFT_LOCKED; kind=Exact; locked=True; requests=
+  option 0 DEGRADED: 该事件选项当前已锁定，计划状态可能已经变化
+  option 1: STONE_OF_ALL_TIME.pages.INITIAL.options.PUSH; kind=Exact; locked=False; requests=1..1/4
+  option 1 OK: gold 0 hp -6 cards[] relics[] potions[] next[] finished=True
+event-audit Symbiote:
+  option 0: SYMBIOTE.pages.INITIAL.options.APPROACH; kind=Exact; locked=False; requests=1..1/4
+  option 0 OK: gold 0 hp 0 cards[] relics[] potions[] next[] finished=True
+  option 1: SYMBIOTE.pages.INITIAL.options.KILL_WITH_FIRE; kind=Exact; locked=False; requests=1..1/10
+  option 1 OK: gold 0 hp 0 cards[压缩] relics[] potions[] next[] finished=True
+event-audit TeaMaster:
+  option 0: TEA_MASTER.pages.INITIAL.options.BONE_TEA; kind=Exact; locked=False; requests=
+  option 0 OK: gold -50 hp 0 cards[] relics[骨茶] potions[] next[] finished=True
+  option 1: TEA_MASTER.pages.INITIAL.options.EMBER_TEA_LOCKED; kind=Exact; locked=True; requests=
+  option 1 DEGRADED: 该事件选项当前已锁定，计划状态可能已经变化
+  option 2: TEA_MASTER.pages.INITIAL.options.TEA_OF_DISCOURTESY; kind=Exact; locked=False; requests=
+  option 2 OK: gold 0 hp 0 cards[] relics[无礼之茶] potions[] next[] finished=True
+event-audit TheFutureOfPotions:
+  ENUMERATION EMPTY
+event-audit TheLegendsWereTrue:
+  option 0: THE_LEGENDS_WERE_TRUE.pages.INITIAL.options.NAB_THE_MAP; kind=Exact; locked=False; requests=
+  option 0 OK: gold 0 hp 0 cards[藏宝图] relics[] potions[] next[] finished=True
+  option 1: THE_LEGENDS_WERE_TRUE.pages.INITIAL.options.SLOWLY_FIND_AN_EXIT; kind=RewardChoice; locked=False; requests=
+  option 1 OK: gold 0 hp -8 cards[] relics[] potions[甲虫汁] next[] finished=True
+  option 1 REWARD-SKIP PASS
+event-audit ThisOrThat:
+  option 0: THIS_OR_THAT.pages.INITIAL.options.PLAIN; kind=Exact; locked=False; requests=
+  option 0 OK: gold +45 hp -6 cards[] relics[] potions[] next[] finished=True
+  option 1: THIS_OR_THAT.pages.INITIAL.options.ORNATE; kind=Exact; locked=False; requests=
+  option 1 OK: gold 0 hp 0 cards[笨拙] relics[药水腰带] potions[] next[] finished=True
+event-audit WarHistorianRepy:
+  option 0: WAR_HISTORIAN_REPY.pages.INITIAL.options.UNLOCK_CAGE; kind=Exact; locked=False; requests=
+  option 0 OK: gold 0 hp 0 cards[] relics[历史课] potions[] next[] finished=True
+  option 1: WAR_HISTORIAN_REPY.pages.INITIAL.options.UNLOCK_CHEST; kind=RewardChoice; locked=False; requests=
+  option 1 OK: gold 0 hp 0 cards[] relics[音叉,药水腰带] potions[消亡粉末,瓶装潜能] next[] finished=True
+  option 1 REWARD-SKIP PASS
+event-audit WelcomeToWongos:
+  option 0: WELCOME_TO_WONGOS.pages.INITIAL.options.BARGAIN_BIN_LOCKED; kind=Exact; locked=True; requests=
+  option 0 DEGRADED: 该事件选项当前已锁定，计划状态可能已经变化
+  option 1: WELCOME_TO_WONGOS.pages.INITIAL.options.FEATURED_ITEM_LOCKED; kind=Exact; locked=True; requests=
+  option 1 DEGRADED: 该事件选项当前已锁定，计划状态可能已经变化
+  option 2: WELCOME_TO_WONGOS.pages.INITIAL.options.MYSTERY_BOX_LOCKED; kind=Exact; locked=True; requests=
+  option 2 DEGRADED: 该事件选项当前已锁定，计划状态可能已经变化
+  option 3: WELCOME_TO_WONGOS.pages.INITIAL.options.LEAVE; kind=Exact; locked=False; requests=
+  option 3 OK: gold 0 hp 0 cards[打击] relics[] potions[] next[] finished=True
+event-continuation PASS: Trial; terminal paths=4; pages=4
+event-continuation PASS: TinkerTime; terminal paths=4; pages=4
+event-continuation PASS: BrainLeech; terminal paths=2; pages=1
+event-audit SUMMARY: ok=105 degraded=16 nondeterministic=0 failed=0
+planning-event-combat PASS: DENSE_VEGETATION; sample=1; previous-pages=1; resumed=False; finished=True; rewards=1 card groups, 1 potions, 0 relics; state-replay=equal
+planning-event-combat PASS: DENSE_VEGETATION; sample=2; previous-pages=1; resumed=False; finished=True; rewards=1 card groups, 1 potions, 0 relics; state-replay=equal
+planning-event-combat PASS: DENSE_VEGETATION; sample=3; previous-pages=1; resumed=False; finished=True; rewards=1 card groups, 1 potions, 0 relics; state-replay=equal
+planning-combat-simulation PASS: samples=3; case=event; encounter=DENSE_VEGETATION_EVENT_ENCOUNTER; statuses=Succeeded,Succeeded,Succeeded; planned-hp=75; final-hp=57,60,52; reference-roundtrip=PASS; stale-reference-rejected; live-unchanged

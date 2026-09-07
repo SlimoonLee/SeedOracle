@@ -113,9 +113,9 @@ internal sealed partial class RandomForeseerAdapter : IRandomForeseerAdapter
                 ["merchant_price_hook_mirror"] = _modifyMerchantPriceMethod is not null,
                 ["initial_merchant_public_api"] = false,
                 ["initial_merchant_adapter"] = SupportsInitialMerchant,
-                ["combat_reward_adapter"] = SupportsRouteRewards,
-                ["treasure_room_adapter"] = SupportsRouteRewards,
-                ["event_content_adapter"] = SupportsRouteRewards && EventPredictionBridge.Value.IsAvailable
+                ["combat_reward_adapter"] = true,
+                ["treasure_room_adapter"] = true,
+                ["event_content_adapter"] = _contextConstructor is not null && EventPredictionBridge.Value.IsAvailable
             });
     }
 

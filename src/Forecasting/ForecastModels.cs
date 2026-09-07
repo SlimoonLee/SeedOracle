@@ -2,7 +2,9 @@ using MegaCrit.Sts2.Core.Map;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Potions;
 using MegaCrit.Sts2.Core.Entities.Relics;
+using MegaCrit.Sts2.Core.Entities.Rewards;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Rewards;
 using MegaCrit.Sts2.Core.Rooms;
 using SeedOracle.Api;
 
@@ -166,11 +168,50 @@ internal sealed record RewardItemDetails(ForecastItemDetails Item)
     public string Name => Item.Name;
 }
 
+internal sealed record CardRewardAlternativeDetails(
+    string OptionId, string Title, PostAlternateCardRewardAction AfterSelected);
+
+internal sealed record CardRewardStepDetails(
+    IReadOnlyList<RewardItemDetails> Cards,
+    IReadOnlyList<CardRewardAlternativeDetails> Alternatives,
+    int SelectedIndex = -1,
+    bool RejectedChoice = false);
+
+internal sealed record CombatCardRewardGroup(IReadOnlyList<CardRewardStepDetails> Steps)
+{
+    public IReadOnlyList<RewardItemDetails> Cards => Steps[^1].Cards;
+}
+
+internal sealed record RewardResourceDelta(int Gold, int Cards, int Relics, int Potions, int Hp);
+
 internal sealed record CombatRewardDetails(
     int Gold,
-    IReadOnlyList<IReadOnlyList<RewardItemDetails>> CardRewards,
+    IReadOnlyList<CombatCardRewardGroup> CardRewardGroups,
     IReadOnlyList<RewardItemDetails> Potions,
-    IReadOnlyList<RewardItemDetails> Relics);
+    IReadOnlyList<RewardItemDetails> Relics) : IDisposable
+{
+    internal IReadOnlyList<CardReward> NativeCardRewards { get; init; } = [];
+    internal IReadOnlyList<Reward> NativeRewards { get; init; } = [];
+    internal IReadOnlyList<CardReward> OriginalCardRewards { get; init; } = [];
+    internal RewardResourceDelta? AppliedDelta { get; init; }
+
+    internal CombatRewardDetails Detach() => this with
+    {
+        NativeRewards = [], NativeCardRewards = [], OriginalCardRewards = []
+    };
+
+    public void Dispose()
+    {
+        foreach (var reward in OriginalCardRewards.Concat(NativeCardRewards).Distinct())
+            reward.Player.RelicObtained -= reward.OnRelicObtained;
+    }
+
+    // Keep the display/tooltip boundary compatible with callers that only
+    // need the candidate cards. The group boundary remains available to plan
+    // choices and is never flattened for selection.
+    public IReadOnlyList<IReadOnlyList<RewardItemDetails>> CardRewards =>
+        CardRewardGroups.Select(group => group.Cards).ToArray();
+}
 
 internal sealed record TreasureRoomDetails(
     int Gold,

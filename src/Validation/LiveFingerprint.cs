@@ -2,6 +2,8 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using MegaCrit.Sts2.Core.Runs;
+using MegaCrit.Sts2.Core.Map;
+using MegaCrit.Sts2.Core.Saves.Runs;
 
 namespace SeedOracle.Validation;
 
@@ -28,6 +30,8 @@ internal sealed class LiveFingerprint
             ["run_odds"] = Hash(run.Odds.ToSerializable()),
             ["shared_relic_grab_bag"] = Hash(run.SharedRelicGrabBag.ToSerializable()),
             ["acts_and_encounter_counters"] = Hash(run.Acts.Select(act => act.ToSave()).ToArray()),
+            ["map_topology"] = Hash(run.Map is NullActMap ? null : SerializableActMap.FromActMap(run.Map)),
+            ["run_modifiers"] = Hash(run.Modifiers.Select(modifier => modifier.ToSerializable()).ToArray()),
             ["visited_event_ids"] = Hash(run.VisitedEventIds.OrderBy(id => id.ToString(), StringComparer.Ordinal).ToArray()),
             ["visited_map_coords"] = Hash(run.VisitedMapCoords.ToArray()),
             ["map_point_history"] = Hash(run.MapPointHistory.Select(history => history.ToArray()).ToArray()),

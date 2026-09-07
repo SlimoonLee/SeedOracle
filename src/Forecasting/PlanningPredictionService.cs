@@ -1,20 +1,29 @@
 using Godot;
+using System.Security.Cryptography;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using MegaCrit.Sts2.Core.Entities.Cards;
+using MegaCrit.Sts2.Core.Entities.CardRewardAlternatives;
 using MegaCrit.Sts2.Core.Entities.Merchant;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Entities.Potions;
 using MegaCrit.Sts2.Core.Entities.Relics;
+using MegaCrit.Sts2.Core.Extensions;
 using MegaCrit.Sts2.Core.Factories;
 using MegaCrit.Sts2.Core.Hooks;
 using MegaCrit.Sts2.Core.Models;
-using MegaCrit.Sts2.Core.Models.Modifiers;
 using MegaCrit.Sts2.Core.Models.Relics;
+using MegaCrit.Sts2.Core.Map;
 using MegaCrit.Sts2.Core.Odds;
 using MegaCrit.Sts2.Core.Random;
 using MegaCrit.Sts2.Core.Rooms;
+using MegaCrit.Sts2.Core.Rewards;
 using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.Core.Saves;
+using MegaCrit.Sts2.Core.Saves.Runs;
 using SeedOracle.Api;
+using SeedOracle.Integration;
+using SeedOracle.UI;
 
 namespace SeedOracle.Forecasting;
 
@@ -62,7 +71,7 @@ internal sealed class PlanningPredictionService
     internal State CreateState(RunState liveRun, Player livePlayer)
     {
         var snapshot = CreateSerializableRun(liveRun);
-        var shadowRun = RunState.FromSerializable(snapshot);
+        var shadowRun = RestoreRun(snapshot);
         var shadowPlayer = shadowRun.GetPlayer(livePlayer.NetId)
                            ?? throw new InvalidOperationException(
                                $"Planning shadow snapshot lacks player {livePlayer.NetId}.");
@@ -86,9 +95,73 @@ internal sealed class PlanningPredictionService
         state.WongosTicketTriggered,
         state.HistoricalTreasureRooms);
 
+    internal static string StateToken(StateSnapshot snapshot)
+    {
+        var normalized = CloneSnapshot(snapshot.Run);
+        normalized.SaveTime = 0;
+        normalized.RunTime = 0;
+        normalized.WinTime = 0;
+        normalized.NumReloads = 0;
+        normalized.MapDrawings = null;
+        normalized.PreFinishedRoom = null;
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(
+            normalized,
+            JsonSerializationUtility.GetTypeInfo<SerializableRun>());
+        return Convert.ToHexString(SHA256.HashData(bytes));
+    }
+
+    internal static string StateToken(State state) => StateToken(new PlanningPredictionService().Capture(state));
+
+    internal bool ApplyCombatSimulationReference(
+        State state,
+        StateSnapshot expectedSnapshot,
+        CombatSimulationReference reference,
+        EncounterModel encounter,
+        RoomType roomType)
+    {
+        if (reference.RoomType != roomType
+            || !reference.EncounterId.Equals(encounter.Id.Entry, StringComparison.OrdinalIgnoreCase)
+            || !StateToken(expectedSnapshot).Equals(reference.StateToken, StringComparison.Ordinal)
+            || !StateToken(state).Equals(reference.StateToken, StringComparison.Ordinal)
+            || reference.SampleCount is < 1 or > 10
+            || reference.SelectedSampleIndex < 0
+            || reference.SelectedSampleIndex >= reference.SampleCount
+            || reference.ProjectedHpLoss < 0
+            || reference.FinalHp is not > 0
+            || reference.FinalHp > state.Player.Creature.MaxHp)
+        {
+            return false;
+        }
+
+        var usedSlots = new HashSet<int>();
+        var usedPotions = new List<PotionModel>();
+        foreach (var use in reference.PotionUses)
+        {
+            PotionModel? potion = null;
+            if (use.Slot >= 0 && use.Slot < state.Player.PotionSlots.Count)
+            {
+                var slotPotion = state.Player.PotionSlots[use.Slot];
+                if (slotPotion is not null
+                    && slotPotion.Id.Entry.Equals(use.Id, StringComparison.OrdinalIgnoreCase))
+                {
+                    potion = slotPotion;
+                }
+            }
+
+            if (potion is null || !usedSlots.Add(state.Player.PotionSlots.IndexOf(potion)))
+                return false;
+            usedPotions.Add(potion);
+        }
+
+        foreach (var potion in usedPotions)
+            state.Player.DiscardPotionInternal(potion, silent: true);
+        state.Player.Creature.SetCurrentHpInternal(reference.FinalHp.Value);
+        return true;
+    }
+
     internal State Restore(StateSnapshot snapshot)
     {
-        var run = RunState.FromSerializable(snapshot.Run);
+        var run = RestoreRun(snapshot.Run);
         var player = run.GetPlayer(snapshot.PlayerNetId)
                      ?? throw new InvalidOperationException(
                          $"Planning snapshot lacks player {snapshot.PlayerNetId}.");
@@ -109,7 +182,7 @@ internal sealed class PlanningPredictionService
     {
         // Clone the executor graph at the hand-off boundary. Refreshing the
         // panel must never consume a cached event result's RNG or bags.
-        var clonedRun = RunState.FromSerializable(CreateSerializableRun(eventRun));
+        var clonedRun = RestoreRun(CreateSerializableRun(eventRun));
         target.Run = clonedRun;
         target.Player = clonedRun.GetPlayer(playerNetId)
                         ?? throw new InvalidOperationException(
@@ -157,6 +230,15 @@ internal sealed class PlanningPredictionService
 
     internal bool AddPotion(State state, ModelId potionId, ModelId? discardId = null)
     {
+        var canonical = ResolvePotion(potionId);
+        if (canonical is null)
+        {
+            Entry.Logger.Warn(
+                $"[PlanPotion] unable to resolve requested potion {potionId.Category}.{potionId.Entry}; "
+                + "the planning state was left unchanged.");
+            return false;
+        }
+
         if (discardId is { } discard)
         {
             var existing = state.Player.PotionSlots
@@ -168,41 +250,41 @@ internal sealed class PlanningPredictionService
 
         if (!state.Player.HasOpenPotionSlots)
             return false;
-        var canonical = ResolvePotion(potionId);
-        if (canonical is null)
-            return false;
-        return state.Player.AddPotionInternal(canonical.ToMutable(), silent: true).success;
-    }
-
-    internal void SetPotionSlots(State state, IReadOnlyList<ModelId> slots)
-    {
-        var remaining = slots.ToList();
-        foreach (var current in state.Player.Potions.ToList())
+        var result = state.Player.AddPotionInternal(canonical.ToMutable(), silent: true);
+        if (!result.success)
         {
-            var index = remaining.FindIndex(slot => PotionIdsMatch(current.Id, slot));
-            if (index >= 0)
-            {
-                remaining.RemoveAt(index);
-                continue;
-            }
-
-            state.Player.DiscardPotionInternal(current, silent: true);
+            Entry.Logger.Warn(
+                $"[PlanPotion] failed to add {canonical.Id.Category}.{canonical.Id.Entry}: "
+                + $"{result.failureReason}");
         }
 
-        foreach (var id in remaining)
-        {
-            var canonical = ResolvePotion(id);
-            if (canonical is null || !state.Player.HasOpenPotionSlots)
-                continue;
-            state.Player.AddPotionInternal(canonical.ToMutable(), silent: true);
-        }
+        return result.success;
     }
 
-    private static PotionModel? ResolvePotion(ModelId id)
+    internal static IReadOnlyList<ModelId> GetPotionSlotIds(State state) =>
+        state.Player.PotionSlots
+            .OfType<PotionModel>()
+            .Select(potion => potion.Id)
+            .ToArray();
+
+    /// <summary>
+    /// Resolves a potion ID at the model boundary. Saves and forecast records
+    /// can come from different game builds, so category casing and the exact
+    /// slug spelling must not decide whether a valid potion is discarded.
+    /// </summary>
+    internal static PotionModel? ResolvePotion(ModelId id)
     {
-        var registered = ModelDb.GetByIdOrNull<PotionModel>(id);
-        if (registered is not null)
-            return registered;
+        try
+        {
+            var registered = ModelDb.GetByIdOrNull<PotionModel>(id);
+            if (registered is not null)
+                return registered;
+        }
+        catch (Exception exception)
+        {
+            Entry.Logger.Debug(
+                $"[PlanPotion] direct lookup failed for {id.Category}.{id.Entry}: {exception.Message}");
+        }
 
         var potion = ModelDb.AllPotions.FirstOrDefault(candidate =>
             candidate.Id.Category.Equals(id.Category, StringComparison.OrdinalIgnoreCase)
@@ -210,13 +292,20 @@ internal sealed class PlanningPredictionService
         if (potion is not null)
             return potion;
 
-        // Some serialized saves from older builds retained only the entry or
-        // used a category casing different from the current model registry.
-        // Entry matching is safe here because potion entries are globally
-        // unique, and prevents a valid slot from disappearing silently.
+        // Some serialized saves and older forecast adapters retained only the
+        // entry or used a different slug spelling (for example camel case vs
+        // snake case). Potion entries are globally unique, so normalized entry
+        // matching is safe and keeps StrengthPotion/"肌肉药水" intact.
+        var normalizedEntry = NormalizePotionKey(id.Entry);
         return ModelDb.AllPotions.FirstOrDefault(candidate =>
-            candidate.Id.Entry.Equals(id.Entry, StringComparison.OrdinalIgnoreCase));
+            NormalizePotionKey(candidate.Id.Entry) == normalizedEntry
+            || NormalizePotionKey(candidate.GetType().Name) == normalizedEntry);
     }
+
+    private static string NormalizePotionKey(string value) =>
+        new(value.Where(char.IsLetterOrDigit)
+            .Select(char.ToUpperInvariant)
+            .ToArray());
 
     private static bool PotionIdsMatch(ModelId left, ModelId right) =>
         left.Category.Equals(right.Category, StringComparison.OrdinalIgnoreCase)
@@ -231,6 +320,9 @@ internal sealed class PlanningPredictionService
         // remain on the same worldline.
         var save = RunManager.Instance.ToSave(preFinishedRoom: null);
         save.Acts = source.Acts.Select(act => act.ToSave()).ToList();
+        if (source.Map is not NullActMap)
+            save.Acts[source.CurrentActIndex].SavedMap = SerializableActMap.FromActMap(source.Map);
+        save.Modifiers = source.Modifiers.Select(modifier => modifier.ToSerializable()).ToList();
         save.CurrentActIndex = source.CurrentActIndex;
         save.EventsSeen = source.VisitedEventIds.ToList();
         save.SerializableOdds = source.Odds.ToSerializable();
@@ -242,7 +334,66 @@ internal sealed class PlanningPredictionService
         save.Ascension = source.AscensionLevel;
         save.GameMode = source.GameMode;
         save.ExtraFields = source.ExtraFields.ToSerializable();
-        return save;
+        return CloneSnapshot(save);
+    }
+
+    internal static RunState RestoreRun(SerializableRun snapshot)
+    {
+        var owned = CloneSnapshot(snapshot);
+        var run = RunState.FromSerializable(owned);
+        // FromSerializable restores players/history, but leaves Map unset.
+        // Preserve the captured topology without regenerating it or using live objects.
+        if (owned.Acts[owned.CurrentActIndex].SavedMap is { } map)
+            run.Map = new SavedActMap(map);
+        return run;
+    }
+
+    internal static SerializableRun CloneSnapshot(SerializableRun save)
+    {
+        // FromSerializable reuses mutable history entries from its input.
+        // Cross the actual save serialization boundary before handing a graph
+        // to an event, otherwise even a cloned player can alter live history.
+        var typeInfo = JsonSerializationUtility.GetTypeInfo<SerializableRun>();
+        var root = JsonSerializer.SerializeToNode(save, typeInfo)!.AsObject();
+        // Native serialization omits false, while the native initializer is true.
+        // Materialize this value before deserialization for every map point kind.
+        foreach (var act in root["acts"]!.AsArray().OfType<JsonObject>())
+        {
+            if (act["saved_map"] is not JsonObject map)
+                continue;
+            var points = map["points"]!.AsArray().OfType<JsonObject>()
+                .Concat(new[] { map["boss"], map["start"], map["second_boss"] }.OfType<JsonObject>());
+            foreach (var point in points)
+                if (!point.ContainsKey("can_modify"))
+                    point["can_modify"] = false;
+        }
+        return JsonSerializer.Deserialize(root, typeInfo)
+               ?? throw new InvalidOperationException("Unable to clone planning run snapshot.");
+    }
+
+    internal void AdvanceRoomsBeforeTarget(State state, IReadOnlyList<RoomType> resolvedRooms)
+    {
+        var visited = new Dictionary<RoomType, int>();
+        foreach (var type in resolvedRooms.Take(resolvedRooms.Count - 1))
+        {
+            EncounterModel? encounter = null;
+            if (type.IsCombatRoom())
+            {
+                var offset = visited.GetValueOrDefault(type);
+                var rooms = state.Run.Act._rooms;
+                encounter = type switch
+                {
+                    RoomType.Monster when rooms.normalEncounters.Count > 0 =>
+                        rooms.normalEncounters[(rooms.normalEncountersVisited + offset) % rooms.normalEncounters.Count],
+                    RoomType.Elite when rooms.eliteEncounters.Count > 0 =>
+                        rooms.eliteEncounters[(rooms.eliteEncountersVisited + offset) % rooms.eliteEncounters.Count],
+                    RoomType.Boss => offset > 0 ? state.Run.Act.SecondBossEncounter : state.Run.Act.BossEncounter,
+                    _ => null
+                };
+                visited[type] = offset + 1;
+            }
+            AdvanceRoom(state, type, encounter);
+        }
     }
 
     internal void AdvanceRoom(State state, RoomType roomType, EncounterModel? encounter)
@@ -253,7 +404,7 @@ internal sealed class PlanningPredictionService
             case RoomType.Elite:
             case RoomType.Boss:
                 state.CombatsAdvanced++;
-                _ = GenerateCombatRewards(state, roomType, encounter);
+                using (GenerateCombatRewards(state, roomType, encounter)) { }
                 break;
             case RoomType.Shop:
                 _ = GenerateMerchant(state);
@@ -267,57 +418,111 @@ internal sealed class PlanningPredictionService
     internal CombatRewardDetails GenerateCombatRewards(
         State state,
         RoomType roomType,
-        EncounterModel? encounter)
+        EncounterModel? encounter,
+        CombatRoom? eventCombatRoom = null)
     {
         var player = state.Player;
-        var slots = new List<RewardSlot>();
-        var finalBossWithoutRewards = roomType == RoomType.Boss
-                                      && player.RunState.CurrentActIndex >= player.RunState.Acts.Count - 1;
+        using var isolation = ShadowIsolation.Enter(player, automateRewards: true);
+        if (encounter is null)
+            throw new InvalidOperationException("Combat reward prediction requires a resolved encounter.");
 
-        if (!finalBossWithoutRewards && (encounter?.ShouldGiveRewards ?? true))
+        // CombatRoom is the native boundary for reward generation. It carries
+        // the encounter's gold range and lets RewardsSet dispatch every early
+        // and late reward hook in the same order as a finished combat.
+        var mutableEncounter = encounter.IsMutable ? (EncounterModel)encounter.MutableClone() : encounter.ToMutable();
+        var room = eventCombatRoom ?? new CombatRoom(mutableEncounter, state.Run);
+        state.Run.AppendToMapPointHistory(eventCombatRoom is not null ? MapPointType.Ancient : room.RoomType switch
         {
-            var shouldAddPotion = player.PlayerOdds.PotionReward.Roll(player, roomType);
-            var gold = encounter is null
-                ? player.PlayerRng.Rewards.NextInt(1)
-                : player.PlayerRng.Rewards.NextInt(encounter.MinGoldReward, encounter.MaxGoldReward + 1);
-            slots.Add(RewardSlot.GoldSlot(gold));
-
-            if (shouldAddPotion)
+            RoomType.Elite => MapPointType.Elite,
+            RoomType.Boss => MapPointType.Boss,
+            _ => MapPointType.Monster
+        }, room.RoomType, encounter.Id);
+        state.Run.PushRoom(room);
+        RewardsSet? rewards = null;
+        CardReward[] originalCards = [];
+        try
+        {
+            // Invoke native model callbacks on the shadow graph. Dispatching
+            // global combat lifecycle methods would also notify other mods
+            // that the real combat ended.
+            foreach (var model in state.Run.IterateHookListeners(null))
             {
-                var potion = PotionFactory.CreateRandomPotionOutOfCombat(player, player.PlayerRng.Rewards);
-                slots.Add(RewardSlot.Potion(new RewardItemDetails(ForecastItemDetails.Potion(potion))));
+                model.AfterCombatEnd(room).GetAwaiter().GetResult();
+                model.InvokeExecutionFinished();
             }
-
-            var cards = GenerateCards(player, roomType, isFromCombat: true);
-            slots.Add(RewardSlot.Cards(cards));
-
-            if (roomType == RoomType.Elite)
-                slots.Add(RewardSlot.Relic(PullPlayerRelic(state)));
+            foreach (var model in state.Run.IterateHookListeners(null))
+            {
+                model.AfterCombatVictoryEarly(room).GetAwaiter().GetResult();
+                model.InvokeExecutionFinished();
+            }
+            foreach (var model in state.Run.IterateHookListeners(null))
+            {
+                model.AfterCombatVictory(room).GetAwaiter().GetResult();
+                model.InvokeExecutionFinished();
+            }
+            if (!encounter.ShouldGiveRewards)
+                return new CombatRewardDetails(0, [], [], []);
+            rewards = new RewardsSet(player).WithRewardsFromRoom(room);
+            originalCards = ShadowIsolation.EnumerateRewards(rewards.Rewards).OfType<CardReward>().ToArray();
+            rewards.GenerateWithoutOffering().GetAwaiter().GetResult();
+            Hook.BeforeCombatRewardOffered(rewards, state.Run, room).GetAwaiter().GetResult();
         }
-
-        ApplyEarlyHooks(state, roomType, finalBossWithoutRewards, slots);
-        ApplyLateHooks(state, roomType, slots);
-        foreach (var slot in slots.Where(slot => !slot.Populated))
+        finally
         {
-            if (slot.Kind == RewardKind.Cards)
-                slot.Items.AddRange(GenerateCards(player, slot.CardRoomType, isFromCombat: false));
-            else if (slot.Kind == RewardKind.Relic)
-                slot.Items.Add(PullPlayerRelic(state));
-            slot.Populated = true;
+            state.Run.PopCurrentRoom();
+            foreach (var card in originalCards.Concat(
+                         ShadowIsolation.EnumerateRewards(rewards?.Rewards ?? []).OfType<CardReward>()).Distinct())
+                player.RelicObtained -= card.OnRelicObtained;
         }
 
-        return new CombatRewardDetails(
-            slots.Where(slot => slot.Kind == RewardKind.Gold).Sum(slot => slot.Gold),
-            slots.Where(slot => slot.Kind == RewardKind.Cards)
-                .Select(slot => (IReadOnlyList<RewardItemDetails>)slot.Items.ToArray())
-                .ToArray(),
-            slots.Where(slot => slot.Kind == RewardKind.Potion)
-                .SelectMany(slot => slot.Items)
-                .ToArray(),
-            slots.Where(slot => slot.Kind == RewardKind.Relic)
-                .SelectMany(slot => slot.Items)
-                .ToArray());
+        return DescribeRewards(rewards, originalCards);
     }
+
+    internal static CombatRewardDetails DescribeRewards(RewardsSet rewards, IReadOnlyList<CardReward>? originalCards = null)
+    {
+        var cardGroups = new List<CombatCardRewardGroup>();
+        var potions = new List<RewardItemDetails>();
+        var relics = new List<RewardItemDetails>();
+        var gold = 0;
+        var nativeGroups = new List<CardReward>();
+
+        var nativeRewards = ShadowIsolation.EnumerateRewards(rewards.Rewards).ToArray();
+        foreach (var reward in nativeRewards)
+        {
+            switch (reward)
+            {
+                case GoldReward goldReward:
+                    gold += goldReward.Amount;
+                    break;
+                case CardReward cardReward:
+                {
+                    cardGroups.Add(new CombatCardRewardGroup([DescribeCardReward(cardReward)]));
+                    nativeGroups.Add(cardReward);
+                    break;
+                }
+                case PotionReward potionReward when potionReward.Potion is { } potion:
+                    potions.Add(new RewardItemDetails(ForecastItemDetails.Potion(potion)));
+                    break;
+                case RelicReward relicReward when relicReward.Relic is { } relic:
+                    relics.Add(new RewardItemDetails(ForecastItemDetails.Relic(relic)));
+                    break;
+                default:
+                    throw new InvalidOperationException($"Unsupported combat reward: {reward.GetType().Name}");
+            }
+        }
+
+        return new CombatRewardDetails(gold, cardGroups, potions, relics)
+        {
+            NativeCardRewards = nativeGroups,
+            NativeRewards = nativeRewards,
+            OriginalCardRewards = originalCards ?? []
+        };
+    }
+
+    internal static CardRewardStepDetails DescribeCardReward(CardReward reward) => new(
+        reward.Cards.Select(card => new RewardItemDetails(ForecastItemDetails.Card(card))).ToArray(),
+        CardRewardAlternative.Generate(reward).Select(alternative => new CardRewardAlternativeDetails(
+            alternative.OptionId, alternative.Title.GetFormattedText(), alternative.AfterSelected)).ToArray());
 
     internal TreasureRoomDetails GenerateTreasure(State state, bool isPriorRoom)
     {
@@ -459,97 +664,6 @@ internal sealed class PlanningPredictionService
         }
     }
 
-    private IReadOnlyList<RewardItemDetails> GenerateCards(Player player, RoomType roomType, bool isFromCombat)
-    {
-        var flags = CardCreationFlags.IsCardReward;
-        if (isFromCombat)
-            flags |= CardCreationFlags.IsFromCombat;
-        return CardFactory.CreateForReward(
-                player,
-                3,
-                CardCreationOptions.ForRoom(player, roomType).WithFlags(flags))
-            .Select(result => new RewardItemDetails(ForecastItemDetails.Card(result.Card)))
-            .ToArray();
-    }
-
-    private RewardItemDetails PullPlayerRelic(State state)
-    {
-        var relic = RelicFactory.PullNextRelicFromFront(state.Player);
-        return new RewardItemDetails(ForecastItemDetails.Relic(relic));
-    }
-
-    private static void ApplyEarlyHooks(
-        State state,
-        RoomType roomType,
-        bool finalBossWithoutRewards,
-        List<RewardSlot> slots)
-    {
-        foreach (var listener in state.Run.IterateHookListeners(null))
-        {
-            switch (listener)
-            {
-                case AmethystAubergine aubergine
-                    when ReferenceEquals(aubergine.Owner, state.Player)
-                         && roomType.IsCombatRoom()
-                         && !finalBossWithoutRewards:
-                    slots.Add(RewardSlot.GoldSlot(aubergine.DynamicVars.Gold.IntValue));
-                    break;
-                case BlackStar blackStar
-                    when ReferenceEquals(blackStar.Owner, state.Player) && roomType == RoomType.Elite:
-                    slots.Add(RewardSlot.UnpopulatedRelic());
-                    break;
-                case LavaRock lavaRock
-                    when ReferenceEquals(lavaRock.Owner, state.Player)
-                         && roomType == RoomType.Boss
-                         && state.Player.RunState.CurrentActIndex == 0
-                         && !lavaRock.HasTriggered
-                         && !state.LavaRockTriggered:
-                    for (var index = 0; index < lavaRock.DynamicVars["Relics"].IntValue; index++)
-                        slots.Add(RewardSlot.UnpopulatedRelic());
-                    state.LavaRockTriggered = true;
-                    break;
-                case PrayerWheel prayerWheel
-                    when ReferenceEquals(prayerWheel.Owner, state.Player) && roomType == RoomType.Monster:
-                    slots.Add(RewardSlot.UnpopulatedCards(RoomType.Monster));
-                    break;
-                case WhiteStar whiteStar
-                    when ReferenceEquals(whiteStar.Owner, state.Player) && roomType == RoomType.Elite:
-                    slots.Add(RewardSlot.UnpopulatedCards(RoomType.Boss));
-                    break;
-                case WongosMysteryTicket ticket
-                    when ReferenceEquals(ticket.Owner, state.Player)
-                         && !ticket.GaveRelic
-                         && !state.WongosTicketTriggered
-                         && ticket.CombatsFinished + state.CombatsAdvanced >= WongosMysteryTicket.combatsToActivate:
-                    for (var index = 0; index < WongosMysteryTicket.relicCount; index++)
-                        slots.Add(RewardSlot.UnpopulatedRelic());
-                    state.WongosTicketTriggered = true;
-                    break;
-            }
-        }
-    }
-
-    private static void ApplyLateHooks(State state, RoomType roomType, List<RewardSlot> slots)
-    {
-        foreach (var listener in state.Run.IterateHookListeners(null))
-        {
-            switch (listener)
-            {
-                case Midas:
-                    foreach (var gold in slots.Where(slot => slot.Kind == RewardKind.Gold))
-                        gold.Gold *= 2;
-                    break;
-                case Vintage when roomType == RoomType.Monster:
-                    for (var index = 0; index < slots.Count; index++)
-                    {
-                        if (slots[index].Kind == RewardKind.Cards)
-                            slots[index] = RewardSlot.UnpopulatedRelic();
-                    }
-                    break;
-            }
-        }
-    }
-
     private static int ApplyMerchantPrice(State state, int cost)
     {
         var probe = new PriceProbe(state.Player, cost);
@@ -583,55 +697,6 @@ internal sealed class PlanningPredictionService
         state.Player.RelicGrabBag.Remove(gorget);
         state.Run.SharedRelicGrabBag.Remove(gorget);
         return gorget;
-    }
-
-    private enum RewardKind
-    {
-        Gold,
-        Cards,
-        Potion,
-        Relic
-    }
-
-    private sealed class RewardSlot
-    {
-        public required RewardKind Kind { get; init; }
-        public int Gold { get; set; }
-        public List<RewardItemDetails> Items { get; } = [];
-        public RoomType CardRoomType { get; init; }
-        public bool Populated { get; set; }
-
-        public static RewardSlot GoldSlot(int amount) => new() { Kind = RewardKind.Gold, Gold = amount, Populated = true };
-        public static RewardSlot Cards(IEnumerable<RewardItemDetails> items)
-        {
-            var slot = new RewardSlot
-            {
-                Kind = RewardKind.Cards,
-                Populated = true
-            };
-            slot.Items.AddRange(items);
-            return slot;
-        }
-        public static RewardSlot Potion(RewardItemDetails item) => new()
-        {
-            Kind = RewardKind.Potion,
-            Populated = true,
-            Items = { item }
-        };
-        public static RewardSlot Relic(RewardItemDetails item) => new()
-        {
-            Kind = RewardKind.Relic,
-            Populated = true,
-            Items = { item }
-        };
-        public static RewardSlot UnpopulatedCards(RoomType roomType) => new() { Kind = RewardKind.Cards, CardRoomType = roomType };
-        public static RewardSlot UnpopulatedRelic() => new() { Kind = RewardKind.Relic };
-
-        private RewardSlot WithItems(IEnumerable<RewardItemDetails> items)
-        {
-            Items.AddRange(items);
-            return this;
-        }
     }
 
     private sealed class PriceProbe(Player player, int cost) : MerchantEntry(player)

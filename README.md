@@ -32,6 +32,7 @@ Seed Oracle 是《Slay the Spire 2》`0.111.0` 的路线信息前瞻 Mod。它�
 - Combat Solver 在主游戏初始化时钉住本次会话实际载入的 Mod 文件；Steam 运行中更新工坊目录时，隔离 worker 仍以主进程版本为准，不会因磁盘版本先行更新而误报 Mod 集合不一致；
 - “咱俩碰一碰”页可手动运行 0～10 个假设样本，对象包括当前幕随机弱怪池、强怪池、精英池、指定普通/精英怪组和当前 Boss；指定怪组及样本结果使用游戏当前语言的本地化遭遇名称，逐样本显示战损、终局生命、回合和用药，并汇总最低、平均与最高战损；
 - 纯模拟明确使用假定的怪物组与怪物生命、开局洗牌、怪物行动和其他战斗随机数，只用当前牌组、遗物、药水与生命比较威胁，不把远处未确定战斗显示成预测事实；
+- 规划中的普通战、精英战、Boss、问号点战斗和事件选项战斗可从规划快照运行模拟，默认 3 次、可选 1～10 次；成功结果可作为该节点的生命与用药参照写回规划；
 - 手动计算覆盖每条当前可行路线上的第一场确定战斗。目标前允许经过不会直接消耗战斗序列的篝火、宝箱或商店，目标坐标和中间楼层历史会传入隔离进程；未决事件和中间战斗不跳过计算；
 - 若目标前有篝火，面板同时给出“沿途状态保持当前值”和“在前置篝火休息后入战”场景。休息分支在开战 Hook 前应用游戏当前规则算出的 HP，并明确标出尚未模拟的奖励、锻造与其他触发；
 - 探测 Random Foreseer 与 Combat Solver 的版本和可调用能力；
@@ -39,12 +40,12 @@ Seed Oracle 是《Slay the Spire 2》`0.111.0` 的路线信息前瞻 Mod。它�
 
 远端路线预测会在提示中注明条件：沿途事件选择、奖励选择、宝箱跳过、商店购买、补货和删牌若改变相关状态，后续结果也会随之改变。多人宝箱的投票结果同样属于条件分支。
 
-当前版本使用 Combat Solver 作者工坊版 `0.31.2` 中的 public API v5（接口最初合并于提交 `0552b33`）。战斗会在独立 headless 游戏进程中初始化和求解，主进程调用前后核对完整跑局/RNG 状态令牌。确定路线 API 接收目标地图坐标和连续的非战斗路径历史，使目标 `TotalFloor`、怪物局部种子及地图相关开战状态一致；纯模拟 API 则在隔离快照校验之后替换样本战斗 RNG。隔离用户设置中的主音量、BGM、音效与环境音全部强制为零。远端确定路线数值仍是清楚标注的条件结果：沿途若拿牌、拿遗物、用药、购买、锻造或触发其他状态变化，应在实际选择后重新计算。
+当前版本同时兼容 Combat Solver public API v5；检测到 API v6 时额外启用规划快照战斗模拟。v6 扩展通过独立 `SerializableRun` 把规划中的牌组、生命、药水、地图和事件状态交给 worker，支持问号点与事件战斗；旧的 v5 工坊版仍可使用确定路线和当前状态假设样本，规划模拟控件会明确标记为不可用。所有战斗都在独立 headless 游戏进程中初始化和求解，主进程调用前后核对完整跑局/RNG 状态令牌。远端确定路线数值仍是清楚标注的条件结果：沿途若拿牌、拿遗物、用药、购买、锻造或触发其他状态变化，应在实际选择后重新计算。
 设计评估与验证边界见 [docs/combat-solver-precombat-assessment.md](docs/combat-solver-precombat-assessment.md)。
 
 ## 当前兼容性
 
-Seed Oracle `0.1.22` 直接依赖作者工坊版 Combat Solver `0.31.2+` 的 public API v5。该 API 已合并到 [Torch1230/CombatSolver](https://github.com/Torch1230/CombatSolver) 作者主线；无需再把本地 API 分支放进游戏 `mods` 目录。旧的无 API 构建会被适配器安全标记为暂不支持，不能用于战前预测。
+Seed Oracle `0.1.22` 直接依赖 Combat Solver `0.31.2+` 的 public API v5；规划战斗模拟需要包含 v6 扩展的构建。适配器会在运行时检测 v6 方法，旧的 v5 工坊版仍可提供确定路线和当前状态假设样本，规划模拟则安全降级为不可用。CombatSolver v6 扩展的实现和上游 PR 见 [SlimoonLee/CombatSolver](https://github.com/SlimoonLee/CombatSolver)。
 
 ## 构建
 
@@ -54,7 +55,7 @@ Seed Oracle `0.1.22` 直接依赖作者工坊版 Combat Solver `0.31.2+` 的 pub
 dotnet build .\SeedOracle.csproj -c Release
 ```
 
-`local.props` 中的 `CombatSolverDir` 应指向作者工坊条目 `2868840/3790899961`；不要把本地 API 版 DLL 复制到游戏 `mods` 目录。
+`local.props` 中的 `CombatSolverDir` 应指向含所需 API 的 CombatSolver 构建目录；可以使用作者工坊条目 `2868840/3790899961`，或在审阅 v6 PR 时指向本地 Release 输出。不要把临时构建目录中的 SeedOracle 文件复制到 CombatSolver 目录。
 
 默认会把 `SeedOracle.dll`、PDB 和清单部署到游戏目录的 `mods/SeedOracle`。
 
@@ -62,7 +63,7 @@ dotnet build .\SeedOracle.csproj -c Release
 
 - STS2-RitsuLib `0.5.18+`
 - Random Foreseer `0.13.11+`
-- Combat Solver `0.31.2+`（作者工坊版，包含 public API v5）
+- Combat Solver `0.31.2+`（v5 基础 API）；规划战斗模拟需 API v6 扩展
 
 依赖能力审计见 [docs/capability-audit.md](docs/capability-audit.md)。
 
@@ -71,7 +72,7 @@ dotnet build .\SeedOracle.csproj -c Release
 - [STS2-RitsuLib](https://github.com/BAKAOLC/STS2-RitsuLib)
 - [Random Foreseer](https://github.com/hotwords123/StS2.RandomForeseer)
 - [Combat Solver](https://github.com/Torch1230/CombatSolver)（作者原版）
-- [Combat Solver pre-combat API Fork](https://github.com/SlimoonLee/CombatSolver)（API 合并前的维护分支与审阅记录）
+- [Combat Solver API v6 Fork](https://github.com/SlimoonLee/CombatSolver)（规划快照模拟扩展与上游 PR）
 
 ## 许可证
 

@@ -17,3 +17,4 @@ local.props
 *.trx
 *.user
 *.suo
+.smoke/
