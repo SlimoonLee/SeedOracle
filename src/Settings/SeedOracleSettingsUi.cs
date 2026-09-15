@@ -1,5 +1,6 @@
 using MegaCrit.Sts2.Core.Localization;
 using SeedOracle.Data;
+using SeedOracle.UI;
 using STS2RitsuLib;
 using STS2RitsuLib.Settings;
 
@@ -16,6 +17,19 @@ internal static class SeedOracleSettingsUi
                 static (settings, value) => settings.UseCardArtThumbnails = value),
             () => SeedOracleSettings.Default.UseCardArtThumbnails);
 
+    private static readonly IModSettingsValueBinding<bool> ShowMapForecastsOutsidePlan =
+        ModSettingsBindings.WithDefault(
+            ModSettingsBindings.Global<SeedOracleSettings, bool>(
+                Entry.ModId,
+                SeedOracleData.SettingsKey,
+                static settings => settings.ShowMapForecastsOutsidePlan,
+                static (settings, value) =>
+                {
+                    settings.ShowMapForecastsOutsidePlan = value;
+                    SeedOracleDispatcher.Post(MapForecastDisplay.Refresh);
+                }),
+            () => SeedOracleSettings.Default.ShowMapForecastsOutsidePlan);
+
     public static void Register()
     {
         RitsuLibFramework.RegisterModSettings(Entry.ModId, page => page
@@ -27,8 +41,15 @@ internal static class SeedOracleSettingsUi
             .AddSection("forecast_display", section => section
                 .WithTitle(Text("预测显示", "Forecast display"))
                 .WithDescription(Text(
-                    "稀有度颜色始终生效；卡图模式只替换卡名，不改变预测与缓存。",
-                    "Rarity colors are always used. Card art only replaces card names and does not change prediction or caching."))
+                    "调整地图预测与卡牌的显示方式，设置会自动保存。",
+                    "Customize map forecasts and card presentation. Changes are saved automatically."))
+                .AddToggle(
+                    "show_map_forecasts_outside_plan",
+                    Text("非计划模式：路线与预测浮窗", "Routes and forecast tooltips outside planning"),
+                    ShowMapForecastsOutsidePlan,
+                    Text(
+                        "关闭后，普通模式隐藏种子先知的路线、标记和地图预测浮窗。打开计划面板后仍显示规划信息。",
+                        "Hide Seed Oracle's routes, markers, and map forecast tooltips outside planning. Opening the plan panel still shows planning information."))
                 .AddToggle(
                     "use_card_art_thumbnails",
                     Text("使用卡图缩略图", "Use card-art thumbnails"),

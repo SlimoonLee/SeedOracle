@@ -1,3 +1,4 @@
+using HarmonyLib;
 using MegaCrit.Sts2.Core.Context;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Map;
@@ -271,6 +272,7 @@ internal sealed class RoutePlan
 internal static class RoutePlanTracker
 {
     private static RoutePlan? _plan;
+    private static RunState? _ownerRun;
 
     public static event Action? PlanChanged;
 
@@ -286,11 +288,27 @@ internal static class RoutePlanTracker
         RaisePlanChanged();
     }
 
+    public static void OnRunStarted(RunState run)
+    {
+        _ownerRun = run;
+        Clear();
+    }
+
+    public static void OnRunCleanedUp()
+    {
+        _ownerRun = null;
+        Clear();
+    }
+
     /// <summary>Called when the map screen receives a map; plans are per act.</summary>
     public static void OnMapSet(RunState run)
     {
-        if (_plan is not null && _plan.ActIndex != run.CurrentActIndex)
-            _plan = null;
+        var previousRun = _ownerRun;
+        _ownerRun = run;
+        // The same seed and map coordinates can belong to different runs.
+        if (_plan is not null && (!ReferenceEquals(previousRun, run)
+                                  || _plan.ActIndex != run.CurrentActIndex))
+            Clear();
     }
 
     /// <summary>
@@ -299,6 +317,7 @@ internal static class RoutePlanTracker
     /// </summary>
     public static string? ToggleNode(RunState run, MapCoord coord)
     {
+        OnMapSet(run);
         var plan = _plan;
         if (plan is null || plan.Phase == RoutePlanPhase.Void || plan.Head is null)
             return StartPlan(run, coord);
@@ -365,6 +384,7 @@ internal static class RoutePlanTracker
             return "该房间无法从当前位置沿后续楼层到达"; // Not reachable along future floors.
 
         var player = LocalContext.GetMe(run) ?? run.Players.FirstOrDefault();
+        _ownerRun = run;
         _plan = new RoutePlan
         {
             ActIndex = run.CurrentActIndex,
@@ -383,15 +403,10 @@ internal static class RoutePlanTracker
     /// </summary>
     public static void Reconcile(RunState run)
     {
+        OnMapSet(run);
         var plan = _plan;
         if (plan is null || plan.Phase == RoutePlanPhase.Void)
             return;
-
-        if (plan.ActIndex != run.CurrentActIndex)
-        {
-            Void(plan, "act_changed");
-            return;
-        }
 
         var current = run.CurrentMapPoint;
         if (current is null || current.coord == plan.AnchorCoord)
@@ -466,4 +481,18 @@ internal static class RoutePlanTracker
         return map.GetPointsInRow(coord.row)
             .FirstOrDefault(point => point.coord == coord);
     }
+}
+
+[HarmonyPatch(typeof(RunManager), nameof(RunManager.Launch))]
+internal static class RoutePlanRunStartedPatch
+{
+    [HarmonyPostfix]
+    private static void Postfix(RunState __result) => RoutePlanTracker.OnRunStarted(__result);
+}
+
+[HarmonyPatch(typeof(RunManager), nameof(RunManager.CleanUp))]
+internal static class RoutePlanRunCleanupPatch
+{
+    [HarmonyPrefix]
+    private static void Prefix() => RoutePlanTracker.OnRunCleanedUp();
 }

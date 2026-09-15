@@ -9,10 +9,17 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <EnableDynamicLoading>true</EnableDynamicLoading>
     <RootNamespace>SeedOracle</RootNamespace>
-    <Version>0.1.22</Version>
+    <Version>0.1.23</Version>
     <Sts2Dir Condition="'$(Sts2Dir)' == ''">$(MSBuildProgramFiles32)\Steam\steamapps\common\Slay the Spire 2</Sts2Dir>
     <Sts2DataDir Condition="'$(Sts2DataDir)' == ''">$(Sts2Dir)\data_sts2_windows_x86_64</Sts2DataDir>
     <RitsuLibDir Condition="'$(RitsuLibDir)' == ''">$(Sts2Dir)\mods\STS2-RitsuLib</RitsuLibDir>
+    <!-- RitsuLib 0.6+ ships one loader root plus API-specific compat assemblies. -->
+    <RitsuLibReferenceTarget Condition="'$(RitsuLibReferenceTarget)' == ''">0.111.0</RitsuLibReferenceTarget>
+    <RitsuLibRoot Condition="'$(RitsuLibRoot)' == '' and Exists('$(RitsuLibDir)\RitsuLib.References.props')">$(RitsuLibDir)</RitsuLibRoot>
+    <RitsuLibRoot Condition="'$(RitsuLibRoot)' == '' and Exists('$(RitsuLibDir)\..\..\RitsuLib.References.props')">$(RitsuLibDir)\..\..</RitsuLibRoot>
+    <RitsuLibCompileDir Condition="'$(RitsuLibCompileDir)' == '' and Exists('$(RitsuLibRoot)\compat\$(RitsuLibReferenceTarget)\STS2-RitsuLib.dll')">$(RitsuLibRoot)\compat\$(RitsuLibReferenceTarget)</RitsuLibCompileDir>
+    <RitsuLibCompileDir Condition="'$(RitsuLibCompileDir)' == ''">$(RitsuLibDir)</RitsuLibCompileDir>
+    <RitsuLibSharedDir Condition="'$(RitsuLibSharedDir)' == '' and Exists('$(RitsuLibRoot)\shared')">$(RitsuLibRoot)\shared</RitsuLibSharedDir>
     <RandomForeseerDir Condition="'$(RandomForeseerDir)' == ''">$(Sts2Dir)\mods\RandomForeseer</RandomForeseerDir>
     <CombatSolverDir Condition="'$(CombatSolverDir)' == ''">$(Sts2Dir)\mods\CombatSolver</CombatSolverDir>
     <ModOutputDir Condition="'$(ModOutputDir)' == ''">$(Sts2Dir)\mods\SeedOracle</ModOutputDir>
@@ -29,7 +36,11 @@
     <Reference Include="sts2" HintPath="$(Sts2DataDir)\sts2.dll" Private="false" />
     <Reference Include="0Harmony" HintPath="$(Sts2DataDir)\0Harmony.dll" Private="false" />
     <Reference Include="GodotSharp" HintPath="$(Sts2DataDir)\GodotSharp.dll" Private="false" />
-    <Reference Include="STS2-RitsuLib" HintPath="$(RitsuLibDir)\STS2-RitsuLib.dll" Private="false" />
+    <Reference Include="STS2-RitsuLib" HintPath="$(RitsuLibCompileDir)\STS2-RitsuLib.dll" Private="false" />
+    <Reference Include="STS2-RitsuLib.Runtime" HintPath="$(RitsuLibCompileDir)\STS2-RitsuLib.Runtime.dll" Private="false" Condition="Exists('$(RitsuLibCompileDir)\STS2-RitsuLib.Runtime.dll')" />
+    <Reference Include="STS2-RitsuLib.Shared" HintPath="$(RitsuLibSharedDir)\STS2-RitsuLib.Shared.dll" Private="false" Condition="Exists('$(RitsuLibSharedDir)\STS2-RitsuLib.Shared.dll')" />
+    <Reference Include="STS2-RitsuLib.Ui" HintPath="$(RitsuLibSharedDir)\STS2-RitsuLib.Ui.dll" Private="false" Condition="Exists('$(RitsuLibSharedDir)\STS2-RitsuLib.Ui.dll')" />
+    <Reference Include="STS2-RitsuLib.Settings" HintPath="$(RitsuLibSharedDir)\STS2-RitsuLib.Settings.dll" Private="false" Condition="Exists('$(RitsuLibSharedDir)\STS2-RitsuLib.Settings.dll')" />
     <Reference Include="RandomForeseer" HintPath="$(RandomForeseerDir)\RandomForeseer.dll" Private="false" />
     <Reference Include="CombatSolver" HintPath="$(CombatSolverDir)\CombatSolver.dll" Private="false" />
   </ItemGroup>
@@ -42,7 +53,9 @@
 
   <Target Name="ValidateLocalDependencies" BeforeTargets="ResolveAssemblyReferences">
     <Error Condition="!Exists('$(Sts2DataDir)\sts2.dll')" Text="Could not find sts2.dll under '$(Sts2DataDir)'." />
-    <Error Condition="!Exists('$(RitsuLibDir)\STS2-RitsuLib.dll')" Text="Could not find RitsuLib under '$(RitsuLibDir)'." />
+    <Error Condition="!Exists('$(RitsuLibCompileDir)\STS2-RitsuLib.dll')" Text="Could not find the RitsuLib compile-time assembly under '$(RitsuLibCompileDir)'. Set RitsuLibDir to the RitsuLib root or an API-specific compat directory." />
+    <Error Condition="'$(RitsuLibRoot)' != '' and !Exists('$(RitsuLibCompileDir)\STS2-RitsuLib.Runtime.dll')" Text="RitsuLib root was detected, but the $(RitsuLibReferenceTarget) compat runtime is missing under '$(RitsuLibCompileDir)'." />
+    <Error Condition="'$(RitsuLibRoot)' != '' and !Exists('$(RitsuLibSharedDir)\STS2-RitsuLib.Shared.dll')" Text="RitsuLib 0.6+ shared assemblies are missing under '$(RitsuLibSharedDir)'. Use a complete RitsuLib installation." />
     <Error Condition="!Exists('$(RandomForeseerDir)\RandomForeseer.dll')" Text="Could not find Random Foreseer under '$(RandomForeseerDir)'." />
     <Error Condition="!Exists('$(CombatSolverDir)\CombatSolver.dll')" Text="Could not find Combat Solver under '$(CombatSolverDir)'." />
   </Target>

@@ -5,7 +5,7 @@ param(
     [string]$RandomForeseerDir,
     [string]$CombatSolverDir,
     [ValidateRange(1, 120)][int]$TimeoutSeconds = 120,
-    [string]$Seed = 'SEEDORACLE', [switch]$FullRun, [switch]$SelfTest,
+    [string]$Seed = 'SEEDORACLE', [switch]$FullRun, [switch]$SelfTest, [switch]$RestRngAudit,
     [ValidateSet('normal', 'unknown', 'event')][string]$SimulationCase = 'normal',
     [string]$SimulationEvent = 'DenseVegetation')
 $ErrorActionPreference = 'Stop'
@@ -26,7 +26,8 @@ function Resolve-ModSource([string]$Override, [string]$Id, [string]$WorkshopId) 
         if (-not (Test-Path -LiteralPath $candidate)) { continue }
         $resolved = (Resolve-Path -LiteralPath $candidate).Path
         foreach ($root in @($resolved, (Split-Path -Parent (Split-Path -Parent $resolved)))) {
-            if ((Test-Path -LiteralPath (Join-Path $root "$Id.json")) -and
+            if (((Test-Path -LiteralPath (Join-Path $root "$Id.json")) -or
+                 (Test-Path -LiteralPath (Join-Path $root 'mod_manifest.json'))) -and
                 (Test-Path -LiteralPath (Join-Path $root "$Id.dll"))) {
                 return $root
             }
@@ -63,7 +64,8 @@ function Copy-RuntimeTree([string]$Source, [string]$Destination, [bool]$HardLink
 }
 
 New-Item -ItemType Directory -Path $game, $roaming, $local -Force | Out-Null
-foreach ($file in Get-ChildItem -LiteralPath $sourceGame -File | Where-Object Extension -In '.exe', '.pck', '.dll') {
+foreach ($file in Get-ChildItem -LiteralPath $sourceGame -File |
+    Where-Object { $_.Extension -in @('.exe', '.pck', '.dll') -or $_.Name -eq 'release_info.json' }) {
     $target = Join-Path $game $file.Name
     if (-not (Test-Path -LiteralPath $target)) {
         New-Item -ItemType HardLink -Path $target -Target $file.FullName | Out-Null
@@ -103,10 +105,17 @@ $modOutput = Join-Path $game 'mods\SeedOracle'
 $buildArgs = @('-c', 'Debug', "-p:Sts2Dir=$sourceGame", "-p:ModOutputDir=$modOutput")
 foreach ($dependency in @('STS2-RitsuLib', 'RandomForeseer', 'CombatSolver')) {
     $directory = Join-Path $game "mods\$dependency"
-    $versioned = Get-ChildItem -LiteralPath (Join-Path $directory 'lib') -Directory -ErrorAction SilentlyContinue |
+    $compatRoot = Join-Path $directory 'compat'
+    $compatVersioned = Get-ChildItem -LiteralPath $compatRoot -Directory -ErrorAction SilentlyContinue |
         Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName "$dependency.dll") } |
         Sort-Object Name -Descending | Select-Object -First 1
-    if ($versioned) { $directory = $versioned.FullName }
+    if ($compatVersioned) { $buildArgs += "-p:RitsuLibReferenceTarget=$($compatVersioned.Name)" }
+    if ($dependency -ne 'STS2-RitsuLib' -or -not (Test-Path -LiteralPath (Join-Path $directory 'RitsuLib.References.props'))) {
+        $versioned = Get-ChildItem -LiteralPath (Join-Path $directory 'lib') -Directory -ErrorAction SilentlyContinue |
+            Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName "$dependency.dll") } |
+            Sort-Object Name -Descending | Select-Object -First 1
+        if ($versioned) { $directory = $versioned.FullName }
+    }
     $property = $dependency -eq 'STS2-RitsuLib' ? 'RitsuLibDir' : "${dependency}Dir"
     $buildArgs += "-p:${property}=$directory"
 }
@@ -120,7 +129,9 @@ $start.WorkingDirectory = $game
 $start.UseShellExecute = $false
 $start.CreateNoWindow = $true
 $arguments = @('--headless', '--force-steam=off', '--seed-oracle-smoke')
-if (-not $FullRun) { $arguments += '--seed-oracle-planning-audit' }
+if ($RestRngAudit) {
+    $arguments += @('--seed-oracle-rest-rng-audit', '--rest-rng-output', (Join-Path $runtime "rest-rng-$Seed"))
+} elseif (-not $FullRun) { $arguments += '--seed-oracle-planning-audit' }
 $arguments += @('--seed', $Seed, '--log-file', $log)
 $arguments += @('--simulation-case', $SimulationCase, '--simulation-event', $SimulationEvent)
 foreach ($argument in $arguments) {
@@ -138,6 +149,12 @@ try {
     if (-not (Test-Path -LiteralPath $report)) { throw "Audit produced no report. Inspect $log" }
     Select-String -LiteralPath $report -Pattern 'PASS:|SUMMARY:' | ForEach-Object Line
     if ($process.ExitCode -ne 0) { throw "Planning audit exited with code $($process.ExitCode). Inspect $log" }
+    if ($RestRngAudit) {
+        if (-not (Select-String -LiteralPath $report -Pattern '^rest-rng-branches PASS:')) {
+            throw "Rest RNG audit did not reach the first act's final campfire. Inspect $report"
+        }
+        return [pscustomobject]@{ Report = $report; Log = $log; ExitCode = $process.ExitCode }
+    }
     if (-not (Select-String -LiteralPath $report -Pattern '^native-combat-reward-groups PASS:')) {
         throw "Native reward group audit did not pass. Inspect $report"
     }

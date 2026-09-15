@@ -22,6 +22,8 @@ internal static class NMapPointOnFocusPatch
     internal static void Render(NMapPoint __instance)
     {
         RouteNodeMarkerOverlay.ClearAll();
+        if (!MapForecastDisplay.Enabled)
+            return;
         if (__instance.State == MapPointState.Traveled || __instance._runState is not RunState run)
             return;
 
@@ -83,15 +85,32 @@ internal static class MapHoverTipPresentation
     internal const int HoverTipZIndex = 200;
     internal const float ViewportMargin = 12f;
 
+    private static WeakReference<NMapPoint>? _forecastOwner;
+    private static WeakReference<NHoverTipSet>? _forecastTipSet;
+
     public static void Finalize(NMapPoint owner, NHoverTipSet? knownTipSet = null)
     {
         var tipSet = knownTipSet ?? FindActiveTipSet(owner);
         if (tipSet is null)
             return;
 
+        _forecastOwner = new(owner);
+        _forecastTipSet = new(tipSet);
+
         var alignment = HoverTip.GetHoverTipAlignment(owner);
         Apply(tipSet, owner, alignment);
         Callable.From(() => Apply(tipSet, owner, alignment)).CallDeferred();
+    }
+
+    internal static void HideForecastTip()
+    {
+        if (_forecastOwner?.TryGetTarget(out var owner) == true
+            && _forecastTipSet?.TryGetTarget(out var tipSet) == true
+            && NHoverTipSet._activeHoverTips.TryGetValue(owner, out var active)
+            && ReferenceEquals(active, tipSet))
+            HideTip(owner);
+        _forecastOwner = null;
+        _forecastTipSet = null;
     }
 
     /// <summary>

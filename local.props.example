@@ -3,6 +3,8 @@
     <Sts2Dir>C:\path\to\Steam\steamapps\common\Slay the Spire 2</Sts2Dir>
     <Sts2DataDir>$(Sts2Dir)\data_sts2_windows_x86_64</Sts2DataDir>
     <RitsuLibDir>$(Sts2Dir)\mods\STS2-RitsuLib</RitsuLibDir>
+    <!-- RitsuLib 0.6+ root; the project selects compat/<target> for compile-time references. -->
+    <RitsuLibReferenceTarget>0.111.0</RitsuLibReferenceTarget>
     <RandomForeseerDir>$(Sts2Dir)\mods\RandomForeseer</RandomForeseerDir>
     <!-- Point this at a CombatSolver build with the API level used by the adapter; keep SeedOracle output separate. -->
     <CombatSolverDir>C:\path\to\Steam\steamapps\workshop\content\2868840\3790899961</CombatSolverDir>

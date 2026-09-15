@@ -806,6 +806,13 @@ internal static class DebugForecastSmokeTest
         if (RoutePlanTracker.Current is not null)
             throw new InvalidOperationException(
                 "Seed Oracle route-plan self-test failed to clear the plan.");
+
+        var nextRun = RunState.CreateForTest(seed: "SEEDORACLE_ROUTE_PLAN_NEXT_RUN");
+        RoutePlanTracker.OnRunStarted(nextRun);
+        if (RoutePlanTracker.Current is not null)
+            throw new InvalidOperationException(
+                "Seed Oracle route-plan self-test retained a plan across runs.");
+        RoutePlanTracker.OnRunStarted(run);
     }
 }
 #endif

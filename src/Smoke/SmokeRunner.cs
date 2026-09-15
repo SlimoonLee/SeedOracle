@@ -54,6 +54,7 @@ internal static class SmokeRunner
 
     internal static bool ShouldHoldAutoSlay =>
         IsRequested
+        && !RestSiteRngAudit.IsRequested
         && !_planningSimulationReported;
 
     internal static Task WaitForPlanningSimulationAsync(CancellationToken cancellationToken)
@@ -78,6 +79,9 @@ internal static class SmokeRunner
     public static void Tick()
     {
         if (!IsRequested)
+            return;
+
+        if (RestSiteRngAudit.TickOpeningReplay())
             return;
 
         try
@@ -120,8 +124,11 @@ internal static class SmokeRunner
             }
 
             TickCombatKill();
-            TickEventAudit();
-            TickPlanningSimulationAudit();
+            if (!RestSiteRngAudit.IsRequested)
+            {
+                TickEventAudit();
+                TickPlanningSimulationAudit();
+            }
             if (PlanningAuditOnly && _eventAuditDone
                 && (!Entry.CombatSolver.SupportsPlanningSimulation || _planningSimulationReported))
             {

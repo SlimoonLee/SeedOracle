@@ -165,6 +165,8 @@ internal static class RouteNodeMarkerOverlay
         IReadOnlyList<RouteLineAssignment> lineAssignments)
     {
         ClearAll();
+        if (!MapForecastDisplay.Enabled)
+            return;
         foreach (var assignment in assignments)
         {
             if (!owner._screen._mapPointDictionary.TryGetValue(assignment.Point.coord, out var node))

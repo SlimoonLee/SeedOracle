@@ -84,7 +84,7 @@ internal static class RoutePlanOverlay
     {
         Clear();
         var plan = RoutePlanTracker.Current;
-        if (plan is null || plan.Phase != RoutePlanPhase.Active)
+        if (!MapForecastDisplay.Enabled || plan is null || plan.Phase != RoutePlanPhase.Active)
             return;
 
         foreach (var entry in plan.Entries)

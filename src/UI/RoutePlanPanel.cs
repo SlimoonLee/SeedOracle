@@ -31,6 +31,7 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
     private RoutePlanForecastService? _planForecasts;
     private readonly PlanningEventPredictionService _planEventPredictions = new();
     private RunState? _lastRun;
+    private RoutePlan? _cachedPlan;
     private RoutePlanForecastService.PlanChain? _lastChain;
     private string? _stateToken;
     private long _planRevision;
@@ -94,6 +95,22 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
         closeButton.Pressed += Collapse;
         header.AddChild(closeButton);
 
+        var modeNotice = new PanelContainer { Name = "SeedOraclePlanModeNotice", MouseFilter = MouseFilterEnum.Ignore };
+        var noticeStyle = PreCombatPanelStyles.CreatePanel(
+            new Color(0.24f, 0.13f, 0.025f, 1f), StsColors.gold, 6);
+        noticeStyle.ContentMarginLeft = noticeStyle.ContentMarginRight = 10;
+        noticeStyle.ContentMarginTop = noticeStyle.ContentMarginBottom = 8;
+        modeNotice.AddThemeStyleboxOverride("panel", noticeStyle);
+        var noticeText = PreCombatPanelStyles.CreateLabel(
+            Chinese
+                ? "当前计划模式\n点击房间不会进入。\n需要进入时，请关闭计划面板。"
+                : "PLANNING MODE\nClicking a room will not enter it.\nClose the plan panel to enter a room.",
+            20, StsColors.gold, bold: true);
+        noticeText.AutowrapMode = TextServer.AutowrapMode.WordSmart;
+        noticeText.SizeFlagsHorizontal = SizeFlags.ExpandFill;
+        modeNotice.AddChild(noticeText);
+        column.AddChild(modeNotice);
+
         _status = PreCombatPanelStyles.CreateLabel(string.Empty, 18, StsColors.cream);
         _status.AutowrapMode = TextServer.AutowrapMode.WordSmart;
         _status.SizeFlagsHorizontal = SizeFlags.ExpandFill;
@@ -121,6 +138,8 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
         _ledger.AutowrapMode = TextServer.AutowrapMode.WordSmart;
         _ledger.SizeFlagsHorizontal = SizeFlags.ExpandFill;
         column.AddChild(_ledger);
+
+        VisibilityChanged += MapForecastDisplay.Refresh;
     }
 
     /// <summary>
@@ -154,17 +173,7 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
 
     private static bool Chinese => LocManager.Instance?.Language is "zhs" or "zht";
 
-    public void Collapse()
-    {
-        Visible = false;
-        var screen = _screen;
-        if (screen is not null
-            && GodotObject.IsInstanceValid(screen)
-            && screen._runState is { } run)
-        {
-            RoutePlanOverlay.Refresh(screen, run);
-        }
-    }
+    public void Collapse() => Visible = false;
 
     public void Configure(NMapScreen screen)
     {
@@ -186,12 +195,12 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
         return plan switch
         {
             null => Chinese
-                ? "规划模式：点击房间按顺序纳入规划（不会实际进入）。点击计划末端房间可截断；关闭面板后恢复正常移动。"
-                : "Plan mode: click rooms in order to plan them (you will not enter them). Click the last planned room to truncate. Close the panel to travel normally.",
+                ? "点击房间按顺序纳入规划；再次点击已规划房间可截断计划。"
+                : "Click rooms in order to plan them. Click a planned room again to truncate the plan.",
             { Phase: RoutePlanPhase.Void } => VoidText(plan),
             _ => Chinese
-                ? "点击房间继续追加；点击计划末端房间可截断。关闭面板后点击可进入房间才会实际前进。"
-                : "Click rooms to append; click the last planned room to truncate. Close the panel to travel again."
+                ? "点击房间继续追加；再次点击已规划房间可截断计划。"
+                : "Click rooms to append; click a planned room again to truncate the plan."
         };
     }
 
@@ -213,6 +222,11 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
 
         var chinese = Chinese;
         var plan = RoutePlanTracker.Current;
+        if (!ReferenceEquals(_cachedPlan, plan))
+            _eventOutcomes.Clear();
+        _cachedPlan = plan;
+        _lastRun = run;
+        _lastChain = null;
         ShowHint(null, error: false);
 
         foreach (var child in _planList.GetChildren())
@@ -228,8 +242,6 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
 
         PruneEventOutcomes(plan);
 
-        _lastRun = run;
-        _lastChain = null;
         if (plan.Phase == RoutePlanPhase.Active && player is not null)
         {
             _planForecasts ??= new RoutePlanForecastService(new PlanningPredictionService());
@@ -286,6 +298,24 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
         }
 
         _ledger.Text = BuildLedger(run, player, plan, chinese, _lastChain);
+    }
+
+    internal void ClearPlanState()
+    {
+        // Invalidate pending event/simulation callbacks even while hidden.
+        _planRevision++;
+        _cachedPlan = null;
+        _lastRun = null;
+        _lastChain = null;
+        _stateToken = null;
+        _eventOutcomes.Clear();
+        foreach (var child in _planList.GetChildren())
+        {
+            _planList.RemoveChild(child);
+            child.QueueFree();
+        }
+        _ledger.Text = string.Empty;
+        ShowHint(null, error: false);
     }
 
     private PanelContainer BuildCompletedRow(RunState run, RoutePlanEntry entry, bool chinese)
@@ -2293,7 +2323,33 @@ internal static class RoutePlanPanel
     private static RoutePlanPanelControl? _currentPanel;
     private static RoutePlanToggleButton? _currentToggle;
 
-    internal static bool IsPlanMode => _currentPanel is { Visible: true };
+    static RoutePlanPanel()
+    {
+        RoutePlanTracker.PlanChanged += OnPlanChanged;
+    }
+
+    private static void OnPlanChanged()
+    {
+        if (RoutePlanTracker.Current is not null)
+            return;
+        try
+        {
+            RoutePlanOverlay.Clear();
+            if (_currentPanel is not null
+                && GodotObject.IsInstanceValid(_currentPanel)
+                && !_currentPanel.IsQueuedForDeletion())
+                _currentPanel.ClearPlanState();
+        }
+        catch (Exception exception)
+        {
+            ReportFailure("clear", exception);
+        }
+    }
+
+    internal static bool IsPlanMode => _currentPanel is not null
+        && GodotObject.IsInstanceValid(_currentPanel)
+        && !_currentPanel.IsQueuedForDeletion()
+        && _currentPanel.Visible;
 
     public static RoutePlanPanelControl Refresh(NMapScreen screen)
     {
@@ -2316,6 +2372,8 @@ internal static class RoutePlanPanel
 
         if (created)
             Entry.Logger.Info("[PlanPanel] plan UI created");
+        _currentPanel = panel;
+        _currentToggle = toggle;
         panel.Configure(screen);
         toggle.Bind(panel);
         toggle.Visible = screen.IsOpen;
@@ -2323,8 +2381,6 @@ internal static class RoutePlanPanel
             panel.RefreshPlan();
         if (screen._runState is { } run)
             RoutePlanOverlay.Refresh(screen, run);
-        _currentPanel = panel;
-        _currentToggle = toggle;
         return panel;
     }
 

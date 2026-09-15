@@ -99,7 +99,11 @@ internal sealed partial class PreCombatForecastPanelControl
         && GodotObject.IsInstanceValid(_screen)
         && _screen._runState.Act.AllEncounters.Any()
         && _screen._runState.Act.AllEncounters.All(static encounter =>
-            IsResolvedEncounterTitle(LocalizedEncounterTitle(encounter)));
+            IsResolvedEncounterTitle(LocalizedEncounterTitle(encounter)))
+        && EnumerateEventEncounters().Any()
+        && EnumerateEventEncounters().All(static encounter =>
+            !encounter.Id.Entry.StartsWith("MOCK_", StringComparison.OrdinalIgnoreCase)
+            && IsResolvedEncounterTitle(LocalizedEncounterTitle(encounter)));
 
     internal bool HasWorkerLifecycleControls =>
         _closeWorkerButton.Text == "关闭后台"
@@ -287,10 +291,10 @@ internal sealed partial class PreCombatForecastPanelControl
                     new SimulationEncounterChoice(encounter, $"[强] {LocalizedEncounterTitle(encounter)}"))),
             SimulationTargetKind.SpecificElite => run.Act.AllEliteEncounters
                 .Select(encounter => new SimulationEncounterChoice(encounter, LocalizedEncounterTitle(encounter))),
-            SimulationTargetKind.SpecificEvent => ModelDb.All.OfType<EncounterModel>()
-                .Where(encounter => encounter.RoomType is RoomType.Monster or RoomType.Elite or RoomType.Boss)
-                .Except(ModelDb.Acts.SelectMany(act => act.AllEncounters))
-                .Select(encounter => new SimulationEncounterChoice(encounter, LocalizedEncounterTitle(encounter))),
+            SimulationTargetKind.SpecificEvent => EnumerateEventEncounters()
+                .Select(encounter => new SimulationEncounterChoice(
+                    encounter,
+                    LocalizedEncounterTitle(encounter))),
             SimulationTargetKind.CurrentBoss =>
             [new SimulationEncounterChoice(run.Act.BossEncounter, LocalizedEncounterTitle(run.Act.BossEncounter))],
             _ => [],
@@ -321,6 +325,29 @@ internal sealed partial class PreCombatForecastPanelControl
         }
         _simulationEncounterSelect.Selected = selected;
         _simulationEncounterSelect.Disabled = kind == SimulationTargetKind.CurrentBoss || IsRunning;
+    }
+
+    /// <summary>
+    /// ModelDb.All also contains the game's mock encounters used by the debug
+    /// console. Event combat models have either an EventEncounter suffix or
+    /// are exposed by an event's canonical combat descriptor.
+    /// </summary>
+    private static IEnumerable<EncounterModel> EnumerateEventEncounters()
+    {
+        var canonical = ModelDb.AllEvents
+            .Select(eventModel => eventModel.CanonicalEncounter)
+            .OfType<EncounterModel>();
+        var eventTypes = ModelDb.All
+            .OfType<EncounterModel>()
+            .Where(encounter => encounter.GetType().Name.EndsWith(
+                "EventEncounter",
+                StringComparison.Ordinal));
+
+        return ModelDb.EventEncounters
+            .Concat(canonical)
+            .Concat(eventTypes)
+            .Where(encounter => encounter.RoomType is RoomType.Monster or RoomType.Elite or RoomType.Boss)
+            .DistinctBy(encounter => encounter.Id);
     }
 
     private SimulationTargetKind SelectedSimulationTargetKind =>

@@ -26,6 +26,7 @@ Seed Oracle 是《Slay the Spire 2》`0.111.0` 的路线信息前瞻 Mod。它�
 - 使用克隆的 `TreasureRoomRelics` RNG 与共享遗物袋预测宝箱遗物和金币，并处理银坩埚空箱与首次教学宝箱；
 - 使用游戏支持的 `[gold]`、`[green]`、`[orange]` 和 `[blue]` 富文本标签显示预测状态与价格；
 - 卡牌、遗物与药水名称按实际稀有度显示为普通白、罕见蓝、稀有金等颜色；Mod 设置页可改用原生卡图缩略图代替卡名，彩色菱形继续标出稀有度，升级牌保留“+”；
+- Mod 设置页可关闭非计划模式下的路线、标记和地图预测浮窗（默认开启）；打开计划面板仍显示规划信息，面板顶部固定提示“当前计划模式，点击房间不会进入，需要进入时请关闭计划面板”；
 - 地图顶部提供“战损与模拟”按钮和可见面板；打开面板与地图悬停都不会启动 worker。每个场景有独立“计算”按钮，未选择的路线不排队；相同跑局状态与搜索设置会直接恢复缓存结果；
 - 面板用与地图路线标记一致的彩色三角形、正方形、菱形等图形区分路线，悬停一行会在地图上高亮对应目标与路径；可选择单场搜索预算与并行度，并查看耗时、可信度和药水计划；
 - 面板实时显示隔离 Combat Solver worker 的 PID、工作集、私有内存和静音状态；可选择保活 2、10、30 分钟、一直维持或任务结束后自动关闭，也可手动关闭及重启/预热；
@@ -45,7 +46,7 @@ Seed Oracle 是《Slay the Spire 2》`0.111.0` 的路线信息前瞻 Mod。它�
 
 ## 当前兼容性
 
-Seed Oracle `0.1.22` 在 `SeedOracle.json` 中把 Combat Solver 的最低兼容门槛设为 `0.31.2`；Mod loader 按 `min_version` 使用大于等于比较，因此后续主 Mod 版本无需跟随每次发布修改依赖。public API v5 是确定路线和当前状态假设样本的最低能力，规划战斗模拟会在运行时探测 v6 方法，旧的 v5 构建会安全降级为不可用。CombatSolver v6 扩展的实现和上游 PR 见 [SlimoonLee/CombatSolver](https://github.com/SlimoonLee/CombatSolver)。
+Seed Oracle `0.1.23` 在 `SeedOracle.json` 中把 RitsuLib 的最低兼容门槛设为 `0.6.0`，把 Combat Solver 的最低兼容门槛设为 `0.31.2`；Mod loader 按 `min_version` 使用大于等于比较，因此后续主 Mod 版本无需跟随每次发布修改依赖。public API v5 是确定路线和当前状态假设样本的最低能力，规划战斗模拟会在运行时探测 v6 方法，旧的 v5 构建会安全降级为不可用。Combat Solver `0.39.0` 的公开战前 API 仍保持 v6 签名兼容；RitsuLib `0.6.0` 的拆分程序集由项目自动引用。详细核对记录见 [依赖兼容性审计](docs/validation/dependency-compatibility-2026-09-15.md)。
 
 ## 构建
 
@@ -61,7 +62,7 @@ dotnet build .\SeedOracle.csproj -c Release
 
 依赖：
 
-- STS2-RitsuLib `0.5.18+`
+- STS2-RitsuLib `0.6.0+`
 - Random Foreseer `0.13.11+`
 - Combat Solver `>=0.31.2`（public API v5 最低门槛；更新的主 Mod 版本自动兼容）；规划战斗模拟需 API v6 扩展
 
