@@ -5,6 +5,7 @@ using MegaCrit.Sts2.Core.Map;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.Core.Rooms;
+using SeedOracle.Forecasting;
 
 namespace SeedOracle.UI;
 
@@ -363,12 +364,65 @@ internal static class RoutePlanTracker
         }
 
         var tailPoint = FindMapPoint(run, entries[entries.Count - 1].Coord);
-        if (tailPoint is null || tailPoint.Children.All(child => child.coord != coord))
+        if (tailPoint is null || !IsPlannableHop(run, plan, tailPoint, coord))
             return "该房间与计划末端不相连"; // The room is not connected to the plan tail.
 
         plan.Entries = entries.Append(new RoutePlanEntry(coord, null, null)).ToArray();
         RaisePlanChanged();
         return null;
+    }
+
+    /// <summary>
+    /// A planned hop mirrors how the game travels (MapTravel): connected
+    /// children are always allowed, and while free travel is available
+    /// (Winged Boots / Flight) every room in the next row is. Each planned
+    /// jump spends one charge, so the remaining budget must still cover the
+    /// jumps the plan between the current position and this hop will use.
+    /// </summary>
+    private static bool IsPlannableHop(RunState run, RoutePlan plan, MapPoint tail, MapCoord target)
+    {
+        if (tail.Children.Any(child => child.coord == target))
+            return true;
+
+        var remaining = RouteStateExplorer.GetFreeTravelUses(run);
+        if (remaining <= 0)
+            return false;
+
+        var targetPoint = FindMapPoint(run, target);
+        if (targetPoint is null || targetPoint.coord.row != tail.coord.row + 1)
+            return false;
+
+        return remaining == int.MaxValue || remaining > CountPlannedJumps(run, plan, tail);
+    }
+
+    /// <summary>
+    /// Free-travel jumps the uncompleted plan spends before reaching tail.
+    /// Completed hops are skipped: they already consumed their charges in the
+    /// live run, which <see cref="GetFreeTravelUses"/> on the live relics
+    /// reflects.
+    /// </summary>
+    private static int CountPlannedJumps(RunState run, RoutePlan plan, MapPoint tail)
+    {
+        var jumps = 0;
+        var previous = run.CurrentMapPoint;
+        foreach (var entry in plan.Entries)
+        {
+            if (entry.IsCompleted)
+                continue;
+            var point = FindMapPoint(run, entry.Coord);
+            if (previous is not null
+                && point is not null
+                && previous.Children.All(child => child.coord != point.coord))
+            {
+                jumps++;
+            }
+
+            previous = point;
+            if (ReferenceEquals(point, tail))
+                break;
+        }
+
+        return jumps;
     }
 
     private static string? StartPlan(RunState run, MapCoord coord)
@@ -380,6 +434,14 @@ internal static class RoutePlanTracker
         var reachable = current.Children.Any(child => child.coord == coord)
                         || current.Children.Any(travelable => travelable.Children.Any(
                             grandChild => grandChild.coord == coord));
+        if (!reachable && RouteStateExplorer.GetFreeTravelUses(run) > 0)
+        {
+            // Free travel (Winged Boots / Flight) opens every room in the
+            // next row, not just connected children.
+            reachable = run.Map.GetPointsInRow(current.coord.row + 1)
+                .Any(point => point.coord == coord);
+        }
+
         if (!reachable)
             return "该房间无法从当前位置沿后续楼层到达"; // Not reachable along future floors.
 

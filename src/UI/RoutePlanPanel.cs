@@ -8,6 +8,7 @@ using MegaCrit.Sts2.Core.Helpers;
 using MegaCrit.Sts2.Core.Localization;
 using MegaCrit.Sts2.Core.Localization.Fonts;
 using MegaCrit.Sts2.Core.Map;
+using MegaCrit.Sts2.Core.Nodes.Screens.MainMenu;
 using MegaCrit.Sts2.Core.Nodes.Screens.Map;
 using MegaCrit.Sts2.Core.Nodes.GodotExtensions;
 using MegaCrit.Sts2.Core.Rooms;
@@ -2255,8 +2256,8 @@ internal sealed partial class RoutePlanToggleButton : Button
         ZIndex = ToggleZIndex;
         AnchorLeft = 1f;
         AnchorRight = 1f;
-        AnchorTop = 0.69f;
-        AnchorBottom = 0.69f;
+        AnchorTop = 0.79f;
+        AnchorBottom = 0.79f;
         OffsetLeft = -330f;
         OffsetRight = -16f;
         OffsetTop = -24f;
@@ -2421,6 +2422,25 @@ internal static class RoutePlanPanel
         }
     }
 
+    /// <summary>Brings the toggle back after a stacked screen closed; the
+    /// panel itself stays collapsed so reopening stays an explicit choice.</summary>
+    internal static void ShowToggleSafely()
+    {
+        try
+        {
+            if (_currentToggle is not null
+                && GodotObject.IsInstanceValid(_currentToggle)
+                && !_currentToggle.IsQueuedForDeletion())
+            {
+                _currentToggle.Visible = true;
+            }
+        }
+        catch (Exception exception)
+        {
+            ReportFailure("show-toggle", exception);
+        }
+    }
+
     public static void RefreshSafely(NMapScreen screen)
     {
         try
@@ -2536,4 +2556,30 @@ internal static class NMapScreenCloseRoutePlanPatch
 {
     [HarmonyPostfix]
     private static void Postfix() => RoutePlanPanel.HideToggleSafely();
+}
+
+/// <summary>
+/// Godot routes GUI input by tree order and ignores ZIndex, so while a
+/// submenu (pause, settings, compendium, …) is stacked above the map the
+/// plan panel still draws on top but its close button can no longer be
+/// clicked. Collapse the plan UI whenever a submenu opens; the map keeps the
+/// plan, and the toggle returns once the stack empties back onto the map.
+/// </summary>
+[HarmonyPatch(typeof(NSubmenuStack), nameof(NSubmenuStack.Push))]
+internal static class NSubmenuStackPushRoutePlanPatch
+{
+    [HarmonyPostfix]
+    private static void Postfix() => RoutePlanPanel.HideToggleSafely();
+}
+
+[HarmonyPatch(typeof(NSubmenuStack), nameof(NSubmenuStack.Pop))]
+internal static class NSubmenuStackPopRoutePlanPatch
+{
+    [HarmonyPostfix]
+    private static void Postfix(NSubmenuStack __instance)
+    {
+        if (__instance.Peek() is not null || NMapScreen.Instance is not { IsOpen: true })
+            return;
+        RoutePlanPanel.ShowToggleSafely();
+    }
 }

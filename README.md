@@ -46,7 +46,7 @@ Seed Oracle 是《Slay the Spire 2》`0.111.0` 的路线信息前瞻 Mod。它�
 
 ## 当前兼容性
 
-Seed Oracle `0.1.23` 在 `SeedOracle.json` 中把 RitsuLib 的最低兼容门槛设为 `0.6.0`，把 Combat Solver 的最低兼容门槛设为 `0.31.2`；Mod loader 按 `min_version` 使用大于等于比较，因此后续主 Mod 版本无需跟随每次发布修改依赖。public API v5 是确定路线和当前状态假设样本的最低能力，规划战斗模拟会在运行时探测 v6 方法，旧的 v5 构建会安全降级为不可用。Combat Solver `0.39.0` 的公开战前 API 仍保持 v6 签名兼容；RitsuLib `0.6.0` 的拆分程序集由项目自动引用。详细核对记录见 [依赖兼容性审计](docs/validation/dependency-compatibility-2026-09-15.md)。
+Seed Oracle `0.1.24` 在 `SeedOracle.json` 中把 RitsuLib 的最低兼容门槛设为 `0.6.0`，把 Combat Solver 的最低兼容门槛设为 `0.31.2`；Mod loader 按 `min_version` 使用大于等于比较，因此后续主 Mod 版本无需跟随每次发布修改依赖。public API v5 是确定路线和当前状态假设样本的最低能力，规划战斗模拟会在运行时探测 v6 方法，旧的 v5 构建会安全降级为不可用。Combat Solver `0.39.0` 的公开战前 API 仍保持 v6 签名兼容；RitsuLib `0.6.0` 的拆分程序集由项目自动引用。详细核对记录见 [依赖兼容性审计](docs/validation/dependency-compatibility-2026-09-15.md)。
 
 ## 构建
 

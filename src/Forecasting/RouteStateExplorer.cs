@@ -100,7 +100,7 @@ internal static class RouteStateExplorer
         }
     }
 
-    private static int GetFreeTravelUses(RunState run)
+    internal static int GetFreeTravelUses(RunState run)
     {
         if (run.Modifiers.OfType<Flight>().Any())
             return int.MaxValue;
