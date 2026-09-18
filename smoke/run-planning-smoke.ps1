@@ -4,11 +4,12 @@ param(
     [string]$RitsuLibDir,
     [string]$RandomForeseerDir,
     [string]$CombatSolverDir,
-    [ValidateRange(1, 120)][int]$TimeoutSeconds = 120,
-    [string]$Seed = 'SEEDORACLE', [switch]$FullRun, [switch]$SelfTest, [switch]$RestRngAudit,
+    [ValidateRange(1, 7200)][int]$TimeoutSeconds = 120,
+    [string]$Seed = 'SEEDORACLE', [switch]$FullRun, [switch]$SelfTest, [switch]$RestRngAudit, [switch]$CardValueDemo, [switch]$SolverClimb,
     [ValidateSet('normal', 'unknown', 'event')][string]$SimulationCase = 'normal',
     [string]$SimulationEvent = 'DenseVegetation')
 $ErrorActionPreference = 'Stop'
+if ($SolverClimb -and $TimeoutSeconds -eq 120) { $TimeoutSeconds = 1800 }
 $repository = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $runtime = Join-Path $repository '.smoke\planning-audit'
 $game = Join-Path $runtime 'game'
@@ -129,9 +130,11 @@ $start.WorkingDirectory = $game
 $start.UseShellExecute = $false
 $start.CreateNoWindow = $true
 $arguments = @('--headless', '--force-steam=off', '--seed-oracle-smoke')
+if ($CardValueDemo) { $arguments += '--seed-oracle-card-value-demo' }
+if ($SolverClimb) { $arguments += @('--seed-oracle-solver-climb', '--climb-output', (Join-Path $runtime "climb-$Seed")) }
 if ($RestRngAudit) {
     $arguments += @('--seed-oracle-rest-rng-audit', '--rest-rng-output', (Join-Path $runtime "rest-rng-$Seed"))
-} elseif (-not $FullRun) { $arguments += '--seed-oracle-planning-audit' }
+} elseif (-not $FullRun -and -not $CardValueDemo -and -not $SolverClimb) { $arguments += '--seed-oracle-planning-audit' }
 $arguments += @('--seed', $Seed, '--log-file', $log)
 $arguments += @('--simulation-case', $SimulationCase, '--simulation-event', $SimulationEvent)
 foreach ($argument in $arguments) {
@@ -149,6 +152,18 @@ try {
     if (-not (Test-Path -LiteralPath $report)) { throw "Audit produced no report. Inspect $log" }
     Select-String -LiteralPath $report -Pattern 'PASS:|SUMMARY:' | ForEach-Object Line
     if ($process.ExitCode -ne 0) { throw "Planning audit exited with code $($process.ExitCode). Inspect $log" }
+    if ($SolverClimb) {
+        if (-not (Select-String -LiteralPath $report -Pattern '^solver-climb SUMMARY:.*boss=reached')) {
+            throw "Solver climb did not reach the first act's boss. Inspect $report"
+        }
+        return [pscustomobject]@{ Report = $report; Log = $log; ExitCode = $process.ExitCode }
+    }
+    if ($CardValueDemo) {
+        if (-not (Select-String -LiteralPath $report -Pattern '^card-value-demo SUMMARY:')) {
+            throw "Card value demo did not produce a summary. Inspect $report"
+        }
+        return [pscustomobject]@{ Report = $report; Log = $log; ExitCode = $process.ExitCode }
+    }
     if ($RestRngAudit) {
         if (-not (Select-String -LiteralPath $report -Pattern '^rest-rng-branches PASS:')) {
             throw "Rest RNG audit did not reach the first act's final campfire. Inspect $report"

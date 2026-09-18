@@ -55,6 +55,8 @@ internal static class SmokeRunner
     internal static bool ShouldHoldAutoSlay =>
         IsRequested
         && !RestSiteRngAudit.IsRequested
+        && !SolverClimb.IsRequested
+        && (!CardValueDemo.IsRequested || !CardValueDemo.IsCompleted)
         && !_planningSimulationReported;
 
     internal static Task WaitForPlanningSimulationAsync(CancellationToken cancellationToken)
@@ -124,7 +126,16 @@ internal static class SmokeRunner
             }
 
             TickCombatKill();
-            if (!RestSiteRngAudit.IsRequested)
+            if (SolverClimb.IsRequested)
+                SolverClimb.TickCombatEdges();
+            if (CardValueDemo.IsRequested)
+            {
+                CardValueDemo.Tick();
+                if (CardValueDemo.IsCompleted)
+                    return;
+            }
+            if (!RestSiteRngAudit.IsRequested && !CardValueDemo.IsRequested
+                                                 && !SolverClimb.IsRequested)
             {
                 TickEventAudit();
                 TickPlanningSimulationAudit();
@@ -138,7 +149,8 @@ internal static class SmokeRunner
             }
 
             var runOver = !AutoSlayer.IsActive;
-            if (!_quitQueued && (runOver || Uptime.Elapsed > TimeSpan.FromMinutes(20)))
+            var uptimeLimit = SolverClimb.IsRequested ? 45 : 20;
+            if (!_quitQueued && (runOver || Uptime.Elapsed > TimeSpan.FromMinutes(uptimeLimit)))
             {
                 _quitQueued = true;
                 Entry.Logger.Info($"[Smoke] autoslay finished (elapsed {Uptime.Elapsed:hh\\:mm\\:ss}); quitting");
@@ -160,7 +172,10 @@ internal static class SmokeRunner
     /// <summary>
     /// Smoke-only combat accelerator: every enemy takes unblockable lethal
     /// damage through the normal command pipeline, so drops, rewards, and RNG
-    /// consumption match a real victory without waiting on turns.
+    /// consumption match a real victory without waiting on turns. The kill
+    /// pass repeats while any enemy lives: Slippery caps each instance at 1
+    /// and consumes its stack, and later passes mop up survivors or anything
+    /// a death effect summoned.
     /// </summary>
     private static void TickCombatKill()
     {
@@ -168,18 +183,18 @@ internal static class SmokeRunner
         if (combat is null || !combat.IsInProgress)
         {
             _combatHandled = false;
+            SolverClimb.ResetTurnNudge();
             return;
         }
-
-        if (_combatHandled)
-            return;
-        _combatHandled = true;
 
         var state = combat.DebugOnlyGetState()
                     ?? throw new InvalidOperationException("combat without state");
         var monsters = state.Enemies
             .Where(creature => !creature.IsDead)
             .ToArray();
+        if (monsters.Length == 0)
+            return;
+
         foreach (var monster in monsters)
         {
             _ = CreatureCmd.Damage(
@@ -189,7 +204,12 @@ internal static class SmokeRunner
                 ValueProp.Unblockable | ValueProp.Move,
                 null!);
         }
+        if (SolverClimb.IsRequested)
+            SolverClimb.NudgeTurnIfStalled(state);
 
+        if (_combatHandled)
+            return;
+        _combatHandled = true;
         Entry.Logger.Info($"[Smoke] killed {monsters.Length} monsters");
     }
 
