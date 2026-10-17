@@ -27,15 +27,18 @@ namespace SeedOracle.Smoke;
 /// <summary>
 /// Solver-guided climb harness for the card-value study. AutoSlay drives a
 /// seeded run with its official random handlers for every non-combat decision
-/// (random routes, random card takes); the outcome of every upcoming fight is
-/// decided by the Combat Solver pre-combat forecast of that exact fight from
-/// the live state at map time, the player is healed to full after every
-/// combat, and the run stops after the first act's boss. One JSON report per
-/// run lands in --climb-output.
+/// (random routes, random card takes); the outcome of every fight is decided
+/// by the Combat Solver pre-combat forecast of that exact fight from the live
+/// state. By default the player is healed to full after every combat (the
+/// label-collection mode); with --climb-no-heal the harness instead writes the
+/// projected loss into the live run before victory fires, so only legitimate
+/// healing (rest sites, Burning Blood, events) restores HP and a projected
+/// death ends the run. One JSON report per run lands in --climb-output.
 /// </summary>
 internal static class SolverClimb
 {
     private const string Arg = "--seed-oracle-solver-climb";
+    private static readonly bool NoHeal = CommandLineHelper.HasArg("climb-no-heal");
     private static readonly object Gate = new();
     private static readonly List<ClimbFightRow> Fights = [];
     private static RunState? _routeRun;
@@ -54,14 +57,48 @@ internal static class SolverClimb
     private static int _skippedUnknownNodes;
     private static int _unrecordedCombats;
     private static int _potionsDiscarded;
+    private static int _unmodeledLossFights;
     private static DateTime _startedUtc = DateTime.UtcNow;
+    private static bool _killGateClosed;
+    private static DateTime _killGateClosedAt;
+    private static int _gateFightKey = int.MinValue;
+    private static bool _gateReleasedForFight;
+    private static (int EntryHp, int Loss)? _pendingAttrition;
+    private static string? _pendingEncounterId;
+    private static int _encounterMismatches;
+    private static bool _nudgedThisFight;
+    private static string _outcome = "incomplete";
 
     internal static bool IsRequested => OS.GetCmdlineArgs().Any(argument => argument == Arg);
     private static string OutputDirectory =>
         Path.GetFullPath(CommandLineHelper.GetValue("climb-output") ?? "solver-climb");
 
-    /// <summary>Main-thread tick from <see cref="SmokeRunner"/>: full-heals the
-    /// player after every combat and stops the run after the act-1 boss.</summary>
+    /// <summary>
+    /// No-heal mode holds the harness kill until the solver's projected loss
+    /// has been written into the live run: the damage must land before victory
+    /// fires, otherwise the post-victory heal (Burning Blood) is computed from
+    /// the wrong HP. A gate that somehow outlives its fight releases after 90s
+    /// so a missed release can never deadlock the run.
+    /// </summary>
+    internal static bool ShouldHoldKill
+    {
+        get
+        {
+            if (!NoHeal || !_killGateClosed)
+                return false;
+            if (DateTime.UtcNow - _killGateClosedAt > TimeSpan.FromSeconds(90))
+            {
+                _killGateClosed = false;
+                Entry.Logger.Error("[SolverClimb] kill gate timed out; releasing");
+                return false;
+            }
+            return true;
+        }
+    }
+
+    /// <summary>Main-thread tick from <see cref="SmokeRunner"/>: applies the
+    /// no-heal attrition / full-heal cheat at combat edges and stops the run
+    /// after the act-1 boss.</summary>
     public static void TickCombatEdges()
     {
         if (_finished)
@@ -73,11 +110,42 @@ internal static class SolverClimb
                 return;
             _combatActive = true;
             _combatRecordedByClimb = false;
+            var startingRun = RunManager.Instance?.DebugOnlyGetState();
+            if (NoHeal && startingRun?.CurrentRoom?.RoomType
+                    is RoomType.Monster or RoomType.Elite or RoomType.Boss)
+            {
+                // A fight identity, not a frame edge, arms the gate: the frame
+                // loop can report the same fight as a fresh start after the
+                // gate was already released, and re-arming then would hold the
+                // kill forever. Live room types keep event combats ungated.
+                if (_gateFightKey != startingRun.TotalFloor)
+                {
+                    _gateFightKey = startingRun.TotalFloor;
+                    _gateReleasedForFight = false;
+                    _nudgedThisFight = false;
+                }
+                // Combat rooms are recorded by ClimbCombatAsync; this flag is
+                // set here too because an instant kill can end the fight
+                // before that handler runs, which would inflate the
+                // unrecorded-combat diagnostic.
+                _combatRecordedByClimb = true;
+                if (!_gateReleasedForFight)
+                {
+                    _killGateClosed = true;
+                    _killGateClosedAt = DateTime.UtcNow;
+                }
+            }
             return;
         }
 
         if (!_combatActive)
+        {
+            // Live death outside combat (an event or a bad choice can still
+            // kill the player once HP is no longer topped up).
+            if (NoHeal && CurrentPlayer() is { } player && !player.Creature.IsAlive)
+                Finish("died-outside-combat");
             return;
+        }
         _combatActive = false;
         ResetTurnNudge();
         var endedRun = RunManager.Instance?.DebugOnlyGetState();
@@ -86,8 +154,41 @@ internal static class SolverClimb
             : LocalContext.GetMe(endedRun) ?? endedRun.Players.FirstOrDefault();
         if (!_combatRecordedByClimb)
             Interlocked.Increment(ref _unrecordedCombats);
-        if (endedPlayer is not null)
+        if (NoHeal)
+        {
+            _killGateClosed = false;
+            _gateReleasedForFight = true;
+            if (_nudgedThisFight && _pendingAttrition is { } attrition && endedPlayer is not null)
+            {
+                // A tanky fight ended with the stall heal restored; re-apply
+                // the projected damage so that fight still costs HP.
+                ApplyAttrition(endedPlayer, attrition.EntryHp, attrition.Loss);
+                MarkLastRowNudged();
+            }
+            _pendingAttrition = null;
+        }
+        else if (endedPlayer is not null)
+        {
             endedPlayer.Creature.SetCurrentHpInternal(endedPlayer.Creature.MaxHp);
+        }
+    }
+
+    private static Player? CurrentPlayer()
+    {
+        var run = RunManager.Instance?.DebugOnlyGetState();
+        return run is null ? null : LocalContext.GetMe(run) ?? run.Players.FirstOrDefault();
+    }
+
+    private static void ApplyAttrition(Player player, int entryHp, int loss) =>
+        player.Creature.SetCurrentHpInternal(Math.Max(1, entryHp - loss));
+
+    private static void MarkLastRowNudged()
+    {
+        lock (Gate)
+        {
+            if (Fights.Count > 0)
+                Fights[^1].Nudged = true;
+        }
     }
 
     private static void MarkBossCombatEnded()
@@ -99,6 +200,23 @@ internal static class SolverClimb
     private static int _nudgedTurn;
 
     internal static void ResetTurnNudge() => _nudgedTurn = 0;
+
+    /// <summary>Every enemy is dead but the combat is still running: the
+    /// victory check needs a turn boundary, and nobody plays the player's
+    /// turns here. Ending the turn closes the room; with no monsters left
+    /// nothing can act and the HP the solver modelled stays untouched.</summary>
+    internal static void AdvanceEndedFight()
+    {
+        var player = CurrentPlayer();
+        if (player?.PlayerCombatState is not { Phase: PlayerTurnPhase.Play } combatState)
+            return;
+        if (combatState.TurnNumber <= _nudgedTurn)
+            return;
+        _nudgedTurn = combatState.TurnNumber;
+        MegaCrit.Sts2.Core.Commands.PlayerCmd.EndTurn(player, canBackOut: false);
+        Entry.Logger.Info(
+            $"[SolverClimb] ended turn {combatState.TurnNumber} to close a finished fight");
+    }
 
     /// <summary>Called each tick while a fight is still live: tanky powers
     /// (Hardened Shell caps per-turn HP loss, Slippery consumed one stack per
@@ -116,6 +234,7 @@ internal static class SolverClimb
         if (combatState.TurnNumber <= _nudgedTurn)
             return;
         _nudgedTurn = combatState.TurnNumber;
+        _nudgedThisFight = true;
         player.Creature.SetCurrentHpInternal(player.Creature.MaxHp);
         MegaCrit.Sts2.Core.Commands.PlayerCmd.EndTurn(player, canBackOut: false);
         Entry.Logger.Info(
@@ -126,10 +245,21 @@ internal static class SolverClimb
     {
         if (_finished || !_bossCombatEnded)
             return;
+        _ = run;
+        Finish("boss");
+    }
+
+    private static void Finish(string outcome)
+    {
+        if (_finished)
+            return;
         _finished = true;
+        _outcome = outcome;
         SeedOracleDispatcher.Post(() =>
         {
-            WriteReport(run, final: true);
+            var run = RunManager.Instance?.DebugOnlyGetState();
+            if (run is not null)
+                WriteReport(run, final: true);
             SmokeReport.Add(BuildSummaryLine());
             SmokeReport.Flush();
             NGame.Instance?.GetTree()?.Quit(0);
@@ -149,12 +279,16 @@ internal static class SolverClimb
                     return $"{group.Key}={group.Count()}/avg{Math.Round(losses.Average(), 1)}";
                 });
             return "solver-climb SUMMARY: "
+                + $"mode={(NoHeal ? "no-heal" : "heal")} "
                 + $"fights={Fights.Count} "
                 + string.Join(' ', parts)
                 + $" totalLoss={Fights.Sum(row => row.Loss ?? 0)} "
                 + $"deaths={Fights.Count(row => row.Death)} "
                 + $"unknownSkipped={_skippedUnknownNodes} unrecordedCombats={_unrecordedCombats} "
-                + $"boss={(_bossReached ? "reached" : "missing")}";
+                + $"unmodeledLoss={_unmodeledLossFights} encounterMismatches={_encounterMismatches} "
+                + $"boss={(_bossReached ? "reached" : "missing")} "
+                + $"outcome={_outcome} "
+                + $"runSeconds={Math.Round((DateTime.UtcNow - _startedUtc).TotalSeconds, 1)}";
         }
     }
 
@@ -171,7 +305,10 @@ internal static class SolverClimb
         [HarmonyPrefix]
         private static bool Prefix(NCharacterSelectButton __instance)
         {
-            if (!SolverClimb.IsRequested || !AutoSlayer.IsActive || _redirecting)
+            // Both headless harnesses need the study character; the lab is a
+            // separate mode, so it must opt into the same pin.
+            if ((!SolverClimb.IsRequested && !DecisionLab.IsRequested)
+                || !AutoSlayer.IsActive || _redirecting)
                 return true;
             if (__instance.Character?.Id.Entry.Equals("IRONCLAD", StringComparison.OrdinalIgnoreCase) == true)
                 return true;
@@ -281,7 +418,10 @@ internal static class SolverClimb
     }
 
     /// <summary>Runs once per map decision: strip potions so solver losses stay
-    /// attributable to deck and relics, then forecast the exact next fight.</summary>
+    /// attributable to deck and relics, then forecast the next fight. Unknown
+    /// rooms are forecast too when the route predictor resolves them to a
+    /// combat; the caller cross-checks the live encounter before applying any
+    /// loss.</summary>
     private static void PrepareForChosen(RunState run, MapPoint point)
     {
         var player = LocalContext.GetMe(run) ?? run.Players.FirstOrDefault();
@@ -289,14 +429,18 @@ internal static class SolverClimb
             return;
         var heldPotions = player.Potions.Count();
         foreach (var potion in player.Potions.ToArray())
-            player.DiscardPotionInternal(potion, silent: true);
-        Interlocked.Exchange(ref _potionsDiscarded, heldPotions);
-        _startedUtc = _startedUtc == default ? DateTime.UtcNow : _startedUtc;
-
-        if (point.PointType is not (MapPointType.Monster or MapPointType.Elite or MapPointType.Boss))
         {
-            if (point.PointType == MapPointType.Unknown)
-                Interlocked.Increment(ref _skippedUnknownNodes);
+            // The sanctioned discard path: a silent internal discard leaves
+            // the belt UI holding a stale node, and the next potion procured
+            // into that slot crashes the shop ("Slot already contains a
+            // potion"). This records history and refreshes the UI.
+            _ = MegaCrit.Sts2.Core.Commands.PotionCmd.Discard(potion);
+        }
+        Interlocked.Exchange(ref _potionsDiscarded, heldPotions);
+
+        if (point.PointType is not (MapPointType.Monster or MapPointType.Elite or MapPointType.Boss
+            or MapPointType.Unknown))
+        {
             return;
         }
 
@@ -304,15 +448,21 @@ internal static class SolverClimb
         var worldline = RouteWorldlinePredictor.Predict(run, point, [path]).Single();
         if (worldline.TargetEncounter is not { } encounter
             || worldline.TargetRoomType is not (RoomType.Monster or RoomType.Elite or RoomType.Boss))
+        {
+            if (point.PointType == MapPointType.Unknown)
+                Interlocked.Increment(ref _skippedUnknownNodes);
             return;
+        }
 
         var maxHp = player.Creature.MaxHp;
         var pending = new TaskCompletionSource<CombatSolverForecastResult>(
             TaskCreationOptions.RunContinuationsAsynchronously);
         _pendingForecast = pending;
+        _pendingEncounterId = encounter.Id.Entry;
         SeedOracleDispatcher.Post(() =>
         {
-            _ = DispatchForecastAsync(run, encounter, worldline.TargetRoomType, point, maxHp, pending);
+            _ = DispatchForecastAsync(run, encounter, worldline.TargetRoomType, point,
+                NoHeal ? null : maxHp, pending);
         });
     }
 
@@ -321,7 +471,7 @@ internal static class SolverClimb
         EncounterModel encounter,
         RoomType roomType,
         MapPoint point,
-        int maxHp,
+        int? hpOverride,
         TaskCompletionSource<CombatSolverForecastResult> pending)
     {
         CombatSolverForecastResult result;
@@ -341,7 +491,7 @@ internal static class SolverClimb
                     SearchBudgetMilliseconds: 8_000,
                     OverallTimeoutMilliseconds: 60_000,
                     MaxDegreeOfParallelism: null,
-                    PlayerCurrentHpOverride: maxHp,
+                    PlayerCurrentHpOverride: hpOverride,
                     ForceRefresh: true,
                     CloseWorkerAfterRequest: false,
                     WorkerIdleTimeoutMilliseconds: 120_000)).ConfigureAwait(false);
@@ -382,11 +532,13 @@ internal static class SolverClimb
         var run = RunManager.Instance.DebugOnlyGetState()
                   ?? throw new InvalidOperationException("solver climb: run state missing at combat");
         var player = LocalContext.GetMe(run) ?? run.Players.First();
-        var encounterId = CombatManager.Instance.DebugOnlyGetState()?.Encounter?.Id.Entry ?? "?";
+        var encounter = CombatManager.Instance.DebugOnlyGetState()?.Encounter;
+        var encounterId = encounter?.Id.Entry ?? "?";
         var act = run.CurrentActIndex;
         var floor = run.ActFloor;
         var coord = run.CurrentMapCoord ?? default;
         var roomType = run.CurrentRoom?.RoomType ?? RoomType.Unassigned;
+        var isCombatRoom = roomType is RoomType.Monster or RoomType.Elite or RoomType.Boss;
         var hpEntry = player.Creature.CurrentHp;
         var maxHp = player.Creature.MaxHp;
         _combatRecordedByClimb = true;
@@ -395,6 +547,7 @@ internal static class SolverClimb
 
         CombatSolverForecastResult? forecast = null;
         var pending = Interlocked.Exchange(ref _pendingForecast, null);
+        var predictedEncounterId = Interlocked.Exchange(ref _pendingEncounterId, null);
         if (pending is not null)
         {
             AutoSlayer.CurrentWatchdog?.Reset("solver climb: waiting for combat solver forecast");
@@ -405,6 +558,24 @@ internal static class SolverClimb
                 : new CombatSolverForecastResult(
                     false, "TimedOut", null, [], null, null, null, null, null, null,
                     "harness stopped waiting for the solver");
+            if (forecast.IsSuccess && predictedEncounterId is { } predicted
+                                   && !predicted.Equals(encounterId, StringComparison.Ordinal))
+            {
+                // The forecast describes a different fight than the one that
+                // started; its loss must not be applied to this combat.
+                Interlocked.Increment(ref _encounterMismatches);
+                forecast = new CombatSolverForecastResult(
+                    false, "EncounterMismatch", null, [], null, null, null, null, null, null,
+                    $"forecast for {predicted}, entered {encounterId}");
+            }
+        }
+        else if (isCombatRoom)
+        {
+            // v5 captures live state and refuses to run during a combat, so a
+            // fight that reached the room without a map-time forecast (an
+            // unresolved room, or a failed prediction) stays unmodeled.
+            Entry.Logger.Info(
+                $"[SolverClimb] no forecast for {coord} ({encounterId}); the fight costs no HP");
         }
 
         var row = new ClimbFightRow
@@ -433,26 +604,76 @@ internal static class SolverClimb
             TotalMs = forecast?.TotalElapsedMilliseconds,
             Death = (forecast?.FinalHp ?? 1) <= 0
         };
+
+        if (NoHeal && isCombatRoom)
+        {
+            var loss = forecast?.ProjectedHpLoss;
+            var projectedFinal = forecast?.FinalHp ?? (loss is { } value ? hpEntry - value : (int?)null);
+            if (loss is null)
+            {
+                // No model for this fight; it cannot cost HP. Release the gate
+                // and record the gap instead of guessing.
+                Interlocked.Increment(ref _unmodeledLossFights);
+                row.SolverStatus = forecast?.Status ?? "no-forecast";
+            }
+            else if (projectedFinal is <= 0)
+            {
+                row.Death = true;
+                lock (Gate)
+                {
+                    Fights.Add(row);
+                    WriteReport(run, final: true);
+                }
+                SmokeReport.Add(FormatFightLine(row));
+                Entry.Logger.Info(
+                    $"[SolverClimb] projected death at {row.Coord} ({row.EncounterId}): "
+                    + $"hp {hpEntry}/{maxHp}, loss {loss}");
+                Finish($"died");
+                return;
+            }
+            else
+            {
+                // The damage must land before victory fires so the
+                // post-victory heal is computed from the reduced HP.
+                ApplyAttrition(player, hpEntry, loss.Value);
+                _pendingAttrition = (hpEntry, loss.Value);
+            }
+            _killGateClosed = false;
+            _gateReleasedForFight = true;
+        }
+
         lock (Gate)
         {
             Fights.Add(row);
             WriteReport(run, final: false);
         }
-        SmokeReport.Add(
-            $"climb fight act={row.Act} floor={row.Floor} coord={row.Coord} room={row.RoomType} "
-            + $"encounter={row.EncounterId} deck={row.DeckSize} gold={row.Gold} "
-            + $"hpEntry={row.HpEntry}/{row.MaxHp} loss={row.Loss?.ToString() ?? "-"} "
-            + $"finalHp={row.FinalHp?.ToString() ?? "-"} turn={row.EndTurn?.ToString() ?? "-"} "
-            + $"confidence={row.Confidence ?? "-"} status={row.SolverStatus} "
-            + $"error={row.SolverError ?? "-"}");
+        SmokeReport.Add(FormatFightLine(row));
 
         AutoSlayer.CurrentWatchdog?.Reset("solver climb: waiting for combat end");
         await WaitHelper.Until(
             () => CombatManager.Instance is null || !CombatManager.Instance.IsInProgress,
             ct, TimeSpan.FromMinutes(3), "solver climb: combat did not end").ConfigureAwait(false);
+        if (NoHeal && isCombatRoom)
+        {
+            var settledHp = CurrentPlayer()?.Creature.CurrentHp;
+            lock (Gate)
+            {
+                row.HpExit = settledHp;
+                WriteReport(run, final: false);
+            }
+        }
         if (act == 0 && roomType == RoomType.Boss)
             FinishFromCombat(run);
     }
+
+    private static string FormatFightLine(ClimbFightRow row) =>
+        $"climb fight act={row.Act} floor={row.Floor} coord={row.Coord} room={row.RoomType} "
+        + $"encounter={row.EncounterId} deck={row.DeckSize} gold={row.Gold} "
+        + $"hpEntry={row.HpEntry}/{row.MaxHp} loss={row.Loss?.ToString() ?? "-"} "
+        + $"finalHp={row.FinalHp?.ToString() ?? "-"} "
+        + $"hpExit={row.HpExit?.ToString() ?? "-"} turn={row.EndTurn?.ToString() ?? "-"} "
+        + $"confidence={row.Confidence ?? "-"} status={row.SolverStatus} "
+        + $"error={row.SolverError ?? "-"}";
 
     private static void WriteReport(RunState run, bool final)
     {
@@ -470,6 +691,9 @@ internal static class SolverClimb
                 Character = run.Players.FirstOrDefault()?.Character.Id.Entry ?? "?",
                 StartedAtUtc = _startedUtc,
                 Final = final,
+                Mode = NoHeal ? "no-heal" : "heal",
+                Outcome = _outcome,
+                RunSeconds = Math.Round((DateTime.UtcNow - _startedUtc).TotalSeconds, 1),
                 Fights = snapshot
             };
             var path = Path.Combine(OutputDirectory, "climb.json");
@@ -495,7 +719,8 @@ internal sealed class ClimbFightRow
     public string[] Deck { get; set; } = [];
     public string[] Relics { get; set; } = [];
     public int Gold { get; set; }
-    public int HpEntry { get; set; }
+    public int? HpEntry { get; set; }
+    public int? HpExit { get; set; }
     public int MaxHp { get; set; }
     public int PotionsDiscarded { get; set; }
     public int? Loss { get; set; }
@@ -507,6 +732,11 @@ internal sealed class ClimbFightRow
     public double? SearchMs { get; set; }
     public double? TotalMs { get; set; }
     public bool Death { get; set; }
+
+    /// <summary>True when a damage-capping power stalled the kill long enough
+    /// for the turn nudge to fire; the projected loss was re-applied after the
+    /// fight so those rows under-count nothing, but they miss the heal.</summary>
+    public bool Nudged { get; set; }
 }
 
 internal sealed class ClimbReport
@@ -515,5 +745,8 @@ internal sealed class ClimbReport
     public string Character { get; set; } = "";
     public DateTime StartedAtUtc { get; set; }
     public bool Final { get; set; }
+    public string Mode { get; set; } = "";
+    public string Outcome { get; set; } = "incomplete";
+    public double RunSeconds { get; set; }
     public List<ClimbFightRow> Fights { get; set; } = [];
 }

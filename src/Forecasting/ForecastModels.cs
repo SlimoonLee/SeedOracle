@@ -6,6 +6,9 @@ using MegaCrit.Sts2.Core.Entities.Rewards;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Rewards;
 using MegaCrit.Sts2.Core.Rooms;
+using MegaCrit.Sts2.Core.Saves;
+using MegaCrit.Sts2.Core.Saves.Runs;
+using System.Text.Json;
 using SeedOracle.Api;
 
 namespace SeedOracle.Forecasting;
@@ -66,7 +69,8 @@ internal sealed record ForecastItemDetails(
     ForecastItemKind Kind,
     ForecastItemRarity Rarity = ForecastItemRarity.None,
     string? ImagePath = null,
-    bool IsUpgraded = false)
+    bool IsUpgraded = false,
+    string? StateKey = null)
 {
     public static ForecastItemDetails Text(string text) =>
         new(null, text, ForecastItemKind.Text);
@@ -78,7 +82,10 @@ internal sealed record ForecastItemDetails(
             ForecastItemKind.Card,
             CardRarityOf(card.Rarity),
             card.PortraitPath,
-            card.IsUpgraded);
+            card.IsUpgraded,
+            card.IsMutable
+                ? JsonSerializer.Serialize(card.ToSerializable(), JsonSerializationUtility.GetTypeInfo<SerializableCard>())
+                : null);
 
     public static ForecastItemDetails Relic(RelicModel relic) =>
         new(
@@ -130,16 +137,32 @@ internal sealed record ForecastItemDetails(
     };
 }
 
-internal sealed record EventPredictionSetDetails(IReadOnlyList<ForecastItemDetails> Items);
+internal enum EventPredictionKind
+{
+    PartialPreview,
+    ChoiceCandidates,
+    SequencePreview,
+    CardRewardCandidates,
+    CombatVictoryConditional
+}
+
+internal sealed record EventPredictionSetDetails(
+    IReadOnlyList<ForecastItemDetails> Items,
+    EventPredictionKind Kind = EventPredictionKind.PartialPreview,
+    ForecastItemDetails? SourceCard = null,
+    int SourceDeckIndex = -1,
+    int Position = 0);
 
 internal sealed record EventOptionPredictionDetails(
     string Option,
     string TextKey,
     IReadOnlyList<ForecastItemDetails> InitialItems,
-    IReadOnlyList<EventPredictionSetDetails> Sets);
+    IReadOnlyList<EventPredictionSetDetails> Sets,
+    bool HasPredictedEffects = true);
 
 internal sealed record EventContentDetails(
-    IReadOnlyList<EventOptionPredictionDetails> Options);
+    IReadOnlyList<EventOptionPredictionDetails> Options,
+    int UncoveredOptionCount = 0);
 
 internal sealed record MonsterHpDetails(string Monster, int Hp);
 
@@ -159,7 +182,27 @@ internal sealed record MerchantInventoryForecast(
     IReadOnlyList<MerchantItemForecast> Relics,
     IReadOnlyList<MerchantItemForecast> Potions,
     int CardRemovalCost,
-    int FutureVisitOrdinal);
+    int FutureVisitOrdinal)
+{
+    public string? ReferenceCondition { get; init; }
+    public int ReferenceCaseCount { get; init; } = 1;
+    public IReadOnlyList<ForecastChoicePath> ReferenceChoicePaths { get; init; } = [];
+    public IReadOnlyList<MerchantChoiceBranch> ChoiceBranches { get; init; } = [];
+    public IReadOnlyList<string> UnresolvedChoices { get; init; } = [];
+    public bool ChoicesTruncated { get; init; }
+}
+
+internal sealed record MerchantChoiceBranch(string Condition, MerchantInventoryForecast Inventory)
+{
+    public int CaseCount { get; init; } = 1;
+    public IReadOnlyList<ForecastChoicePath> ChoicePaths { get; init; } = [];
+}
+
+internal sealed record RewardChoiceBranch<T>(string Condition, T Outcome)
+{
+    public int CaseCount { get; init; } = 1;
+    public IReadOnlyList<ForecastChoicePath> ChoicePaths { get; init; } = [];
+}
 
 internal sealed record RewardItemDetails(ForecastItemDetails Item)
 {
@@ -180,7 +223,13 @@ internal sealed record CardRewardStepDetails(
 internal sealed record CombatCardRewardGroup(IReadOnlyList<CardRewardStepDetails> Steps)
 {
     public IReadOnlyList<RewardItemDetails> Cards => Steps[^1].Cards;
+    public bool ChoiceComplete { get; init; }
 }
+
+internal sealed record CombatRewardPossibility(
+    int HuntTriggers,
+    IReadOnlyList<int> RerollOrder,
+    IReadOnlyList<CombatCardRewardGroup> Groups);
 
 internal sealed record RewardResourceDelta(int Gold, int Cards, int Relics, int Potions, int Hp);
 
@@ -193,11 +242,18 @@ internal sealed record CombatRewardDetails(
     internal IReadOnlyList<CardReward> NativeCardRewards { get; init; } = [];
     internal IReadOnlyList<Reward> NativeRewards { get; init; } = [];
     internal IReadOnlyList<CardReward> OriginalCardRewards { get; init; } = [];
+    internal EncounterModel? NativeEncounter { get; init; }
     internal RewardResourceDelta? AppliedDelta { get; init; }
+    public IReadOnlyList<CombatRewardPossibility> Possibilities { get; init; } = [];
+    public bool PossibilitiesTruncated { get; init; }
+    public int? HuntPreviewLimit { get; init; }
+    public string? ReferenceCondition { get; init; }
+    public IReadOnlyList<ForecastChoicePath> ReferenceChoicePaths { get; init; } = [];
+    public IReadOnlyList<RewardChoiceBranch<CombatRewardDetails>> ChoiceBranches { get; init; } = [];
 
     internal CombatRewardDetails Detach() => this with
     {
-        NativeRewards = [], NativeCardRewards = [], OriginalCardRewards = []
+        NativeRewards = [], NativeCardRewards = [], OriginalCardRewards = [], NativeEncounter = null
     };
 
     public void Dispose()
@@ -216,7 +272,12 @@ internal sealed record CombatRewardDetails(
 internal sealed record TreasureRoomDetails(
     int Gold,
     IReadOnlyList<RewardItemDetails> Relics,
-    bool IsEmpty);
+    bool IsEmpty)
+{
+    public string? ReferenceCondition { get; init; }
+    public IReadOnlyList<ForecastChoicePath> ReferenceChoicePaths { get; init; } = [];
+    public IReadOnlyList<RewardChoiceBranch<TreasureRoomDetails>> ChoiceBranches { get; init; } = [];
+}
 
 internal sealed record RouteVariantForecast(
     IReadOnlyList<RouteChoice> Route,
@@ -249,7 +310,11 @@ internal sealed record MapNodeForecast(
     Forecast<IReadOnlyList<MonsterHpDetails>>? MonsterHp,
     Forecast<MerchantInventoryForecast>? Merchant,
     IReadOnlyList<RouteVariantForecast> RouteVariants,
-    bool RoutesTruncated);
+    bool RoutesTruncated)
+{
+    public int DetailRoutesComputed { get; init; }
+    public bool DetailsTruncated { get; init; }
+}
 
 internal sealed record GeneratedEncounter(
     EncounterModel Source,

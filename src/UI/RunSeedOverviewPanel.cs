@@ -2,10 +2,13 @@ using Godot;
 using HarmonyLib;
 using MegaCrit.Sts2.Core.Helpers;
 using MegaCrit.Sts2.Core.Localization.Fonts;
+using MegaCrit.Sts2.Core.Localization;
 using MegaCrit.Sts2.Core.Nodes;
 using MegaCrit.Sts2.Core.Nodes.Screens.Map;
+using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.addons.mega_text;
 using SeedOracle.Forecasting;
+using SeedOracle.Validation;
 
 namespace SeedOracle.UI;
 
@@ -23,6 +26,11 @@ internal sealed partial class RunSeedOverviewControl : PanelContainer
     private readonly HBoxContainer _row;
     private readonly List<ActCard> _cards = [];
     private int _estimatedBodyLineCount;
+    private RunState? _run;
+    private RunState? _preparedRun;
+    private LiveFingerprint? _preparedState;
+    private string? _preparedLanguage;
+    internal int PreparationCount { get; private set; }
 
     internal int DisplayedActCount { get; private set; }
 
@@ -104,6 +112,32 @@ internal sealed partial class RunSeedOverviewControl : PanelContainer
         }
 
         QueueRenderedContentResize();
+    }
+
+    internal void BindRun(RunState run)
+    {
+        _run = run;
+        if (Visible)
+            ShowPrepared();
+    }
+
+    internal void ShowPrepared()
+    {
+        if (_run is { } run)
+        {
+            var state = LiveFingerprint.Capture(run);
+            if (!ReferenceEquals(run, _preparedRun) || _preparedState is null
+                || _preparedState.DescribeDifference(state) is not null
+                || _preparedLanguage != LocManager.Instance?.Language)
+            {
+                Configure(RunSeedOverviewPredictor.Predict(run));
+                PreparationCount++;
+                _preparedRun = run;
+                _preparedState = state;
+                _preparedLanguage = LocManager.Instance?.Language;
+            }
+        }
+        Visible = true;
     }
 
     private void QueueRenderedContentResize()
@@ -315,7 +349,10 @@ internal sealed partial class RunSeedOverviewToggleButton : Button
     internal void Bind(RunSeedOverviewControl panel, bool expanded)
     {
         _panel = panel;
-        _panel.Visible = expanded;
+        if (expanded)
+            _panel.ShowPrepared();
+        else
+            _panel.Visible = false;
         ApplyState(expanded);
     }
 
@@ -334,7 +371,10 @@ internal sealed partial class RunSeedOverviewToggleButton : Button
             PreCombatForecastPanel.CollapseSafely();
             RoutePlanPanel.CollapseSafely();
         }
-        _panel.Visible = expanded;
+        if (expanded)
+            _panel.ShowPrepared();
+        else
+            _panel.Visible = false;
         ApplyState(expanded);
         RunSeedOverviewPanel.RememberExpanded(expanded);
     }
@@ -393,7 +433,7 @@ internal static class RunSeedOverviewPanel
             topBar.AddChild(toggle);
         }
 
-        panel.Configure(RunSeedOverviewPredictor.Predict(screen._runState));
+        panel.BindRun(screen._runState);
         toggle.Bind(panel, _isExpanded);
         toggle.Visible = screen.IsOpen;
         _currentPanel = panel;

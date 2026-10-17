@@ -3,11 +3,12 @@ using HarmonyLib;
 using MegaCrit.Sts2.Core.HoverTips;
 using MegaCrit.Sts2.Core.Map;
 using MegaCrit.Sts2.Core.Nodes;
+using MegaCrit.Sts2.Core.Nodes.GodotExtensions;
 using MegaCrit.Sts2.Core.Nodes.HoverTips;
 using MegaCrit.Sts2.Core.Nodes.Screens.Map;
 using MegaCrit.Sts2.Core.Runs;
 using SeedOracle.Validation;
-using STS2RitsuLib;
+using SeedOracle.Forecasting;
 
 namespace SeedOracle.UI;
 
@@ -17,11 +18,13 @@ internal static class NMapPointOnFocusPatch
     [HarmonyPostfix]
     [HarmonyPriority(Priority.Last)]
     private static void Postfix(NMapPoint __instance)
-        => Render(__instance);
+        => MapForecastHover.Request(__instance);
 
-    internal static void Render(NMapPoint __instance)
+    internal static void Render(NMapPoint __instance, MapNodeForecast? cachedForecast = null)
     {
+        MapForecastHover.Cancel();
         RouteNodeMarkerOverlay.ClearAll();
+        ForecastTooltipPaging.Clear();
         if (!MapForecastDisplay.Enabled)
             return;
         if (__instance.State == MapPointState.Traveled || __instance._runState is not RunState run)
@@ -29,7 +32,7 @@ internal static class NMapPointOnFocusPatch
 
         try
         {
-            var forecast = PredictionPurityGuard.Execute(
+            var forecast = cachedForecast ?? PredictionPurityGuard.Execute(
                 run,
                 $"map:{__instance.Point.coord}",
                 () => Entry.MapForecasts.Predict(run, __instance.Point, __instance._screen.IsTravelEnabled));
@@ -49,28 +52,7 @@ internal static class NMapPointOnFocusPatch
             if (!RoutePlanPanel.IsPlanMode)
                 RouteNodeMarkerOverlay.Show(__instance, content.RouteMarkers, content.RouteLines);
 
-            if (HoverTipHelper.AddTipToOwner(
-                    __instance,
-                    content.Title,
-                    content.Descriptions[0]))
-            {
-                foreach (var description in content.Descriptions.Skip(1))
-                    HoverTipHelper.AddTipToOwner(__instance, content.Title, description);
-                MapHoverTipPresentation.Finalize(__instance);
-                return;
-            }
-
-            var tips = content.Descriptions.Select((description, index) =>
-                (IHoverTip)new HoverTip(run.Act.Title, description)
-                {
-                    Title = content.Title,
-                    Id = $"{Entry.ModId}:{__instance.Point.coord}:{index}"
-                });
-            var tipSet = NHoverTipSet.CreateAndShow(
-                __instance,
-                tips,
-                HoverTip.GetHoverTipAlignment(__instance));
-            MapHoverTipPresentation.Finalize(__instance, tipSet);
+            ForecastTooltipPaging.Show(__instance, content);
         }
         catch (Exception exception)
         {
@@ -78,6 +60,14 @@ internal static class NMapPointOnFocusPatch
             Entry.ReportPredictionFailure(__instance.Point, exception);
         }
     }
+}
+
+[HarmonyPatch(typeof(NClickableControl), nameof(NClickableControl._GuiInput))]
+internal static class ForecastTooltipPagingInputPatch
+{
+    [HarmonyPrefix]
+    private static bool Prefix(NClickableControl __instance, InputEvent inputEvent) =>
+        __instance is not NMapPoint point || !ForecastTooltipPaging.HandleInput(point, inputEvent);
 }
 
 internal static class MapHoverTipPresentation
@@ -104,6 +94,7 @@ internal static class MapHoverTipPresentation
 
     internal static void HideForecastTip()
     {
+        ForecastTooltipPaging.Clear();
         if (_forecastOwner?.TryGetTarget(out var owner) == true
             && _forecastTipSet?.TryGetTarget(out var tipSet) == true
             && NHoverTipSet._activeHoverTips.TryGetValue(owner, out var active)
@@ -215,5 +206,9 @@ internal static class MapHoverTipPresentation
 internal static class NMapScreenCleanUpPatch
 {
     [HarmonyPrefix]
-    private static void Prefix() => RouteNodeMarkerOverlay.ClearAll();
+    private static void Prefix()
+    {
+        RouteNodeMarkerOverlay.ClearAll();
+        ForecastTooltipPaging.Clear();
+    }
 }

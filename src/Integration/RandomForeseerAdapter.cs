@@ -15,6 +15,11 @@ using MegaCrit.Sts2.Core.Saves;
 using SeedOracle.Api;
 using SeedOracle.Forecasting;
 
+// Godot 4.5's assembly added Godot.MethodInfo/PropertyInfo, which otherwise
+// collide with the reflection types this adapter resolves at load time.
+using MethodInfo = System.Reflection.MethodInfo;
+using PropertyInfo = System.Reflection.PropertyInfo;
+
 namespace SeedOracle.Integration;
 
 internal sealed partial class RandomForeseerAdapter : IRandomForeseerAdapter

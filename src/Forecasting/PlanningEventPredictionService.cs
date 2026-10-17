@@ -210,6 +210,8 @@ internal sealed class PlanningEventPredictionService
                 CardRewardChoices = rewardChoice.CardRewardChoices
                     .Where(pick => pick.BundleIndex >= groupOffset)
                     .Select(pick => pick with { BundleIndex = pick.BundleIndex - groupOffset }).ToArray(),
+                ActionOrder = rewardChoice.OrderedActions.Where(action => action.GroupIndex >= groupOffset)
+                    .Select(action => action with { GroupIndex = action.GroupIndex - groupOffset }).ToArray(),
                 PotionChoice = rewardChoice.PotionChoice is { } potions
                     ? potions with { TakenPotions = potions.TakenPotions
                         .Where(index => index >= potionOffset).Select(index => index - potionOffset).ToArray() }
@@ -222,7 +224,8 @@ internal sealed class PlanningEventPredictionService
                 resolvedRewards.Potions.Concat(applied.Potions).ToArray(),
                 resolvedRewards.Relics.Concat(applied.Relics).ToArray()) { AppliedDelta = applied.AppliedDelta };
         }
-        using (var generated = planning.GenerateCombatRewards(state, encounter.RoomType, encounter, room))
+        using (var generated = planning.GenerateCombatRewards(state, encounter.RoomType, encounter, room,
+                   rewardChoice.HuntTriggers))
             ApplyRewards(generated);
 
         if (outcome.CombatShouldResumeAfterCombat)
@@ -789,6 +792,15 @@ internal sealed class PlanningEventPredictionService
                 Error = exception.GetBaseException().Message
             };
         }
+    }
+
+    internal static bool MatchesCurrentInitialPage(
+        PlanningPredictionService.State state, CurrentEventChoiceContext current)
+    {
+        using var isolation = ShadowIsolation.Enter(state.Player, automateRewards: true);
+        InitShadowEventOn(state.Run, state.Player, current.Canonical, out var model);
+        return model.CurrentOptions.Select(option => option.TextKey).SequenceEqual(current.OptionKeys)
+               && model.Rng.ToSerializable().counter == current.RngCounter;
     }
 
     private static void InitShadowEventOn(

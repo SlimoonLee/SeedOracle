@@ -62,7 +62,10 @@ internal sealed record CombatSimulationReference(
     int TargetFloor,
     int TargetColumn);
 
-internal sealed record CardRewardPick(int CardIndex = -1, ModelId? CardId = null, string? AlternativeId = null);
+internal sealed record CardRewardPick(int CardIndex = -1, ModelId? CardId = null,
+    string? AlternativeId = null, string? CardStateKey = null);
+
+internal sealed record CardRewardAction(int GroupIndex, int StepIndex);
 
 /// <summary>
 /// A player intent recorded on one planned room. Choices never touch live
@@ -91,20 +94,39 @@ internal abstract record RoutePlanChoice
         bool TakeRelic) : RoutePlanChoice
     {
         public CombatSimulationReference? SimulationReference { get; init; }
+        public int HuntTriggers { get; init; }
+        public IReadOnlyList<CardRewardAction> ActionOrder { get; init; } = [];
 
         internal CardReward ChoiceForGroup(int groupIndex) =>
             CardRewardChoices.FirstOrDefault(choice => choice.BundleIndex == groupIndex)
             ?? new CardReward(groupIndex, []);
 
-        internal Combat WithCardRewardChoice(CardReward choice) =>
-            this with
+        internal IReadOnlyList<CardRewardAction> OrderedActions => ActionOrder.Count > 0
+            ? ActionOrder
+            : CardRewardChoices.OrderBy(c => c.BundleIndex)
+                .SelectMany(c => c.Steps.Select((_, step) => new CardRewardAction(c.BundleIndex, step))).ToArray();
+
+        internal Combat WithCardRewardChoice(CardReward choice)
+        {
+            var previous = ChoiceForGroup(choice.BundleIndex).Steps;
+            var common = 0;
+            while (common < previous.Count && common < choice.Steps.Count
+                   && previous[common] == choice.Steps[common])
+                common++;
+            var order = OrderedActions
+                .Where(action => action.GroupIndex != choice.BundleIndex || action.StepIndex < common)
+                .Concat(Enumerable.Range(common, choice.Steps.Count - common)
+                    .Select(step => new CardRewardAction(choice.BundleIndex, step))).ToArray();
+            return this with
             {
+                ActionOrder = order,
                 CardRewardChoices = CardRewardChoices
                     .Where(existing => existing.BundleIndex != choice.BundleIndex)
                     .Append(choice)
                     .OrderBy(existing => existing.BundleIndex)
                     .ToArray()
             };
+        }
     }
 
     internal sealed record Merchant(IReadOnlyList<MerchantPick> Picks, bool RemoveCard) : RoutePlanChoice;

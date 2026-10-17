@@ -2,6 +2,8 @@ using MegaCrit.Sts2.Core.Map;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Runs;
+using MegaCrit.Sts2.Core.Saves;
+using SeedOracle.Validation;
 
 namespace SeedOracle.Forecasting;
 
@@ -10,19 +12,54 @@ internal static class RouteWorldlinePredictor
     public static IReadOnlyList<RouteWorldline> Predict(
         RunState run,
         MapPoint target,
-        IReadOnlyList<RoutePath> paths)
+        IReadOnlyList<RoutePath> paths,
+        bool firstCombatOnly = false,
+        Func<bool>? canContinue = null,
+        bool forceShadow = false)
     {
+        using var workSample = ForecastWorkProfile.Measure("worldlines");
         var results = new List<RouteWorldline>(paths.Count);
+        if (paths.Count == 0)
+            return results;
+        SerializableRun? snapshot = null;
         foreach (var path in paths)
-            results.Add(PredictPath(run, target, path));
+        {
+            if (results.Count > 0 && canContinue?.Invoke() == false)
+                break;
+            var needsShadow = forceShadow || path.Steps.Any(step => step.Point.PointType is MapPointType.Unknown or MapPointType.Ancient);
+            if (needsShadow)
+                snapshot ??= PlanningPredictionService.CreateSerializableRun(run);
+            var prediction = needsShadow
+                ? PredictPath(run, target, path, snapshot!, firstCombatOnly)
+                : PredictFixedPath(run, target, path, firstCombatOnly);
+            if (prediction is { } result)
+                results.Add(result);
+        }
         return results;
     }
 
-    private static RouteWorldline PredictPath(RunState run, MapPoint target, RoutePath path)
+    private static RouteWorldline? PredictFixedPath(RunState run, MapPoint target, RoutePath path, bool firstCombatOnly)
     {
-        var listeners = PredictionHookSnapshot.CloneListeners(run);
-        var unknowns = new UnknownMapPointSimulation(run, listeners);
-        var events = new EventQueueSimulation(run, listeners);
+        var rooms = path.Steps.Select(step => ToRoomType(step.Point.PointType)).ToArray();
+        var prior = rooms.SkipLast(1).ToArray();
+        if (firstCombatOnly && prior.Any(room => room.IsCombatRoom() || room == RoomType.Event))
+            return null;
+        var type = rooms[^1];
+        return new RouteWorldline(path, BuildRouteChoices(run, path), type, null,
+            type.IsCombatRoom() ? SelectEncounter(run, target, type,
+                prior.Count(room => room == RoomType.Monster), prior.Count(room => room == RoomType.Elite),
+                prior.Count(room => room == RoomType.Boss)) : null,
+            type == RoomType.Shop ? prior.Count(room => room == RoomType.Shop) + 1 : 0,
+            rooms, prior.Any(room => room is not (RoomType.Map or RoomType.Unassigned)));
+    }
+
+    private static RouteWorldline? PredictPath(
+        RunState run, MapPoint target, RoutePath path, SerializableRun snapshot, bool firstCombatOnly)
+    {
+        var shadow = PlanningPredictionService.RestoreRun(snapshot);
+        var listeners = shadow.IterateHookListeners(null).ToArray();
+        var unknowns = new UnknownMapPointSimulation(shadow, listeners);
+        var events = new EventQueueSimulation(shadow, listeners);
         var normalEncountersBefore = 0;
         var eliteEncountersBefore = 0;
         var bossEncountersBefore = 0;
@@ -34,11 +71,15 @@ internal static class RouteWorldlinePredictor
         for (var index = 0; index < path.Steps.Count; index++)
         {
             var point = path.Steps[index].Point;
+            shadow.ActFloor = point.coord.row + 1;
             var roomType = point.PointType == MapPointType.Unknown
                 ? unknowns.Roll(point, previousRoomWasShop)
                 : ToRoomType(point.PointType);
             resolvedRooms.Add(roomType);
             var isTarget = index == path.Steps.Count - 1;
+            if (!isTarget && firstCombatOnly
+                && roomType is RoomType.Monster or RoomType.Elite or RoomType.Boss or RoomType.Event)
+                return null;
 
             if (isTarget)
             {
@@ -68,6 +109,7 @@ internal static class RouteWorldlinePredictor
                     hasUnmodeledStateDependency);
             }
 
+            ModelId? roomId = null;
             switch (roomType)
             {
                 case RoomType.Monster:
@@ -83,9 +125,13 @@ internal static class RouteWorldlinePredictor
                     shopsBefore++;
                     break;
                 case RoomType.Event when point.PointType != MapPointType.Ancient:
-                    _ = events.Consume();
+                    roomId = events.Consume()?.Id;
                     break;
             }
+
+            // Native event selection sees prior history, before the target is appended.
+            shadow.AppendToMapPointHistory(point.PointType, roomType, roomId);
+            shadow.AddVisitedMapCoord(point.coord);
 
             if (roomType is not RoomType.Map and not RoomType.Unassigned)
                 hasUnmodeledStateDependency = true;

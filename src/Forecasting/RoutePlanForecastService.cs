@@ -35,6 +35,9 @@ internal sealed class RoutePlanForecastService(PlanningPredictionService plannin
         public Forecast<CombatRewardDetails>? CombatRewards { get; set; }
         public Forecast<TreasureRoomDetails>? Treasure { get; set; }
         public Forecast<MerchantInventoryForecast>? Merchant { get; set; }
+        public MerchantInventoryForecast? MerchantAfterPurchases { get; set; }
+        public List<(int PlanIndex, MerchantItemForecast Item)> MerchantPurchases { get; } = [];
+        public int? MerchantGoldAfterPurchases { get; set; }
         public RelicModel? PulledRelic { get; set; }
         public int GoldDelta { get; set; }
         public string? Note { get; set; }
@@ -114,6 +117,7 @@ internal sealed class RoutePlanForecastService(PlanningPredictionService plannin
 
                 var roomType = RoutePlanPanelControl.RoomFromPointType(point.PointType);
                 var outcome = new PlanNodeOutcome();
+                state.Run.ActFloor = point.coord.row + 1;
                 chain.StatesBefore[entry.Coord] = planning.Capture(state);
 
             // An event preview is executed against the state immediately
@@ -156,19 +160,19 @@ internal sealed class RoutePlanForecastService(PlanningPredictionService plannin
 
                 potionMax = state.Player.MaxPotionCount;
 
-            // Resolve the plan-matching worldline: it carries the real
-            // encounter (gold ranges, monster slots) and resolved rooms.
+            // Resolve against the choice-modified graph, including any event
+            // effects on room odds and encounter queues.
                 EncounterModel? nodeEncounter = null;
                 if (roomType is RoomType.Monster or RoomType.Elite or RoomType.Boss
                     || point.PointType == MapPointType.Unknown)
                 {
-                    var exploration = RouteStateExplorer.Explore(run, point);
-                    var worldlines = RouteWorldlinePredictor.Predict(run, point, exploration.Paths);
-                    var worldline = MatchWorldline(worldlines, allEntries, headIndex, index);
-                    nodeEncounter = worldline?.TargetEncounter;
-                    roomType = worldline?.TargetRoomType ?? roomType;
+                    roomType = MerchantChoiceBranchService.ResolveRoom(state, point);
+                    if (roomType.IsCombatRoom())
+                        nodeEncounter = MerchantChoiceBranchService.ResolveEncounter(state, roomType);
                 }
 
+                try
+                {
                 switch (roomType)
                 {
                 case RoomType.Monster:
@@ -195,8 +199,13 @@ internal sealed class RoutePlanForecastService(PlanningPredictionService plannin
                     }
                     state.CombatsAdvanced++;
                     outcome.BeforeCombatRewards = planning.Capture(state);
-                    using var generated = planning.GenerateCombatRewards(state, roomType, nodeEncounter);
+                    using var generated = planning.GenerateCombatRewards(state, roomType, nodeEncounter,
+                        assumedHuntTriggers: combatChoice.HuntTriggers);
                     var rewards = ApplyCombatRewards(state, generated, combatChoice, before);
+                    var rooms = state.Run.Act._rooms;
+                    if (roomType == RoomType.Monster) rooms.normalEncountersVisited++;
+                    if (roomType == RoomType.Elite) rooms.eliteEncountersVisited++;
+                    if (roomType == RoomType.Boss) rooms.bossEncountersVisited++;
                     outcome.CombatRewards = Forecast<CombatRewardDetails>.Branch(
                         rewards,
                         PredictionDependency.Rewards
@@ -215,7 +224,11 @@ internal sealed class RoutePlanForecastService(PlanningPredictionService plannin
                 }
                 case RoomType.Shop:
                 {
-                    var inventory = planning.GenerateMerchant(state);
+                    var goldBeforeShop = state.Player.Gold;
+                    state.Run.AppendToMapPointHistory(MapPointType.Shop, RoomType.Shop, null);
+                    using var shop = new PlanningMerchantSession(state);
+                    gold = state.Player.Gold;
+                    var inventory = shop.Describe();
                     outcome.Merchant = Forecast<MerchantInventoryForecast>.Branch(
                         inventory,
                         PredictionDependency.Shops
@@ -226,59 +239,21 @@ internal sealed class RoutePlanForecastService(PlanningPredictionService plannin
                     if (entry.Choice is RoutePlanChoice.Merchant merchantChoice)
                     {
                         var rejectedPurchases = 0;
-                        var purchasedEntries = new HashSet<MerchantPick>();
-                        foreach (var pick in merchantChoice.Picks)
+                        foreach (var (pick, planIndex) in merchantChoice.Picks.Select((pick, index) => (pick, index)))
                         {
-                            var item = IndexOf(inventory, pick);
-                            var itemId = item.Item.Id;
-                            if (!purchasedEntries.Add(pick)
-                                || itemId is null
-                                || item.Cost < 0
-                                || gold < item.Cost)
+                            var item = IndexOf(shop.Describe(), pick);
+                            try
                             {
-                                rejectedPurchases++;
-                                continue;
+                                if (shop.TryPurchase(pick)) outcome.MerchantPurchases.Add((planIndex, item));
+                                else rejectedPurchases++;
                             }
-
-                            if (pick.Category == MerchantCategory.Potion)
-                            {
-                                // MerchantPotionEntry tries to procure the potion before
-                                // charging gold. With no replacement choice on the shop
-                                // screen, a full belt therefore rejects the purchase.
-                                if (!planning.AddPotion(state, itemId))
-                                {
-                                    rejectedPurchases++;
-                                    continue;
-                                }
-
-                                gold -= item.Cost;
-                                outcome.Note = (outcome.Note is null ? "" : outcome.Note + "；") + "+1药水";
-                                continue;
-                            }
-
-                            gold -= item.Cost;
-                            ApplyMerchantPurchase(chain, state, pick, item);
+                            finally { gold = state.Player.Gold; }
                         }
                         if (merchantChoice.RemoveCard)
                         {
-                            if (gold >= inventory.CardRemovalCost)
-                            {
-                                gold -= inventory.CardRemovalCost;
-                                var removed = chain.Deck.FirstOrDefault();
-                                if (removed is not null)
-                                {
-                                    chain.Deck.Remove(removed);
-                                    planning.RemoveCard(state, removed.Id);
-                                }
-                                else
-                                {
-                                    rejectedPurchases++;
-                                }
-                            }
-                            else
-                            {
-                                rejectedPurchases++;
-                            }
+                            var removed = state.Player.Deck.Cards.FirstOrDefault(card => card.IsRemovable);
+                            if (removed is null || !shop.TryRemove(removed)) rejectedPurchases++;
+                            gold = state.Player.Gold;
                         }
 
                         if (rejectedPurchases > 0)
@@ -286,36 +261,58 @@ internal sealed class RoutePlanForecastService(PlanningPredictionService plannin
                             outcome.Note = (outcome.Note is null ? "" : outcome.Note + "；")
                                            + $"商店计划有 {rejectedPurchases} 项因金币、库存或药水槽条件不足未执行";
                         }
-
                     }
+                    outcome.MerchantAfterPurchases = shop.Describe();
+                    outcome.MerchantGoldAfterPurchases = gold;
+                    outcome.GoldDelta = gold - goldBeforeShop;
+                    chain.Deck.Clear();
+                    chain.Deck.AddRange(state.Player.Deck.Cards.Select(card =>
+                        new ProjectedCard(card.Id, card.Title, card.IsUpgraded)));
                     break;
                 }
                 case RoomType.Treasure:
                 {
+                    var goldBefore = gold;
                     var treasure = planning.GenerateTreasure(state, isPriorRoom: false);
                     outcome.Treasure = Forecast<TreasureRoomDetails>.Branch(
                         treasure,
                         PredictionDependency.Rewards | PredictionDependency.RelicGrabBag,
                         "按计划推进到该宝箱的内容；实际拾取后应重算。");
-                    gold += treasure.Gold;
+                    // Include native entry income (Maw Bank) before adding
+                    // the separately generated treasure reward.
+                    gold = state.Player.Gold + treasure.Gold;
+                    state.Player.Gold = gold;
                     outcome.GoldDelta += treasure.Gold;
                     if (entry.Choice is not RoutePlanChoice.Relic { Take: false })
                     {
                         foreach (var relic in treasure.Relics)
                             planning.AddRelic(state, relic.Id);
+                        gold = state.Player.Gold;
                     }
+                    outcome.GoldDelta = gold - goldBefore;
                     break;
                 }
                 case RoomType.RestSite:
                 {
+                    var goldBeforeRest = state.Player.Gold;
+                    planning.EnterRestSite(state);
+                    gold = state.Player.Gold;
                     ApplyRestChoice(chain, potionMax, entry.Choice, outcome, ref gold);
+                    outcome.GoldDelta = gold - goldBeforeRest;
                     break;
                 }
+                }
+                }
+                catch (Exception exception)
+                {
+                    outcome.Note = "领取或选择尚未完成，后续路线已暂停：" + exception.GetBaseException().Message;
+                    chain.BlockedAtNode = entry.Coord;
                 }
 
                 // Keep native hooks and any later event snapshot in sync with the
                 // virtual ledger after this node's recorded purchases/rewards.
                 state.Player.Gold = gold;
+                state.Run.AddVisitedMapCoord(point.coord);
 
                 chain.Outcomes[entry.Coord] = outcome;
                 if (chain.BlockedAtNode is not null)
@@ -339,8 +336,12 @@ internal sealed class RoutePlanForecastService(PlanningPredictionService plannin
     {
         before ??= RoutePlanResourceSnapshot.Capture(state.Player);
         using var scope = ShadowIsolation.Enter(state.Player, automateRewards: true);
-        var groups = new List<CombatCardRewardGroup>();
-        var groupIndex = 0;
+        using var rewardRoom = rewards.NativeEncounter is { } encounter && state.Run.CurrentRoom is not CombatRoom
+            ? PlanningPredictionService.EnterRewardRoom(state, encounter) : null;
+        var cards = rewards.NativeCardRewards;
+        var sessions = cards.Select(card => new ShadowIsolation.CardRewardSession(card)).ToArray();
+        var steps = cards.Select(_ => new List<CardRewardStepDetails>()).ToArray();
+        var rejected = new bool[cards.Count];
         var potionIndex = 0;
         var discardUsed = false;
         foreach (var card in rewards.NativeCardRewards)
@@ -351,14 +352,7 @@ internal sealed class RoutePlanForecastService(PlanningPredictionService plannin
         foreach (var reward in rewards.NativeRewards)
         {
             if (reward is CardReward)
-            {
-                var selector = new PlannedCardRewardSelector(combatChoice.ChoiceForGroup(groupIndex++).Steps);
-                using var selectorScope = ShadowIsolation.UseSelector(selector);
-                if (!reward.SelectUnsynchronized().GetAwaiter().GetResult())
-                    reward.OnSkipped();
-                groups.Add(new CombatCardRewardGroup(selector.Steps));
                 continue;
-            }
             var take = reward is not RelicReward || combatChoice.TakeRelic;
             if (reward is PotionReward)
             {
@@ -377,6 +371,42 @@ internal sealed class RoutePlanForecastService(PlanningPredictionService plannin
             using var noImplicitPicks = ShadowIsolation.UseSelector(new PlannedCardRewardSelector([]));
             if (!take || !reward.SelectUnsynchronized().GetAwaiter().GetResult())
                 reward.OnSkipped();
+        }
+        foreach (var action in combatChoice.OrderedActions)
+        {
+            var group = action.GroupIndex;
+            if (group < 0 || group >= cards.Count)
+                continue;
+            var picks = combatChoice.ChoiceForGroup(group).Steps;
+            if (rejected[group] || sessions[group].Finished)
+                continue;
+            if (action.StepIndex != steps[group].Count || action.StepIndex >= picks.Count)
+            {
+                rejected[group] = true;
+                continue;
+            }
+            var selector = new PlannedCardRewardSelector([picks[action.StepIndex]]);
+            var selection = selector.GetSelectedCardReward(cards[group]._cards,
+                CardRewardAlternative.Generate(cards[group]));
+            steps[group].Add(selector.Steps[0]);
+            rejected[group] = selector.Steps[0].RejectedChoice;
+            using var selectorScope = ShadowIsolation.UseSelector(new PlannedCardRewardSelector([]));
+            sessions[group].ApplyAsync(selection).GetAwaiter().GetResult();
+            if (sessions[group].Finished)
+                sessions[group].CompleteRewardAsync().GetAwaiter().GetResult();
+        }
+        var groups = new List<CombatCardRewardGroup>();
+        for (var group = 0; group < cards.Count; group++)
+        {
+            var complete = sessions[group].Finished && !rejected[group];
+            if (!sessions[group].Finished)
+            {
+                steps[group].Add(PlanningPredictionService.DescribeCardReward(cards[group]) with
+                    { RejectedChoice = rejected[group] });
+                sessions[group].ApplyAsync(default).GetAwaiter().GetResult();
+                sessions[group].CompleteRewardAsync().GetAwaiter().GetResult();
+            }
+            groups.Add(new CombatCardRewardGroup(steps[group]) { ChoiceComplete = complete });
         }
         return rewards.Detach() with
         {
@@ -420,7 +450,8 @@ internal sealed class RoutePlanForecastService(PlanningPredictionService plannin
             else if (pick is { CardIndex: >= 0 } && pick.CardIndex < options.Count)
             {
                 var card = options[pick.CardIndex].Card;
-                if (pick.CardId is null || card.Id == pick.CardId)
+                if ((pick.CardId is null || card.Id == pick.CardId)
+                    && (pick.CardStateKey is null || pick.CardStateKey == ForecastItemDetails.Card(card).StateKey))
                 {
                     selectedIndex = pick.CardIndex;
                     selection.card = card;
@@ -454,6 +485,7 @@ internal sealed class RoutePlanForecastService(PlanningPredictionService plannin
                 {
                     outcome.PulledRelic = relic;
                     planning.AddRelic(state, relic.Id);
+                    gold = state.Player.Gold;
                     outcome.Note = "挖掘遗物：" + relic.Title.GetFormattedText();
                 }
                 break;
@@ -637,39 +669,6 @@ internal sealed class RoutePlanForecastService(PlanningPredictionService plannin
 
         return null;
     }
-
-    private void ApplyMerchantPurchase(
-        PlanChain chain,
-        PlanningPredictionService.State state,
-        MerchantPick pick,
-        MerchantItemForecast item)
-    {
-        switch (pick.Category)
-        {
-            case MerchantCategory.CharacterCard:
-            case MerchantCategory.ColorlessCard:
-                if (item.Item.Id is { } cardId)
-                {
-                    planning.AddCard(state, cardId, item.Item.IsUpgraded);
-                    chain.Deck.Add(new ProjectedCard(cardId, item.Item.Name, item.Item.IsUpgraded));
-                }
-                break;
-            case MerchantCategory.Relic:
-                if (item.Item.Id is { } relicId)
-                    planning.AddRelic(state, relicId);
-                break;
-            case MerchantCategory.Potion:
-                break;
-        }
-    }
-
-    private static int CostOf(MerchantInventoryForecast merchant, MerchantPick pick) => pick.Category switch
-    {
-        MerchantCategory.CharacterCard => IndexOr(merchant.CharacterCards, pick.Index).Cost,
-        MerchantCategory.ColorlessCard => IndexOr(merchant.ColorlessCards, pick.Index).Cost,
-        MerchantCategory.Relic => IndexOr(merchant.Relics, pick.Index).Cost,
-        _ => IndexOr(merchant.Potions, pick.Index).Cost
-    };
 
     private static MerchantItemForecast IndexOf(MerchantInventoryForecast merchant, MerchantPick pick) => pick.Category switch
     {

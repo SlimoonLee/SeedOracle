@@ -4,6 +4,7 @@
 .godot/
 .reference/
 .tools/
+.local/
 .test-dependency-staging/
 .release-stage-*/
 .zcode/

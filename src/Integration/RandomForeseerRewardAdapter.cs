@@ -24,6 +24,14 @@ internal sealed partial class RandomForeseerAdapter
         | PredictionDependency.PlayerState
         | PredictionDependency.Shops;
 
+    private const PredictionDependency MerchantDependencies =
+        PredictionDependency.Shops
+        | PredictionDependency.TreasureRelics
+        | PredictionDependency.Rewards
+        | PredictionDependency.RelicGrabBag
+        | PredictionDependency.CardRarityOdds
+        | PredictionDependency.PlayerState;
+
     public Forecast<CombatRewardDetails> PredictCombatRewards(
         Player player,
         IReadOnlyList<RoomType> resolvedRooms,
@@ -38,23 +46,58 @@ internal sealed partial class RandomForeseerAdapter
             var state = planning.CreateState((RunState)player.RunState, player);
             using var isolation = ShadowIsolation.Enter(state.Player);
             planning.AdvanceRoomsBeforeTarget(state, resolvedRooms);
+            var before = planning.Capture(state);
             using var generated = planning.GenerateCombatRewards(state, resolvedRooms[^1], encounter);
-            var details = generated.Detach();
-            return resolvedRooms.Count == 1
-                ? Forecast<CombatRewardDetails>.CurrentWorldline(
-                    details,
-                    CombatRewardDependencies,
-                    "Uses native reward groups, candidates and alternatives on an isolated run snapshot.")
-                : Forecast<CombatRewardDetails>.Branch(
-                    details,
-                    CombatRewardDependencies,
-                    "Advances native combat rewards, shops and treasure on a cloned route; intervening choices remain conditional.");
+            var details = CombatRewardBranchService.AddPossibilities(
+                planning, before, resolvedRooms[^1], encounter, generated.Detach());
+            return Forecast<CombatRewardDetails>.Branch(
+                details,
+                CombatRewardDependencies,
+                "Base rewards assume victory without escapes, combat-added rewards or changes to reward state; intervening choices remain conditional.");
         }
         catch (Exception exception)
         {
             return Forecast<CombatRewardDetails>.Unsupported(
                 $"Native combat-reward prediction failed: {exception.GetBaseException().Message}",
                 CombatRewardDependencies);
+        }
+    }
+
+    public Forecast<MerchantInventoryForecast> PredictMerchantRoom(
+        Player player,
+        IReadOnlyList<RoomType> resolvedRooms)
+    {
+        if (resolvedRooms.Count == 0 || resolvedRooms[^1] != RoomType.Shop)
+            throw new ArgumentException("The resolved route must end in a shop room.", nameof(resolvedRooms));
+
+        try
+        {
+            // The ordinal-only PredictMerchant loop replays merchant generations
+            // back to back, but intervening combats and chests consume the same
+            // Rewards RNG and relic bags that later shops roll against, so the
+            // drift grows with route distance. Advance the real route rooms on
+            // the cloned state instead, exactly like combat and treasure
+            // predictions do.
+            var planning = new PlanningPredictionService();
+            var state = planning.CreateState((RunState)player.RunState, player);
+            using var isolation = ShadowIsolation.Enter(state.Player);
+            planning.AdvanceRoomsBeforeTarget(state, resolvedRooms);
+            var details = planning.GenerateMerchant(state);
+            return resolvedRooms.Count == 1 && player.RunState.Players.Count == 1
+                ? Forecast<MerchantInventoryForecast>.CurrentWorldline(
+                    details,
+                    MerchantDependencies,
+                    "Advances the native route on a cloned run; the next shop generates from the current worldline.")
+                : Forecast<MerchantInventoryForecast>.Branch(
+                    details,
+                    MerchantDependencies,
+                    "Advances native combat rewards, shops and treasure on a cloned route; intervening choices remain conditional.");
+        }
+        catch (Exception exception)
+        {
+            return Forecast<MerchantInventoryForecast>.Unsupported(
+                $"Native merchant prediction failed: {exception.GetBaseException().Message}",
+                MerchantDependencies);
         }
     }
 

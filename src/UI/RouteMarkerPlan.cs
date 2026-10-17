@@ -1,5 +1,6 @@
 using Godot;
 using MegaCrit.Sts2.Core.Map;
+using MegaCrit.Sts2.Core.Models;
 using SeedOracle.Api;
 using SeedOracle.Forecasting;
 
@@ -76,12 +77,27 @@ internal static class RouteMarkerPlanner
 
     public static RouteMarkerPlan Build(MapNodeForecast forecast)
     {
+        var keys = new Dictionary<object, string>(ReferenceEqualityComparer.Instance);
+        var references = new Dictionary<object, int>(ReferenceEqualityComparer.Instance);
         var rawGroups = forecast.RouteVariants
-            .GroupBy(OutcomeKey)
-            .OrderBy(group => group.First().RoomType)
+            .GroupBy(variant => new OutcomeReferences(variant.RoomType, variant.Event?.Id, variant.Encounter?.Id,
+                ReferenceId(variant.Merchant), ReferenceId(variant.EventContents),
+                ReferenceId(variant.CombatRewards), ReferenceId(variant.Treasure)))
+            .Select(group => (Key: OutcomeKey(group.First(), keys), Variants: group.ToArray()))
+            .GroupBy(group => group.Key)
+            .OrderBy(group => group.First().Variants[0].RoomType)
             .ThenBy(group => group.Key, StringComparer.Ordinal)
-            .Select(group => (group.Key, Variants: (IReadOnlyList<RouteVariantForecast>)group.ToArray()))
+            .Select(group => (group.Key, Variants: (IReadOnlyList<RouteVariantForecast>)group.SelectMany(part => part.Variants).ToArray()))
             .ToArray();
+
+        int ReferenceId(object? forecastValue)
+        {
+            if (forecastValue is null)
+                return 0;
+            if (!references.TryGetValue(forecastValue, out var id))
+                references[forecastValue] = id = references.Count + 1;
+            return id;
+        }
 
         var groups = new List<RouteOutcomeGroup>(rawGroups.Length);
         var lines = new List<RouteLineAssignment>();
@@ -109,20 +125,38 @@ internal static class RouteMarkerPlanner
         return new RouteMarkerPlan(groups, [], lines);
     }
 
-    public static string OutcomeKey(RouteVariantForecast variant)
+    public static string OutcomeKey(RouteVariantForecast variant) => OutcomeKey(variant, null);
+
+    private readonly record struct OutcomeReferences(
+        MegaCrit.Sts2.Core.Rooms.RoomType Room, ModelId? Event, ModelId? Encounter,
+        int Merchant, int Contents, int Rewards, int Treasure);
+
+    private static string OutcomeKey(RouteVariantForecast variant, Dictionary<object, string>? keys)
     {
-        var merchantOrdinal = variant.Merchant is { HasValue: true }
-            ? variant.Merchant.Value!.FutureVisitOrdinal
-            : 0;
+        var merchantKey = Cached(variant.Merchant, merchant => merchant is { HasValue: true }
+            ? $"{merchant.Accuracy}:{ForecastContentKey.Merchant(merchant.Value!)}:{ForecastContentKey.MerchantConditions(merchant.Value!)}"
+            : merchant is null ? string.Empty : $"merchant:{merchant.Accuracy}");
         return string.Join(
             "|",
             variant.RoomType,
             variant.Event?.Id.ToString() ?? string.Empty,
             variant.Encounter?.Id.ToString() ?? string.Empty,
-            merchantOrdinal,
-            EventContentKey(variant.EventContents),
-            CombatRewardKey(variant.CombatRewards),
-            TreasureKey(variant.Treasure));
+            merchantKey,
+            Cached(variant.EventContents, EventContentKey),
+            Cached(variant.CombatRewards, CombatRewardKey),
+            Cached(variant.Treasure, TreasureKey));
+
+        string Cached<T>(Forecast<T>? forecast, Func<Forecast<T>?, string> build)
+        {
+            if (forecast is null)
+                return "";
+            if (keys?.TryGetValue(forecast, out var key) == true)
+                return key;
+            key = build(forecast);
+            if (keys is not null)
+                keys[forecast] = key;
+            return key;
+        }
     }
 
     private static string EventContentKey(Forecast<EventContentDetails>? forecast)
@@ -130,20 +164,22 @@ internal static class RouteMarkerPlanner
         if (forecast is not { HasValue: true })
             return forecast is null ? string.Empty : $"event-content:{forecast.Accuracy}";
 
-        return "event-content:"
+        return $"event-content:{forecast.Accuracy}:{forecast.Value!.UncoveredOptionCount}:"
                + string.Join(
                    ";",
                    forecast.Value!.Options.Select(option =>
-                       option.TextKey + "=initial:"
+                       option.TextKey + ":" + option.HasPredictedEffects + "=initial:"
                        + string.Join(",", option.InitialItems.Select(ItemKey))
                        + ":predicted:"
                        + string.Join(
                            "/",
-                           option.Sets.Select(set => string.Join(",", set.Items.Select(ItemKey))))));
+                           option.Sets.Select(set => $"{set.Kind}:{set.Position}:{set.SourceDeckIndex}:"
+                               + (set.SourceCard is null ? string.Empty : ItemKey(set.SourceCard))
+                               + "=" + string.Join(",", set.Items.Select(ItemKey))))));
     }
 
     private static string ItemKey(ForecastItemDetails item) =>
-        item.Id?.ToString() ?? item.Name;
+        ForecastContentKey.Item(item);
 
     private static string CombatRewardKey(Forecast<CombatRewardDetails>? forecast)
     {
@@ -153,10 +189,17 @@ internal static class RouteMarkerPlanner
         var value = forecast.Value!;
         var cards = string.Join(
             ";",
-            value.CardRewards.Select(bundle => string.Join(",", bundle.Select(item => item.Id))));
-        var potions = string.Join(",", value.Potions.Select(item => item.Id));
-        var relics = string.Join(",", value.Relics.Select(item => item.Id));
-        return $"combat:{value.Gold}:{cards}:{potions}:{relics}";
+            value.CardRewardGroups.Select(group => string.Join("/", group.Steps.Select(step =>
+                string.Join(",", step.Cards.Select(item => ItemKey(item.Item)))
+                + ":" + string.Join(",", step.Alternatives.Select(choice => $"{choice.OptionId}:{choice.AfterSelected}"))
+                + $":{step.SelectedIndex}:{step.RejectedChoice}"))));
+        var potions = string.Join(",", value.Potions.Select(item => ItemKey(item.Item)));
+        var relics = string.Join(",", value.Relics.Select(item => ItemKey(item.Item)));
+        var branches = System.Text.Json.JsonSerializer.Serialize(new
+            { value.Possibilities, value.PossibilitiesTruncated, value.HuntPreviewLimit,
+                value.ReferenceCondition, value.ReferenceChoicePaths, Branches = value.ChoiceBranches.Select(branch => new
+                    { branch.Condition, branch.ChoicePaths, Outcome = ForecastContentKey.Combat(branch.Outcome) }) });
+        return $"combat:{forecast.Accuracy}:{value.Gold}:{cards}:{potions}:{relics}:{branches}";
     }
 
     private static string TreasureKey(Forecast<TreasureRoomDetails>? forecast)
@@ -165,7 +208,10 @@ internal static class RouteMarkerPlanner
             return forecast is null ? string.Empty : $"treasure:{forecast.Accuracy}";
 
         var value = forecast.Value!;
-        return $"treasure:{value.Gold}:{value.IsEmpty}:{string.Join(",", value.Relics.Select(item => item.Id))}";
+        return $"treasure:{forecast.Accuracy}:{ForecastContentKey.Treasure(value)}:"
+               + System.Text.Json.JsonSerializer.Serialize(new { value.ReferenceCondition, value.ReferenceChoicePaths,
+                   Branches = value.ChoiceBranches.Select(branch => new
+                       { branch.Condition, branch.ChoicePaths, Outcome = ForecastContentKey.Treasure(branch.Outcome) }) });
     }
 
 }

@@ -14,6 +14,10 @@ internal interface IRandomForeseerAdapter
 
     Forecast<MerchantInventoryForecast> PredictMerchant(Player player, int futureVisitOrdinal);
 
+    Forecast<MerchantInventoryForecast> PredictMerchantRoom(
+        Player player,
+        IReadOnlyList<RoomType> resolvedRooms);
+
     Forecast<CombatRewardDetails> PredictCombatRewards(
         Player player,
         IReadOnlyList<RoomType> resolvedRooms,

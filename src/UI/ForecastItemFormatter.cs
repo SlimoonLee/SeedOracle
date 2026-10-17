@@ -1,3 +1,9 @@
+using System.Text.Json;
+using System.Runtime.CompilerServices;
+using MegaCrit.Sts2.Core.Localization;
+using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Saves;
+using MegaCrit.Sts2.Core.Saves.Runs;
 using SeedOracle.Data;
 using SeedOracle.Forecasting;
 
@@ -7,12 +13,33 @@ internal static class ForecastItemFormatter
 {
     private const int CardArtWidth = 72;
     private const int CardArtHeight = 54;
+    private static readonly ConditionalWeakTable<ForecastItemDetails, CardCaption> CardCaptions = new();
+
+    private sealed class CardCaption(ForecastItemDetails item)
+    {
+        private readonly SerializableCard? card = JsonSerializer.Deserialize(item.StateKey!, JsonSerializationUtility.GetTypeInfo<SerializableCard>());
+        private string? language;
+        private string? caption;
+        internal string Get()
+        {
+            var currentLanguage = LocManager.Instance?.Language;
+            if (caption is null || currentLanguage != language)
+            {
+                caption = card?.Enchantment is { } enchantment
+                    ? $" ({EnchantmentModel.FromSerializable(enchantment).Title.GetFormattedText()} {enchantment.Amount})" : "";
+                language = currentLanguage;
+            }
+            return caption;
+        }
+    }
 
     public static string Format(ForecastItemDetails item) =>
         Format(item, SeedOracleData.Settings.UseCardArtThumbnails);
 
     internal static string Format(ForecastItemDetails item, bool useCardArtThumbnails)
     {
+        var caption = item.Kind == ForecastItemKind.Card && item.StateKey?.StartsWith('{') == true
+            ? CardCaptions.GetValue(item, static card => new(card)).Get() : "";
         if (useCardArtThumbnails
             && item.Kind == ForecastItemKind.Card
             && !string.IsNullOrWhiteSpace(item.ImagePath))
@@ -20,10 +47,11 @@ internal static class ForecastItemFormatter
             var rarityMarker = ApplyRarityColor("◆", item.Rarity);
             var image = $"[img={CardArtWidth}x{CardArtHeight}]{item.ImagePath}[/img]";
             var upgrade = item.IsUpgraded ? "[green]+[/green]" : string.Empty;
-            return rarityMarker + image + upgrade;
+            return rarityMarker + image + upgrade + caption;
         }
 
-        return ApplyRarityColor(item.Name, item.Rarity);
+        var name = item.IsUpgraded && !item.Name.Contains('+') ? item.Name + "+" : item.Name;
+        return ApplyRarityColor(name, item.Rarity) + caption;
     }
 
     internal static string ApplyRarityColor(string text, ForecastItemRarity rarity)

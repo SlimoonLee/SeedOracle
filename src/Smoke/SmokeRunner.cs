@@ -38,6 +38,7 @@ internal static class SmokeRunner
 
     private static AutoSlayer? _autoSlayer;
     private static bool _combatHandled;
+    private static Task? _killBatch;
     private static bool _quitQueued;
     private static bool _eventAuditDone;
     private static PlanningSimulationAuditSession? _planningSimulationAudit;
@@ -57,6 +58,7 @@ internal static class SmokeRunner
         && !RestSiteRngAudit.IsRequested
         && !SolverClimb.IsRequested
         && (!CardValueDemo.IsRequested || !CardValueDemo.IsCompleted)
+        && (!DecisionLab.IsRequested || !DecisionLab.IsCompleted)
         && !_planningSimulationReported;
 
     internal static Task WaitForPlanningSimulationAsync(CancellationToken cancellationToken)
@@ -125,17 +127,27 @@ internal static class SmokeRunner
                 return;
             }
 
-            TickCombatKill();
+            // The climb harness must see combat edges before the kill pass so
+            // its no-heal gate can hold the kill until the solver's damage is
+            // written into the live run.
             if (SolverClimb.IsRequested)
                 SolverClimb.TickCombatEdges();
+            TickCombatKill();
             if (CardValueDemo.IsRequested)
             {
                 CardValueDemo.Tick();
                 if (CardValueDemo.IsCompleted)
                     return;
             }
+            if (DecisionLab.IsRequested)
+            {
+                DecisionLab.Tick();
+                if (DecisionLab.IsCompleted)
+                    return;
+            }
             if (!RestSiteRngAudit.IsRequested && !CardValueDemo.IsRequested
-                                                 && !SolverClimb.IsRequested)
+                                                 && !SolverClimb.IsRequested
+                                                 && !DecisionLab.IsRequested)
             {
                 TickEventAudit();
                 TickPlanningSimulationAudit();
@@ -149,11 +161,14 @@ internal static class SmokeRunner
             }
 
             var runOver = !AutoSlayer.IsActive;
-            var uptimeLimit = SolverClimb.IsRequested ? 45 : 20;
+            var uptimeLimit = SolverClimb.IsRequested ? 45 : DecisionLab.IsRequested ? 30 : 20;
             if (!_quitQueued && (runOver || Uptime.Elapsed > TimeSpan.FromMinutes(uptimeLimit)))
             {
                 _quitQueued = true;
                 Entry.Logger.Info($"[Smoke] autoslay finished (elapsed {Uptime.Elapsed:hh\\:mm\\:ss}); quitting");
+#if DEBUG
+                LivePredictionAudit.Summarize();
+#endif
                 SmokeReport.Flush();
                 NGame.Instance?.GetTree()?.Quit();
             }
@@ -183,28 +198,69 @@ internal static class SmokeRunner
         if (combat is null || !combat.IsInProgress)
         {
             _combatHandled = false;
+            _killBatch = null;
+            _killStallFrames = 0;
             SolverClimb.ResetTurnNudge();
             return;
         }
 
         var state = combat.DebugOnlyGetState()
                     ?? throw new InvalidOperationException("combat without state");
+#if DEBUG
+        LivePredictionAudit.BeforeCombatKill(state);
+#endif
+        // Damage commands can yield during presentation. Do not start another
+        // lethal batch against the same still-dying creatures every frame.
+        if (_killBatch is { IsCompleted: false }) return;
         var monsters = state.Enemies
             .Where(creature => !creature.IsDead)
             .ToArray();
         if (monsters.Length == 0)
+        {
+            _killStallFrames = 0;
+            // All enemies are gone but the room is still live: the victory
+            // check waits on a turn boundary, so close out the player's turn.
+            if (SolverClimb.IsRequested)
+                SolverClimb.AdvanceEndedFight();
+            return;
+        }
+
+        // The no-heal climb holds the kill until the solver's projected loss
+        // has been applied to the player's HP.
+        if (SolverClimb.IsRequested && SolverClimb.ShouldHoldKill)
             return;
 
+        // Damage-capping powers turn an instant kill into a multi-turn stall
+        // and would let the live monsters damage a player whose HP now carries
+        // between fights. The fight's outcome is modelled by the solver; this
+        // pass only needs the kill to land, so the caps come off first.
         foreach (var monster in monsters)
         {
-            _ = CreatureCmd.Damage(
+            foreach (var power in monster.Powers
+                         .Where(power => DamageCappingPowerNames.Contains(power.GetType().Name))
+                         .ToArray())
+            {
+                _ = PowerCmd.Remove(power);
+            }
+        }
+
+        var kills = new List<Task>();
+        foreach (var monster in monsters)
+        {
+            kills.Add(CreatureCmd.Damage(
                 new ThrowingPlayerChoiceContext(),
                 monster,
                 99999m,
                 ValueProp.Unblockable | ValueProp.Move,
-                null!);
+                null!));
         }
-        if (SolverClimb.IsRequested)
+        _killBatch = Task.WhenAll(kills);
+        // Ending the player's turn is a last resort: it lets the monsters act
+        // and, in the no-heal climb, those live hits would corrupt the HP the
+        // solver is modelling. Only fights that survive several kill passes
+        // (an unmodelled damage cap) reach it.
+        _killStallFrames++;
+        if (SolverClimb.IsRequested && _killStallFrames > 4)
             SolverClimb.NudgeTurnIfStalled(state);
 
         if (_combatHandled)
@@ -212,6 +268,11 @@ internal static class SmokeRunner
         _combatHandled = true;
         Entry.Logger.Info($"[Smoke] killed {monsters.Length} monsters");
     }
+
+    private static int _killStallFrames;
+
+    private static readonly string[] DamageCappingPowerNames =
+        ["SlipperyPower", "HardenedShellPower", "IntangiblePower", "BufferPower"];
 
     /// <summary>
     /// P1 audit: once per smoke run, execute EVERY option of EVERY game event
@@ -235,6 +296,20 @@ internal static class SmokeRunner
         if (player is null)
             return;
 
+#if DEBUG
+        try
+        {
+            ForecastExperienceRegressionTests.Run(run);
+            ExtendedForecastRegressionTests.Run(run);
+        }
+        catch (Exception exception)
+        {
+            SmokeReport.Add($"experience-regression FAIL: {exception.GetBaseException().Message}");
+            SmokeReport.Flush();
+            NGame.Instance?.GetTree()?.Quit(1);
+            return;
+        }
+#endif
         AuditPlanningPotionRoundTrip(run, player);
         PredictionPurityGuard.Execute(run, "smoke:native-combat-reward-groups", () =>
         {

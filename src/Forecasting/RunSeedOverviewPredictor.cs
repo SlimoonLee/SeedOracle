@@ -214,6 +214,7 @@ internal static class RunSeedOverviewPredictor
         AncientEventModel? ancientOverride = null)
     {
         var shadowRun = RunState.FromSerializable(snapshot);
+        SeedOracle.Integration.ShadowIsolation.RegisterRun(shadowRun);
         shadowRun.CurrentActIndex = actIndex;
         var shadowPlayer = shadowRun.GetPlayer(playerId)
                            ?? throw new InvalidOperationException(

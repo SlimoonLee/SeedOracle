@@ -2,6 +2,7 @@ using Godot;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Localization.Fonts;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Models.Cards;
 using MegaCrit.Sts2.Core.Nodes.GodotExtensions;
 using SeedOracle.Forecasting;
 
@@ -15,6 +16,25 @@ internal sealed partial class RoutePlanPanelControl
         Action<RoutePlanChoice.Combat> update, Player? planningPlayer, bool chinese)
     {
         var player = planningPlayer;
+        if (player?.Deck.Cards.Any(card => card is TheHunt) == true || combatChoice.HuntTriggers > 0)
+        {
+            var row = new HBoxContainer();
+            row.AddChild(PreCombatPanelStyles.CreateLabel(chinese ? "狩猎触发次数" : "The Hunt triggers",
+                15, new Color(0.68f, 0.78f, 0.8f)));
+            var count = new SpinBox { MinValue = 0, MaxValue = 100, Step = 1, Value = combatChoice.HuntTriggers };
+            count.ValueChanged += value => update(currentCombat() with
+            {
+                HuntTriggers = (int)value, CardRewardChoices = [], ActionOrder = []
+            });
+            row.AddChild(count);
+            choiceBox.AddChild(row);
+        }
+        if (combatChoice.OrderedActions.Count > 0)
+            choiceBox.AddChild(PreCombatPanelStyles.CreateLabel(
+                (chinese ? "选牌操作顺序：" : "Card reward action order: ")
+                + string.Join(" > ", combatChoice.OrderedActions.Select(action =>
+                    $"{action.GroupIndex + 1}.{action.StepIndex + 1}")),
+                14, new Color(0.68f, 0.78f, 0.8f)));
         var groups = rewards.CardRewardGroups;
         for (var groupIndex = 0; groupIndex < groups.Count; groupIndex++)
         {
@@ -51,7 +71,8 @@ internal sealed partial class RoutePlanPanelControl
                     var current = currentCombat();
                     var picks = current.ChoiceForGroup(capturedGroup).Steps.Take(capturedStep).ToList();
                     if (selected >= 0 && selected < step.Cards.Count)
-                        picks.Add(new CardRewardPick(selected, step.Cards[selected].Id));
+                        picks.Add(new CardRewardPick(selected, step.Cards[selected].Id,
+                            CardStateKey: step.Cards[selected].Item.StateKey));
                     else if (selected >= step.Cards.Count)
                         picks.Add(new CardRewardPick(AlternativeId:
                             step.Alternatives[selected - step.Cards.Count].OptionId));

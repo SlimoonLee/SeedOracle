@@ -395,6 +395,9 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
                     CombatRewards = outcome.CombatRewards ?? variant.CombatRewards,
                     Treasure = outcome.Treasure ?? variant.Treasure
                 };
+                if (outcome.MerchantGoldAfterPurchases is not null)
+                    deltaOverride = chinese ? $"本层：金币{outcome.GoldDelta:+#;-#;0}；完成{outcome.MerchantPurchases.Count}笔购买"
+                        : $"This floor: gold {outcome.GoldDelta:+#;-#;0}; {outcome.MerchantPurchases.Count} purchases completed";
                 if (outcome.Note is not null)
                     deltaOverride = outcome.Note;
             }
@@ -511,50 +514,69 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
             List<MerchantPick> picks = entry.Choice is RoutePlanChoice.Merchant existing
                 ? existing.Picks.ToList()
                 : new List<MerchantPick>();
+            var shopOutcome = chain?.Outcomes.GetValueOrDefault(entry.Coord);
+            var remaining = shopOutcome?.MerchantAfterPurchases ?? merchant.Value!;
+            var availableGold = shopOutcome?.MerchantGoldAfterPurchases ?? planningPlayer?.Gold ?? player?.Gold ?? 0;
+
+            void CommitPicks()
+            {
+                var removeCard = plan.Entries.FirstOrDefault(item => !item.IsCompleted && item.Coord == entry.Coord)?.Choice
+                    is RoutePlanChoice.Merchant { RemoveCard: true };
+                Update(new RoutePlanChoice.Merchant(picks.ToArray(), removeCard));
+            }
+
+            for (var index = 0; index < picks.Count; index++)
+            {
+                var removeIndex = index;
+                var purchased = shopOutcome?.MerchantPurchases.FirstOrDefault(item => item.PlanIndex == index).Item;
+                var button = new Button
+                {
+                    Text = (chinese ? $"撤销第{index + 1}笔：" : $"Undo purchase {index + 1}: ")
+                        + (purchased is null ? chinese ? "未执行" : "not executed" : $"{purchased.Name} {purchased.Cost}"),
+                    MouseFilter = MouseFilterEnum.Stop, FocusMode = FocusModeEnum.None
+                };
+                button.AddThemeFontSizeOverride("font_size", 16);
+                button.ApplyLocaleFontSubstitution(FontType.Regular, "font");
+                button.Pressed += () => { picks.RemoveAt(removeIndex); CommitPicks(); };
+                choiceBox.AddChild(button);
+            }
 
             void AddPick(MerchantPick pick, string label, int cost)
             {
-                var button = new CheckButton
+                if (cost < 0) return;
+                var button = new Button
                 {
-                    Text = $"{label}  {cost}",
-                    ButtonPressed = picks.Any(existing =>
-                        existing.Category == pick.Category && existing.Index == pick.Index),
+                    Text = (chinese ? "购买 " : "Buy ") + $"{label}  {cost}",
+                    Disabled = availableGold < cost,
                     MouseFilter = MouseFilterEnum.Stop,
                     FocusMode = FocusModeEnum.None
                 };
                 button.AddThemeFontSizeOverride("font_size", 16);
                 button.ApplyLocaleFontSubstitution(FontType.Regular, "font");
-                button.Toggled += on =>
+                button.Pressed += () =>
                 {
-                    if (on)
-                        picks.Add(pick);
-                    else
-                        picks.RemoveAll(other =>
-                            other.Category == pick.Category && other.Index == pick.Index);
-                    var removeCard = plan.Entries.FirstOrDefault(item =>
-                                      !item.IsCompleted && item.Coord == entry.Coord)?.Choice
-                                  is RoutePlanChoice.Merchant { RemoveCard: true };
-                    Update(new RoutePlanChoice.Merchant(picks.ToArray(), removeCard));
+                    picks.Add(pick);
+                    CommitPicks();
                 };
                 choiceBox.AddChild(button);
             }
 
-            var cards = merchant.Value!.CharacterCards;
+            var cards = remaining.CharacterCards;
             for (var index = 0; index < cards.Count; index++)
                 AddPick(new MerchantPick(MerchantCategory.CharacterCard, index), cards[index].Name, cards[index].Cost);
-            var colorless = merchant.Value.ColorlessCards;
+            var colorless = remaining.ColorlessCards;
             for (var index = 0; index < colorless.Count; index++)
                 AddPick(new MerchantPick(MerchantCategory.ColorlessCard, index), colorless[index].Name, colorless[index].Cost);
-            var relics = merchant.Value.Relics;
+            var relics = remaining.Relics;
             for (var index = 0; index < relics.Count; index++)
                 AddPick(new MerchantPick(MerchantCategory.Relic, index), relics[index].Name, relics[index].Cost);
-            var potions = merchant.Value.Potions;
+            var potions = remaining.Potions;
             for (var index = 0; index < potions.Count; index++)
                 AddPick(new MerchantPick(MerchantCategory.Potion, index), potions[index].Name, potions[index].Cost);
 
             var removal = new CheckButton
             {
-                Text = chinese ? $"删牌（{merchant.Value.CardRemovalCost}金）" : $"Remove card ({merchant.Value.CardRemovalCost}g)",
+                Text = chinese ? $"删牌（{remaining.CardRemovalCost}金）" : $"Remove card ({remaining.CardRemovalCost}g)",
                 ButtonPressed = entry.Choice is RoutePlanChoice.Merchant { RemoveCard: true },
                 MouseFilter = MouseFilterEnum.Stop,
                 FocusMode = FocusModeEnum.None

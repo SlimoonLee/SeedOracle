@@ -1,5 +1,4 @@
 using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.Core.Map;
@@ -24,10 +23,12 @@ internal sealed class LiveFingerprint
 
     public static LiveFingerprint Capture(RunState run)
     {
+        using var workSample = ForecastWorkProfile.Measure("fingerprint");
         var sections = new Dictionary<string, string>(StringComparer.Ordinal)
         {
             ["run_rng"] = Hash(run.Rng.ToSerializable()),
-            ["run_odds"] = Hash(run.Odds.ToSerializable()),
+            ["run_odds"] = Hash(new { Current = run.Odds.ToSerializable(),
+                UnknownBase = run.Odds.UnknownMapPoint._baseOdds.OrderBy(pair => pair.Key).ToArray() }),
             ["shared_relic_grab_bag"] = Hash(run.SharedRelicGrabBag.ToSerializable()),
             ["acts_and_encounter_counters"] = Hash(run.Acts.Select(act => act.ToSave()).ToArray()),
             ["map_topology"] = Hash(run.Map is NullActMap ? null : SerializableActMap.FromActMap(run.Map)),
@@ -65,7 +66,7 @@ internal sealed class LiveFingerprint
 
     private static string Hash<T>(T value)
     {
-        var json = JsonSerializer.Serialize(value, JsonOptions);
-        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(json)));
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(value, JsonOptions);
+        return Convert.ToHexString(SHA256.HashData(bytes));
     }
 }

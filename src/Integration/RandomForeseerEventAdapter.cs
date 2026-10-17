@@ -6,6 +6,8 @@ using MegaCrit.Sts2.Core.Events;
 using MegaCrit.Sts2.Core.Helpers;
 using MegaCrit.Sts2.Core.HoverTips;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Factories;
+using MegaCrit.Sts2.Core.Random;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Runs;
 using SeedOracle.Api;
@@ -46,7 +48,8 @@ internal sealed partial class RandomForeseerAdapter
 
         var bridge = EventPredictionBridge.Value;
         if (_contextConstructor is null || !bridge.IsAvailable)
-            return null;
+            return Forecast<EventContentDetails>.Unsupported(
+                "The event predictor is unavailable; missing data is not an empty outcome.", EventContentDependencies);
 
         try
         {
@@ -57,18 +60,12 @@ internal sealed partial class RandomForeseerAdapter
             var context = _contextConstructor.Invoke([state.Player]);
             var details = PredictInitialEventContents(bridge, state.Player, eventModel);
             GC.KeepAlive(context);
-            if (details.Options.Count == 0)
+            if (details.Options.Count == 0 && details.UncoveredOptionCount == 0)
                 return null;
 
-            return resolvedRooms.Count == 1
-                ? Forecast<EventContentDetails>.CurrentWorldline(
-                    details,
-                    EventContentDependencies,
-                    "Uses a serialized shadow run plus Random Foreseer's event option predictors; live RNG is never advanced.")
-                : Forecast<EventContentDetails>.Branch(
-                    details,
-                    EventContentDependencies,
-                    "Advances cloned reward state through the selected route. Earlier event choices, reward picks, purchases, rest actions, and other player-state changes remain conditional.");
+            return Forecast<EventContentDetails>.Branch(
+                details, EventContentDependencies,
+                "Initial option hints and supported effects only; target choices, later pages, combat victory and intervening state remain conditional.");
         }
         catch (Exception exception)
         {
@@ -96,15 +93,20 @@ internal sealed partial class RandomForeseerAdapter
         var options = GenerateAndSetInitialOptions(mutable, "content-prediction");
 
         var predictions = new List<EventOptionPredictionDetails>();
+        var uncovered = 0;
         foreach (var option in options.Where(candidate => !candidate.IsLocked))
         {
             var initialItems = BuildInitialOptionItems(bridge, mutable, option);
             var sets = bridge.Supports(mutable.GetType())
                        && bridge.TryPredict(mutable, option, out var tips)
-                ? BuildPredictionSets(tips)
+                ? BuildTargetTransformSets(mutable, option) ?? BuildPredictionSets(tips, mutable, option)
                 : [];
             if (initialItems.Count == 0 && sets.Count == 0)
+            {
+                if (!option.IsProceed)
+                    uncovered++;
                 continue;
+            }
             var optionTitle = NormalizeText(option.Title.GetFormattedText());
             if (string.IsNullOrWhiteSpace(optionTitle))
                 optionTitle = option.TextKey.Split('.').Last();
@@ -112,10 +114,47 @@ internal sealed partial class RandomForeseerAdapter
                 optionTitle,
                 option.TextKey,
                 initialItems,
-                sets));
+                sets,
+                HasPredictedEffects: sets.Count > 0));
         }
 
-        return new EventContentDetails(predictions);
+        return new EventContentDetails(predictions, uncovered);
+    }
+
+    private static IReadOnlyList<EventPredictionSetDetails>? BuildTargetTransformSets(
+        EventModel model, EventOption option)
+    {
+        var count = option.TextKey switch
+        {
+            "AROMA_OF_CHAOS.pages.INITIAL.options.LET_GO" => 1,
+            "SYMBIOTE.pages.INITIAL.options.KILL_WITH_FIRE" => 1,
+            "WHISPERING_HOLLOW.pages.INITIAL.options.HUG" => 1,
+            "MORPHIC_GROVE.pages.INITIAL.options.GROUP" => 2,
+            _ => 0
+        };
+        if (count == 0)
+            return null;
+
+        var sets = new List<EventPredictionSetDetails>();
+        var deck = model.Owner!.Deck.Cards;
+        for (var position = 0; position < count; position++)
+        for (var index = 0; index < deck.Count; index++)
+        {
+            var source = deck[index];
+            if (source.Type == CardType.Quest || !source.IsTransformable)
+                continue;
+            // RF evaluates every possible target at the same RNG position.
+            // Preserve the source slot instead of flattening and deduplicating targets.
+            var rng = new Rng(model.Rng.ToSerializable());
+            for (var draw = 0; draw < position; draw++)
+                _ = rng.NextUnsignedLong();
+            var result = rng.NextItem(CardFactory.GetDefaultTransformationOptions(source, isInCombat: false));
+            if (result is not null)
+                sets.Add(new EventPredictionSetDetails(
+                    [ForecastItemDetails.Card(result)], EventPredictionKind.ChoiceCandidates,
+                    ForecastItemDetails.Card(source), index, position));
+        }
+        return sets;
     }
 
     /// <summary>
@@ -194,7 +233,7 @@ internal sealed partial class RandomForeseerAdapter
         || tip.GetType().Assembly == typeof(global::RandomForeseer.RandomForeseerCode.Entry).Assembly;
 
     private static IReadOnlyList<EventPredictionSetDetails> BuildPredictionSets(
-        IReadOnlyList<IHoverTip> tips)
+        IReadOnlyList<IHoverTip> tips, EventModel model, EventOption option)
     {
         var sets = new List<EventPredictionSetDetails>();
         var looseItems = new List<ForecastItemDetails>();
@@ -208,7 +247,9 @@ internal sealed partial class RandomForeseerAdapter
                 FlushLooseItems();
                 var items = bundleCards.Select(ForecastItemDetails.Card).ToArray();
                 if (items.Length > 0)
-                    sets.Add(new EventPredictionSetDetails(items));
+                    sets.Add(new EventPredictionSetDetails(items,
+                        tip.GetType().GetProperty("Kind", AnyInstance)?.GetValue(tip)?.ToString() == "Transform"
+                            ? EventPredictionKind.ChoiceCandidates : EventPredictionKind.CardRewardCandidates));
                 continue;
             }
 
@@ -251,7 +292,13 @@ internal sealed partial class RandomForeseerAdapter
         {
             if (looseItems.Count == 0)
                 return;
-            sets.Add(new EventPredictionSetDetails(looseItems.ToArray()));
+            var kind = option.TextKey.StartsWith("SLIPPERY_BRIDGE.", StringComparison.Ordinal)
+                       && option.TextKey.Contains("HOLD_ON", StringComparison.Ordinal)
+                ? EventPredictionKind.SequencePreview
+                : model.Id.Entry is "PUNCH_OFF" or "BATTLEWORN_DUMMY"
+                    ? EventPredictionKind.CombatVictoryConditional
+                    : EventPredictionKind.PartialPreview;
+            sets.Add(new EventPredictionSetDetails(looseItems.ToArray(), kind));
             looseItems.Clear();
         }
     }

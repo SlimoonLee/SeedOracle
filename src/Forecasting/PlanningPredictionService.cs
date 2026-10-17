@@ -12,8 +12,11 @@ using MegaCrit.Sts2.Core.Extensions;
 using MegaCrit.Sts2.Core.Factories;
 using MegaCrit.Sts2.Core.Hooks;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Models.Cards;
+using MegaCrit.Sts2.Core.Commands;
 using MegaCrit.Sts2.Core.Models.Relics;
 using MegaCrit.Sts2.Core.Map;
+using MegaCrit.Sts2.Core.Nodes.CommonUi;
 using MegaCrit.Sts2.Core.Odds;
 using MegaCrit.Sts2.Core.Random;
 using MegaCrit.Sts2.Core.Rooms;
@@ -24,6 +27,7 @@ using MegaCrit.Sts2.Core.Saves.Runs;
 using SeedOracle.Api;
 using SeedOracle.Integration;
 using SeedOracle.UI;
+using SeedOracle.Validation;
 
 namespace SeedOracle.Forecasting;
 
@@ -198,7 +202,23 @@ internal sealed class PlanningPredictionService
         var card = state.Run.CreateCard(canonical, state.Player);
         if (upgraded && !card.IsUpgraded)
             MegaCrit.Sts2.Core.Commands.CardCmd.Upgrade(card);
-        state.Player.Deck.AddInternal(card, silent: true);
+        using var isolation = ShadowIsolation.Enter(state.Player, automateRewards: true);
+        CardPileCmd.Add(card, PileType.Deck, skipVisuals: true).GetAwaiter().GetResult();
+    }
+
+    internal void AddCard(State state, ForecastItemDetails item)
+    {
+        if (item.StateKey is null)
+        {
+            AddCard(state, item.Id!, item.IsUpgraded);
+            return;
+        }
+        var save = JsonSerializer.Deserialize(item.StateKey, JsonSerializationUtility.GetTypeInfo<SerializableCard>())
+                   ?? throw new InvalidOperationException("Missing purchased card state.");
+        var card = CardModel.FromSerializable(save);
+        state.Run.AddCard(card, state.Player);
+        using var isolation = ShadowIsolation.Enter(state.Player, automateRewards: true);
+        CardPileCmd.Add(card, PileType.Deck, skipVisuals: true).GetAwaiter().GetResult();
     }
 
     internal bool RemoveCard(State state, ModelId cardId, int slot = -1)
@@ -224,7 +244,8 @@ internal sealed class PlanningPredictionService
             : state.Player.Deck.Cards.FirstOrDefault(candidate => candidate.Id.Entry == cardId.Entry);
         if (card is null || !card.IsUpgradable || card.IsUpgraded)
             return false;
-        MegaCrit.Sts2.Core.Commands.CardCmd.Upgrade(card);
+        using var isolation = ShadowIsolation.Enter(state.Player);
+        CardCmd.Upgrade(card, CardPreviewStyle.None);
         return true;
     }
 
@@ -314,11 +335,14 @@ internal sealed class PlanningPredictionService
 
     internal static SerializableRun CreateSerializableRun(RunState source)
     {
+        using var workSample = ForecastWorkProfile.Measure("snapshot.capture");
         // RunState intentionally has no public ToSerializable method. Start
         // from the engine's save envelope, then replace every mutable section
         // with the supplied shadow state so RNG, odds, bags and inventories
         // remain on the same worldline.
-        var save = RunManager.Instance.ToSave(preFinishedRoom: null);
+        SerializableRun save;
+        using (ForecastWorkProfile.Measure("snapshot.header"))
+            save = RunManager.Instance.ToSave(preFinishedRoom: null);
         save.Acts = source.Acts.Select(act => act.ToSave()).ToList();
         if (source.Map is not NullActMap)
             save.Acts[source.CurrentActIndex].SavedMap = SerializableActMap.FromActMap(source.Map);
@@ -339,36 +363,51 @@ internal sealed class PlanningPredictionService
 
     internal static RunState RestoreRun(SerializableRun snapshot)
     {
+        using var workSample = ForecastWorkProfile.Measure("snapshot.restore");
         var owned = CloneSnapshot(snapshot);
         var run = RunState.FromSerializable(owned);
+        ShadowIsolation.RegisterRun(run);
         // FromSerializable restores players/history, but leaves Map unset.
         // Preserve the captured topology without regenerating it or using live objects.
         if (owned.Acts[owned.CurrentActIndex].SavedMap is { } map)
             run.Map = new SavedActMap(map);
+        // Native RunManager performs this after FromSerializable. In
+        // particular Deadly Events restores the non-serialized elite base
+        // odds here; omitting it makes elite question marks disappear after
+        // the first roll. Do not invoke unreviewed third-party load effects.
+        foreach (var modifier in run.Modifiers.Where(modifier => modifier.GetType().Assembly == typeof(ModifierModel).Assembly))
+            modifier.OnRunLoaded(run);
         return run;
     }
 
     internal static SerializableRun CloneSnapshot(SerializableRun save)
     {
+        using var workSample = ForecastWorkProfile.Measure("snapshot.clone");
         // FromSerializable reuses mutable history entries from its input.
         // Cross the actual save serialization boundary before handing a graph
         // to an event, otherwise even a cloned player can alter live history.
         var typeInfo = JsonSerializationUtility.GetTypeInfo<SerializableRun>();
-        var root = JsonSerializer.SerializeToNode(save, typeInfo)!.AsObject();
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(save, typeInfo);
+        var clone = JsonSerializer.Deserialize(bytes, typeInfo)
+                    ?? throw new InvalidOperationException("Unable to clone planning run snapshot.");
         // Native serialization omits false, while the native initializer is true.
-        // Materialize this value before deserialization for every map point kind.
-        foreach (var act in root["acts"]!.AsArray().OfType<JsonObject>())
+        // Restore just that primitive from the source graph after decoding. The
+        // serializer preserves list order; every mutable object still belongs
+        // to the clone. Avoid building and re-encoding a whole JSON DOM merely
+        // to fix these flags on each branch capture and restore.
+        for (var actIndex = 0; actIndex < save.Acts.Count; actIndex++)
         {
-            if (act["saved_map"] is not JsonObject map)
+            if (save.Acts[actIndex].SavedMap is not { } sourceMap)
                 continue;
-            var points = map["points"]!.AsArray().OfType<JsonObject>()
-                .Concat(new[] { map["boss"], map["start"], map["second_boss"] }.OfType<JsonObject>());
-            foreach (var point in points)
-                if (!point.ContainsKey("can_modify"))
-                    point["can_modify"] = false;
+            var targetMap = clone.Acts[actIndex].SavedMap!;
+            for (var pointIndex = 0; pointIndex < sourceMap.Points.Count; pointIndex++)
+                targetMap.Points[pointIndex].CanBeModified = sourceMap.Points[pointIndex].CanBeModified;
+            targetMap.BossPoint.CanBeModified = sourceMap.BossPoint.CanBeModified;
+            targetMap.StartingPoint.CanBeModified = sourceMap.StartingPoint.CanBeModified;
+            if (sourceMap.SecondBossPoint is { } secondBoss)
+                targetMap.SecondBossPoint!.CanBeModified = secondBoss.CanBeModified;
         }
-        return JsonSerializer.Deserialize(root, typeInfo)
-               ?? throw new InvalidOperationException("Unable to clone planning run snapshot.");
+        return clone;
     }
 
     internal void AdvanceRoomsBeforeTarget(State state, IReadOnlyList<RoomType> resolvedRooms)
@@ -412,14 +451,27 @@ internal sealed class PlanningPredictionService
             case RoomType.Treasure:
                 _ = GenerateTreasure(state, isPriorRoom: true);
                 break;
+            case RoomType.RestSite:
+                EnterRestSite(state);
+                break;
         }
+    }
+
+    internal void EnterRestSite(State state)
+    {
+        using var isolation = ShadowIsolation.Enter(state.Player, automateRewards: true);
+        var room = new RestSiteRoom();
+        state.Run.PushRoom(room);
+        try { Hook.AfterRoomEntered(state.Run, room).GetAwaiter().GetResult(); }
+        finally { state.Run.PopCurrentRoom(); }
     }
 
     internal CombatRewardDetails GenerateCombatRewards(
         State state,
         RoomType roomType,
         EncounterModel? encounter,
-        CombatRoom? eventCombatRoom = null)
+        CombatRoom? eventCombatRoom = null,
+        int assumedHuntTriggers = 0)
     {
         var player = state.Player;
         using var isolation = ShadowIsolation.Enter(player, automateRewards: true);
@@ -431,6 +483,10 @@ internal sealed class PlanningPredictionService
         // and late reward hook in the same order as a finished combat.
         var mutableEncounter = encounter.IsMutable ? (EncounterModel)encounter.MutableClone() : encounter.ToMutable();
         var room = eventCombatRoom ?? new CombatRoom(mutableEncounter, state.Run);
+        if (assumedHuntTriggers is < 0 or > 100)
+            throw new ArgumentOutOfRangeException(nameof(assumedHuntTriggers));
+        for (var trigger = 0; trigger < assumedHuntTriggers; trigger++)
+            room.AddExtraReward(player, new CardReward(CardCreationOptions.ForRoom(player, room.RoomType), 3, player));
         state.Run.AppendToMapPointHistory(eventCombatRoom is not null ? MapPointType.Ancient : room.RoomType switch
         {
             RoomType.Elite => MapPointType.Elite,
@@ -442,6 +498,13 @@ internal sealed class PlanningPredictionService
         CardReward[] originalCards = [];
         try
         {
+            // A normal map combat enters a new base room. Event sub-combats
+            // already have their parent event and must not pay Maw Bank twice.
+            // Do not dispatch combat setup callbacks requiring live combat
+            // piles/powers merely to predict rewards.
+            if (eventCombatRoom is null)
+                foreach (var bank in state.Run.Players.SelectMany(owner => owner.Relics).OfType<MawBank>())
+                    bank.AfterRoomEntered(room).GetAwaiter().GetResult();
             // Invoke native model callbacks on the shadow graph. Dispatching
             // global combat lifecycle methods would also notify other mods
             // that the real combat ended.
@@ -475,7 +538,20 @@ internal sealed class PlanningPredictionService
                 player.RelicObtained -= card.OnRelicObtained;
         }
 
-        return DescribeRewards(rewards, originalCards);
+        return DescribeRewards(rewards, originalCards) with { NativeEncounter = mutableEncounter };
+    }
+
+    internal static IDisposable EnterRewardRoom(State state, EncounterModel encounter) => new RewardRoom(state, encounter);
+
+    private sealed class RewardRoom : IDisposable
+    {
+        private readonly RunState run;
+        internal RewardRoom(State state, EncounterModel encounter)
+        {
+            run = state.Run;
+            run.PushRoom(new CombatRoom(encounter.IsMutable ? (EncounterModel)encounter.MutableClone() : encounter.ToMutable(), run));
+        }
+        public void Dispose() => run.PopCurrentRoom();
     }
 
     internal static CombatRewardDetails DescribeRewards(RewardsSet rewards, IReadOnlyList<CardReward>? originalCards = null)
@@ -529,116 +605,71 @@ internal sealed class PlanningPredictionService
         state.TreasureRoomsAdvanced++;
         var relics = new List<RewardItemDetails>();
         var localReceivesTreasure = false;
-        foreach (var runPlayer in state.Run.Players)
+
+        // TreasureRoom.EnterInternal notifies room entry before relic picking
+        // begins, and SilverCrucible.ShouldGenerateTreasure compares against that
+        // entry counter (TreasureRoomsEntered > 1). Without this dispatch every
+        // predicted chest stays at the live counter and is shown as the relic's
+        // still-empty first chest.
+        var treasureRoom = new TreasureRoom(state.Run.CurrentActIndex);
+        state.Run.PushRoom(treasureRoom);
+        try
         {
-            if (!Hook.ShouldGenerateTreasure(state.Run, runPlayer))
-                continue;
+            Hook.AfterRoomEntered(state.Run, treasureRoom).GetAwaiter().GetResult();
 
-            var rarity = RelicFactory.RollRarity(state.Run.Rng.TreasureRoomRelics);
-            var relic = TryGetTutorialTreasureRelic(state, runPlayer)
-                        ?? state.Run.SharedRelicGrabBag.PullFromFront(rarity, state.Run)
-                        ?? RelicFactory.FallbackRelic;
-            relics.Add(new RewardItemDetails(ForecastItemDetails.Relic(relic)));
-            localReceivesTreasure |= ReferenceEquals(runPlayer, state.Player);
+            foreach (var runPlayer in state.Run.Players)
+            {
+                if (!Hook.ShouldGenerateTreasure(state.Run, runPlayer))
+                    continue;
+
+                var rarity = RelicFactory.RollRarity(state.Run.Rng.TreasureRoomRelics);
+                var relic = TryGetTutorialTreasureRelic(state, runPlayer)
+                            ?? state.Run.SharedRelicGrabBag.PullFromFront(rarity, state.Run)
+                            ?? RelicFactory.FallbackRelic;
+                relics.Add(new RewardItemDetails(ForecastItemDetails.Relic(relic)));
+                localReceivesTreasure |= ReferenceEquals(runPlayer, state.Player);
+            }
+
+            var gold = 0;
+            if (localReceivesTreasure)
+            {
+                gold = state.Player.PlayerRng.Rewards.NextInt(42, 53);
+                if (state.Player.RunState.AscensionLevel >= (int)MegaCrit.Sts2.Core.Entities.Ascension.AscensionLevel.Poverty)
+                    gold = (int)(gold * 0.75);
+            }
+
+            if (isPriorRoom && state.Run.Players.Count == 1 && relics.Count == 1)
+            {
+                var relic = ModelDb.GetById<RelicModel>(relics[0].Id);
+                state.Player.RelicGrabBag.Remove(relic);
+            }
+
+            return new TreasureRoomDetails(gold, relics, relics.Count == 0);
         }
-
-        var gold = 0;
-        if (localReceivesTreasure)
-        {
-            gold = state.Player.PlayerRng.Rewards.NextInt(42, 53);
-            if (state.Player.RunState.AscensionLevel >= (int)MegaCrit.Sts2.Core.Entities.Ascension.AscensionLevel.Poverty)
-                gold = (int)(gold * 0.75);
-        }
-
-        if (isPriorRoom && state.Run.Players.Count == 1 && relics.Count == 1)
-        {
-            var relic = ModelDb.GetById<RelicModel>(relics[0].Id);
-            state.Player.RelicGrabBag.Remove(relic);
-        }
-
-        return new TreasureRoomDetails(gold, relics, relics.Count == 0);
+        finally { state.Run.PopCurrentRoom(); }
     }
 
     internal MerchantInventoryForecast GenerateMerchant(State state)
     {
-        state.MerchantVisits++;
-        var player = state.Player;
-        var shops = player.PlayerRng.Shops;
-        var characterTypes = new[] { CardType.Attack, CardType.Attack, CardType.Skill, CardType.Skill, CardType.Power };
-        var saleIndex = shops.NextInt(characterTypes.Length);
-        var characterPool = player.Character.CardPool
-            .GetUnlockedCards(player.UnlockState, player.RunState.CardMultiplayerConstraint)
-            .ToArray();
-        var characterCards = new List<MerchantItemForecast>();
-        for (var index = 0; index < characterTypes.Length; index++)
-        {
-            var result = CardFactory.CreateForMerchant(player, characterPool, characterTypes[index]);
-            var card = result.Card;
-            var cost = Mathf.RoundToInt(BaseCardCost(card) * shops.NextFloat(0.95f, 1.05f));
-            if (index == saleIndex)
-                cost /= 2;
-            characterCards.Add(new MerchantItemForecast(
-                ForecastItemDetails.Card(card),
-                ApplyMerchantPrice(state, cost),
-                index == saleIndex));
-        }
+        using var shop = new PlanningMerchantSession(state);
+        return shop.Describe();
+    }
 
-        var colorlessPool = ModelDb.CardPool<MegaCrit.Sts2.Core.Models.CardPools.ColorlessCardPool>()
-            .GetUnlockedCards(player.UnlockState, player.RunState.CardMultiplayerConstraint)
-            .ToArray();
-        var colorlessCards = new List<MerchantItemForecast>();
-        foreach (var rarity in new[] { CardRarity.Uncommon, CardRarity.Rare })
-        {
-            var result = CardFactory.CreateForMerchant(player, colorlessPool, rarity);
-            colorlessCards.Add(new MerchantItemForecast(
-                ForecastItemDetails.Card(result.Card),
-                ApplyMerchantPrice(state, Mathf.RoundToInt(BaseCardCost(result.Card) * shops.NextFloat(0.95f, 1.05f)))));
-        }
-
-        var relics = new List<MerchantItemForecast>();
-        foreach (var rarity in new[]
-                 {
-                     RelicFactory.RollRarity(player),
-                     RelicFactory.RollRarity(player),
-                     RelicRarity.Shop
-                 })
-        {
-            var relic = player.RelicGrabBag.PullFromBack(
-                            rarity,
-                            candidate => candidate.IsAllowedInShops,
-                            player.RunState)
-                        ?? RelicFactory.FallbackRelic;
-            state.Run.SharedRelicGrabBag.Remove(relic);
-            var cost = (int)Math.Round(relic.MerchantCost * shops.NextFloat(0.85f, 1.15f));
-            relics.Add(new MerchantItemForecast(
-                ForecastItemDetails.Relic(relic),
-                ApplyMerchantPrice(state, cost)));
-        }
-
-        var potions = PotionFactory.CreateRandomPotionsOutOfCombat(player, 3, shops)
-            .Select(potion =>
-            {
-                var baseCost = potion.Rarity switch
-                {
-                    PotionRarity.Rare => 100,
-                    PotionRarity.Uncommon => 75,
-                    _ => 50
-                };
-                var cost = Mathf.RoundToInt(baseCost * shops.NextFloat(0.95f, 1.05f));
-                return new MerchantItemForecast(
-                    ForecastItemDetails.Potion(potion),
-                    ApplyMerchantPrice(state, cost));
-            })
-            .ToArray();
-
-        var removal = new MerchantCardRemovalEntry(player);
+    internal static MerchantInventoryForecast DescribeMerchant(MerchantInventory inventory, int ordinal)
+    {
+        using var pricing = ShadowIsolation.EvaluateLocalMerchantPrice();
+        MerchantItemForecast Empty() => new(ForecastItemDetails.Text("—"), -1);
+        MerchantItemForecast Card(MerchantCardEntry entry) => entry.CreationResult is { } result ? new(
+            ForecastItemDetails.Card(result.Card), entry.Cost, entry.IsOnSale) : Empty();
         return new MerchantInventoryForecast(
-            characterCards,
-            colorlessCards,
-            relics,
-            potions,
-            ApplyMerchantPrice(state, removal.Cost),
-            state.MerchantVisits);
+            inventory.CharacterCardEntries.Select(Card).ToArray(),
+            inventory.ColorlessCardEntries.Select(Card).ToArray(),
+            inventory.RelicEntries.Select(entry => entry.Model is { } relic ? new MerchantItemForecast(
+                ForecastItemDetails.Relic(relic), entry.Cost) : Empty()).ToArray(),
+            inventory.PotionEntries.Select(entry => entry.Model is { } potion ? new MerchantItemForecast(
+                ForecastItemDetails.Potion(potion), entry.Cost) : Empty()).ToArray(),
+            inventory.CardRemovalEntry!.Cost,
+            ordinal);
     }
 
     internal void RemoveRelic(State state, ModelId relicId)
@@ -656,31 +687,8 @@ internal sealed class PlanningPredictionService
         if (canonical is null || state.Player.Relics.Any(relic => relic.Id.Entry == relicId.Entry && !relic.IsStackable))
             return;
 
-        state.Player.AddRelicInternal(canonical.ToMutable(), silent: true);
-        if (!canonical.IsStackable)
-        {
-            state.Player.RelicGrabBag.Remove(canonical);
-            state.Run.SharedRelicGrabBag.Remove(canonical);
-        }
-    }
-
-    private static int ApplyMerchantPrice(State state, int cost)
-    {
-        var probe = new PriceProbe(state.Player, cost);
-        return (int)Hook.ModifyMerchantPrice(state.Run, state.Player, probe, cost);
-    }
-
-    private static float BaseCardCost(CardModel card)
-    {
-        var cost = card.Rarity switch
-        {
-            CardRarity.Rare => 150,
-            CardRarity.Uncommon => 75,
-            _ => 50
-        };
-        return card.Pool is MegaCrit.Sts2.Core.Models.CardPools.ColorlessCardPool
-            ? Mathf.RoundToInt(cost * 1.15f)
-            : cost;
+        using var isolation = ShadowIsolation.Enter(state.Player, automateRewards: true);
+        RelicCmd.Obtain(canonical.ToMutable(), state.Player).GetAwaiter().GetResult();
     }
 
     private static RelicModel? TryGetTutorialTreasureRelic(State state, Player player)
@@ -699,13 +707,4 @@ internal sealed class PlanningPredictionService
         return gorget;
     }
 
-    private sealed class PriceProbe(Player player, int cost) : MerchantEntry(player)
-    {
-        public override bool IsStocked => true;
-        public override void CalcCost() => _cost = cost;
-        protected override Task<(bool, int)> OnTryPurchase(MerchantInventory? inventory, bool ignoreCost) =>
-            Task.FromResult((false, 0));
-        protected override void ClearAfterPurchase() { }
-        protected override void RestockAfterPurchase(MerchantInventory? inventory) { }
-    }
 }

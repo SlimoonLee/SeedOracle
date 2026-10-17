@@ -1,5 +1,6 @@
 using HarmonyLib;
 using System.Threading;
+using System.Runtime.CompilerServices;
 using MegaCrit.Sts2.Core.Context;
 using MegaCrit.Sts2.Core.Commands;
 using MegaCrit.Sts2.Core.Entities.CardRewardAlternatives;
@@ -9,6 +10,7 @@ using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Potions;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Entities.Relics;
+using MegaCrit.Sts2.Core.Entities.Merchant;
 using MegaCrit.Sts2.Core.Events;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Multiplayer.Game;
@@ -18,6 +20,7 @@ using MegaCrit.Sts2.Core.Rewards;
 using MegaCrit.Sts2.Core.TestSupport;
 using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.Core.Runs.History;
+using MegaCrit.Sts2.Core.Saves;
 
 namespace SeedOracle.Integration;
 
@@ -33,6 +36,73 @@ internal static class ShadowIsolation
         Func<RewardsSet, Task>? RewardHandler = null);
     private static readonly AsyncLocal<List<Frame>?> Frames = new();
     private static readonly AsyncLocal<List<ShadowEventCombatRequest>?> EventCombatCaptures = new();
+    private static readonly AsyncLocal<bool> MerchantGeneration = new();
+    private static readonly AsyncLocal<bool> LocalPriceEvaluation = new();
+    private static readonly AsyncLocal<bool> MerchantPurchase = new();
+    private sealed class ShadowPlayerIdentity { }
+    private static readonly ConditionalWeakTable<Player, ShadowPlayerIdentity> ShadowPlayers = new();
+
+    internal static void RegisterRun(RunState run)
+    {
+        foreach (var player in run.Players)
+            ShadowPlayers.GetValue(player, static _ => new ShadowPlayerIdentity());
+    }
+
+    // A nested branch or a callback can outlive its active execution frame.
+    // Shadow ownership therefore belongs to object identity, not just the top
+    // frame or the NetId (which intentionally matches the real local player).
+    internal static bool IsShadowPlayer(Player? player)
+    {
+        if (player is null) return false;
+        if (ShadowPlayers.TryGetValue(player, out _)) return true;
+        if (Frames.Value is not { } frames) return false;
+        // LocalContext is queried on hot card/UI paths. Avoid a captured
+        // predicate (and its closure allocation) on every ownership check.
+        for (var index = frames.Count - 1; index >= 0; index--)
+            if (ReferenceEquals(frames[index].Player, player)) return true;
+        return false;
+    }
+
+    private static bool AllowsLocalContext(Player? player) => AllowLocalContext
+        && ReferenceEquals(player, ActiveShadowPlayer);
+
+    internal static bool SuppressLocalPlayer(Player? player) => IsShadowPlayer(player) && !AllowsLocalContext(player);
+
+    internal static bool SuppressMerchantDiscovery => MerchantGeneration.Value;
+    internal static bool IsEvaluatingLocalPrice => LocalPriceEvaluation.Value;
+    internal static bool IsExecutingMerchantPurchase => MerchantPurchase.Value && ActiveShadowPlayer is not null;
+
+    internal static IDisposable ExecuteMerchantPurchase()
+    {
+        if (ActiveShadowPlayer is null)
+            throw new InvalidOperationException("Merchant purchase requires a shadow player.");
+        var previous = MerchantPurchase.Value;
+        MerchantPurchase.Value = true;
+        return new CallbackScope(() => MerchantPurchase.Value = previous);
+    }
+
+    internal static IDisposable GenerateMerchantInventory()
+    {
+        if (ActiveShadowPlayer is null)
+            throw new InvalidOperationException("Merchant generation requires a shadow player.");
+        var previous = MerchantGeneration.Value;
+        MerchantGeneration.Value = true;
+        return new CallbackScope(() => MerchantGeneration.Value = previous);
+    }
+
+    internal static IDisposable EvaluateLocalMerchantPrice()
+    {
+        if (ActiveShadowPlayer is null)
+            throw new InvalidOperationException("Merchant pricing requires a shadow player.");
+        var previous = LocalPriceEvaluation.Value;
+        LocalPriceEvaluation.Value = true;
+        return new CallbackScope(() => LocalPriceEvaluation.Value = previous);
+    }
+
+    private sealed class CallbackScope(Action restore) : IDisposable
+    {
+        public void Dispose() => restore();
+    }
 
     internal sealed record ShadowEventCombatRequest(
         EncounterModel Encounter,
@@ -182,55 +252,94 @@ internal static class ShadowIsolation
 
     internal static async Task<bool> SelectCardRewardAsync(CardReward reward)
     {
-        var player = reward.Player;
-        var chosen = new List<CardModel>();
-        var complete = false;
+        var session = new CardRewardSession(reward);
         try
         {
-            while (true)
+            while (!session.Finished)
             {
                 var alternatives = CardRewardAlternative.Generate(reward);
                 var selection = Selector?.GetSelectedCardReward(reward._cards, alternatives)
                                 ?? throw new InvalidOperationException("Shadow card reward has no scripted selector.");
-                if (selection.card is { } card)
-                {
-                    complete = true;
-                    var more = Hook.ShouldAllowSelectingMoreCardRewards(player.RunState, player, reward);
-                    var result = await CardPileCmd.Add(card, PileType.Deck, skipVisuals: true);
-                    if (result.success)
-                    {
-                        chosen.Add(result.cardAdded);
-                        reward._cards.RemoveAll(candidate => ReferenceEquals(candidate.Card, result.cardAdded));
-                    }
-                    if (!more)
-                        break;
-                }
-                else if (selection.alternative is { } alternative)
-                {
-                    complete = alternative.AfterSelected == PostAlternateCardRewardAction.EndSelectionAndCompleteReward;
-                    await alternative.OnSelect();
-                    if (alternative.AfterSelected is PostAlternateCardRewardAction.EndSelectionAndCompleteReward
-                        or PostAlternateCardRewardAction.EndSelectionAndDoNotCompleteReward)
-                        break;
-                }
-                else
-                {
-                    complete = false;
-                    break;
-                }
+                await session.ApplyAsync(selection);
             }
-
-            var history = (player.RunState.CurrentMapPointHistoryEntry
-                           ?? throw new InvalidOperationException("Shadow card reward lacks room history."))
-                .GetEntry(player.NetId).CardChoices;
-            history.AddRange(chosen.Select(card => new CardChoiceHistoryEntry(card, wasPicked: true)));
-            if (complete)
-                history.AddRange(reward.Cards.Select(card => new CardChoiceHistoryEntry(card, wasPicked: false)));
-            return complete;
+            session.CommitHistory();
+            return session.Complete;
         }
         finally
         {
-            player.RelicObtained -= reward.OnRelicObtained;
+            reward.Player.RelicObtained -= reward.OnRelicObtained;
+        }
+    }
+
+    // A reward screen can be closed after rerolling and another group opened.
+    // Keep each native selection session alive across those interleaved actions.
+    internal sealed class CardRewardSession(CardReward reward)
+    {
+        private readonly List<CardModel> chosen = [];
+        private bool committed;
+        public bool Finished { get; private set; }
+        public bool Complete { get; private set; }
+
+        public async Task ApplyAsync(CardRewardSelection selection)
+        {
+            if (Finished)
+                throw new InvalidOperationException("Card reward selection already ended.");
+            var player = reward.Player;
+            if (selection.card is { } card)
+            {
+                Complete = true;
+                var more = Hook.ShouldAllowSelectingMoreCardRewards(player.RunState, player, reward);
+                var result = await CardPileCmd.Add(card, PileType.Deck, skipVisuals: true);
+                if (result.success)
+                {
+                    chosen.Add(result.cardAdded);
+                    reward._cards.RemoveAll(candidate => ReferenceEquals(candidate.Card, result.cardAdded));
+                }
+                Finished = !more;
+            }
+            else if (selection.alternative is { } alternative)
+            {
+                Complete = alternative.AfterSelected == PostAlternateCardRewardAction.EndSelectionAndCompleteReward;
+                await alternative.OnSelect();
+                Finished = alternative.AfterSelected is PostAlternateCardRewardAction.EndSelectionAndCompleteReward
+                    or PostAlternateCardRewardAction.EndSelectionAndDoNotCompleteReward;
+            }
+            else
+            {
+                Complete = false;
+                Finished = true;
+            }
+        }
+
+        public void CommitHistory()
+        {
+            if (committed)
+                return;
+            committed = true;
+            var history = (reward.Player.RunState.CurrentMapPointHistoryEntry
+                           ?? throw new InvalidOperationException("Shadow card reward lacks room history."))
+                .GetEntry(reward.Player.NetId).CardChoices;
+            history.AddRange(chosen.Select(card => new CardChoiceHistoryEntry(card, wasPicked: true)));
+            if (Complete)
+                history.AddRange(reward.Cards.Select(card => new CardChoiceHistoryEntry(card, wasPicked: false)));
+        }
+
+        internal async Task CompleteRewardAsync()
+        {
+            CommitHistory();
+            if (Complete)
+            {
+                await Hook.AfterRewardTaken(reward.Player.RunState, reward.Player, reward);
+                reward.SuccessfullySelected = true;
+            }
+            else
+                reward.OnSkipped();
+            if (reward.ParentRewardSet is { } parent)
+            {
+                parent.RemoveReward(reward);
+                await (Task<bool>)AccessTools.Method(typeof(LinkedRewardSet), "OnSelect").Invoke(parent, null)!;
+            }
+            reward.Player.RelicObtained -= reward.OnRelicObtained;
         }
     }
 }
@@ -373,10 +482,14 @@ internal static class ShadowIsolationPatch
     [HarmonyPatch(nameof(LocalContext.IsMe), typeof(Player))]
     private static void IsMePlayer(Player? player, ref bool __result)
     {
-        if (__result
-            && ShadowIsolation.ActiveShadowPlayer is { } shadow
-            && ReferenceEquals(player, shadow)
-            && !ShadowIsolation.AllowLocalContext)
+        // Only price hooks reopen local ownership, keeping event/UI gates closed.
+        if (ShadowIsolation.IsEvaluatingLocalPrice
+            && ReferenceEquals(player, ShadowIsolation.ActiveShadowPlayer))
+        {
+            __result = true;
+            return;
+        }
+        if (__result && ShadowIsolation.SuppressLocalPlayer(player))
         {
             __result = false;
         }
@@ -386,10 +499,7 @@ internal static class ShadowIsolationPatch
     [HarmonyPatch(nameof(LocalContext.IsMe), typeof(Creature))]
     private static void IsMeCreature(Creature? creature, ref bool __result)
     {
-        if (__result
-            && ShadowIsolation.ActiveShadowPlayer is { } shadow
-            && ReferenceEquals(creature?.Player, shadow)
-            && !ShadowIsolation.AllowLocalContext)
+        if (__result && ShadowIsolation.SuppressLocalPlayer(creature?.Player))
         {
             __result = false;
         }
@@ -399,9 +509,7 @@ internal static class ShadowIsolationPatch
     [HarmonyPatch(nameof(LocalContext.IsMine), typeof(CardModel))]
     private static void IsMineCard(CardModel? card, ref bool __result)
     {
-        if (__result
-            && ShadowIsolation.ActiveShadowPlayer is { } shadow
-            && ReferenceEquals(card?.Owner, shadow))
+        if (__result && ShadowIsolation.IsShadowPlayer(card?.Owner))
         {
             __result = false;
         }
@@ -411,9 +519,7 @@ internal static class ShadowIsolationPatch
     [HarmonyPatch(nameof(LocalContext.IsMine), typeof(PotionModel))]
     private static void IsMinePotion(PotionModel? potion, ref bool __result)
     {
-        if (__result
-            && ShadowIsolation.ActiveShadowPlayer is { } shadow
-            && ReferenceEquals(potion?.Owner, shadow))
+        if (__result && ShadowIsolation.IsShadowPlayer(potion?.Owner))
         {
             __result = false;
         }
@@ -423,9 +529,7 @@ internal static class ShadowIsolationPatch
     [HarmonyPatch(nameof(LocalContext.IsMine), typeof(RelicModel))]
     private static void IsMineRelic(RelicModel? relic, ref bool __result)
     {
-        if (__result
-            && ShadowIsolation.ActiveShadowPlayer is { } shadow
-            && ReferenceEquals(relic?.Owner, shadow))
+        if (__result && ShadowIsolation.IsShadowPlayer(relic?.Owner))
         {
             __result = false;
         }
@@ -435,9 +539,7 @@ internal static class ShadowIsolationPatch
     [HarmonyPatch(nameof(LocalContext.IsMine), typeof(EventModel))]
     private static void IsMineEvent(EventModel? eventModel, ref bool __result)
     {
-        if (__result
-            && ShadowIsolation.ActiveShadowPlayer is { } shadow
-            && ReferenceEquals(eventModel?.Owner, shadow))
+        if (__result && ShadowIsolation.IsShadowPlayer(eventModel?.Owner))
         {
             __result = false;
         }
@@ -461,4 +563,49 @@ internal static class ShadowRewardsSetPatch
         __result = ShadowIsolation.AutomateRewardsAsync(__instance);
         return false;
     }
+}
+
+// Merchant constructors mark stock as discovered before any purchase.
+// The native generator is used on a shadow graph, without profile discovery.
+[HarmonyPatch(typeof(SaveManager))]
+internal static class ShadowMerchantDiscoveryPatch
+{
+    private static IEnumerable<System.Reflection.MethodBase> TargetMethods() =>
+        new[] { nameof(SaveManager.MarkCardAsSeen), nameof(SaveManager.MarkRelicAsSeen),
+                nameof(SaveManager.MarkPotionAsSeen) }
+            .Select(name => AccessTools.DeclaredMethod(typeof(SaveManager), name));
+
+    [HarmonyPrefix]
+    private static bool Prefix() => !ShadowIsolation.SuppressMerchantDiscovery;
+}
+
+// Only the Cost getter needs local ownership for Membership Card. Reopening
+// ownership around a whole purchase would also reopen native UI/profile gates.
+[HarmonyPatch(typeof(MerchantEntry), nameof(MerchantEntry.Cost), MethodType.Getter)]
+internal static class ShadowMerchantPricePatch
+{
+    [HarmonyPrefix]
+    private static void Prefix(MerchantEntry __instance, ref IDisposable? __state)
+    {
+        if (ReferenceEquals(__instance._player, ShadowIsolation.ActiveShadowPlayer))
+            __state = ShadowIsolation.EvaluateLocalMerchantPrice();
+    }
+
+    [HarmonyFinalizer]
+    private static void Finalizer(IDisposable? __state) => __state?.Dispose();
+}
+
+// Native merchant entries explicitly broadcast after the item has been added.
+// Keep their entire purchase/restock/hook lifecycle, suppressing only these
+// network messages inside an isolated merchant purchase.
+[HarmonyPatch(typeof(RewardSynchronizer))]
+internal static class ShadowMerchantSyncPatch
+{
+    private static IEnumerable<System.Reflection.MethodBase> TargetMethods() =>
+        new[] { nameof(RewardSynchronizer.SyncLocalGoldLost), nameof(RewardSynchronizer.SyncLocalObtainedCard),
+                nameof(RewardSynchronizer.SyncLocalObtainedRelic), nameof(RewardSynchronizer.SyncLocalObtainedPotion) }
+            .Select(name => AccessTools.DeclaredMethod(typeof(RewardSynchronizer), name));
+
+    [HarmonyPrefix]
+    private static bool Prefix() => !ShadowIsolation.IsExecutingMerchantPurchase;
 }

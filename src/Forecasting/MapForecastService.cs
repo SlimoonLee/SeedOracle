@@ -1,17 +1,82 @@
+using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using MegaCrit.Sts2.Core.Context;
+using MegaCrit.Sts2.Core.Localization;
 using MegaCrit.Sts2.Core.Map;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Runs;
 using SeedOracle.Api;
 using SeedOracle.Integration;
+using SeedOracle.Validation;
 
 namespace SeedOracle.Forecasting;
 
 internal sealed class MapForecastService(IRandomForeseerAdapter randomForeseer)
 {
+    private const int MaximumCachedNodes = 64;
+    private const int WorldlineMilliseconds = 75;
+    private const int DetailMilliseconds = 250;
+    private readonly Dictionary<(MapPoint Point, bool Travel), (MapNodeForecast Forecast, long LastUse)> cache = [];
+    private long cacheUse;
+    private RunState? cachedRun;
+    private LiveFingerprint? cachedState;
+    private string? cachedEvent;
+    private string? cachedLanguage;
+
     public MapNodeForecast Predict(RunState run, MapPoint point, bool isTravelEnabled)
     {
+        using var workSample = ForecastWorkProfile.Measure("map.predict");
+        if (TryGetCached(run, point, isTravelEnabled, out var cached))
+            return cached;
+        var forecast = PredictCore(run, point, isTravelEnabled);
+        if (cache.Count >= MaximumCachedNodes)
+            cache.Remove(cache.MinBy(static entry => entry.Value.LastUse).Key);
+        cache[(point, isTravelEnabled)] = (forecast, ++cacheUse);
+        return forecast;
+    }
+
+    internal bool TryGetCached(RunState run, MapPoint point, bool isTravelEnabled,
+        [NotNullWhen(true)] out MapNodeForecast? forecast)
+    {
+        var state = LiveFingerprint.Capture(run);
+        var eventKey = EventCacheKey(run);
+        var language = LocManager.Instance?.Language;
+        if (!ReferenceEquals(run, cachedRun) || cachedState?.DescribeDifference(state) is not null
+            || cachedEvent != eventKey || cachedLanguage != language)
+        {
+            cache.Clear();
+            cachedRun = run;
+            cachedState = state;
+            cachedEvent = eventKey;
+            cachedLanguage = language;
+        }
+        var key = (point, isTravelEnabled);
+        if (cache.TryGetValue(key, out var cached))
+        {
+            cache[key] = (cached.Forecast, ++cacheUse);
+            forecast = cached.Forecast;
+            return true;
+        }
+        forecast = null;
+        return false;
+    }
+
+    private static string? EventCacheKey(RunState run)
+    {
+        if (run.CurrentRoom is not EventRoom room)
+            return null;
+        var model = room.LocalMutableEvent;
+        return $"{room.IsPreFinished}:{model.Id}:{model.IsFinished}:{model.Description?.LocEntryKey}:"
+               + model.Rng.ToSerializable().counter + ":"
+               + string.Join("|", model.CurrentOptions.Select(option => $"{option.TextKey}:{option.WasChosen}"));
+    }
+
+    private MapNodeForecast PredictCore(RunState run, MapPoint point, bool isTravelEnabled)
+    {
+        using var workSample = ForecastWorkProfile.Measure("map.core");
+        var clock = Stopwatch.StartNew();
+        using var rewardBudget = CombatRewardBranchService.LimitPreviewWork(() => clock.ElapsedMilliseconds < DetailMilliseconds);
         var exploration = RouteStateExplorer.Explore(run, point);
         var minimumSteps = exploration.Paths.Count == 0
             ? 0
@@ -37,7 +102,9 @@ internal sealed class MapForecastService(IRandomForeseerAdapter randomForeseer)
                 exploration.WasTruncated);
         }
 
-        var worldlines = RouteWorldlinePredictor.Predict(run, point, exploration.Paths);
+        var worldlines = RouteWorldlinePredictor.Predict(run, point, exploration.Paths,
+            canContinue: () => clock.ElapsedMilliseconds < WorldlineMilliseconds);
+        var routesTruncated = exploration.WasTruncated || worldlines.Count < exploration.Paths.Count;
         var targetTotalFloor = run.TotalFloor - run.ActFloor + point.coord.row + 1;
         var generatedEncounters = worldlines
             .Where(worldline => worldline.TargetEncounter is not null)
@@ -48,30 +115,58 @@ internal sealed class MapForecastService(IRandomForeseerAdapter randomForeseer)
                 encounter => EncounterCompositionPredictor.Generate(run, targetTotalFloor, [encounter]).Single());
 
         var player = LocalContext.GetMe(run) ?? run.Players.FirstOrDefault();
-        var merchantForecasts = new Dictionary<int, Forecast<MerchantInventoryForecast>>();
-        foreach (var ordinal in worldlines
-                     .Where(worldline => worldline.TargetRoomType == RoomType.Shop)
-                     .Select(worldline => worldline.FutureMerchantVisitOrdinal)
-                     .Distinct())
-        {
-            merchantForecasts[ordinal] = player is null
-                ? Forecast<MerchantInventoryForecast>.Unsupported(
-                    "No local player is available for merchant prediction.",
-                    PredictionDependency.PlayerState)
-                : randomForeseer.PredictMerchant(player, ordinal);
-        }
-
+        var currentEvent = CurrentEventChoiceContext.Capture(run);
+        var merchantForecasts = new Dictionary<string, Forecast<MerchantInventoryForecast>>(StringComparer.Ordinal);
         var combatRewardForecasts = new Dictionary<string, Forecast<CombatRewardDetails>>(StringComparer.Ordinal);
         var treasureForecasts = new Dictionary<string, Forecast<TreasureRoomDetails>>(StringComparer.Ordinal);
         var eventContentForecasts = new Dictionary<string, Forecast<EventContentDetails>?>(StringComparer.Ordinal);
+        var merchantBaselines = new Dictionary<string, Forecast<MerchantInventoryForecast>>(StringComparer.Ordinal);
+        var combatBaselines = new Dictionary<string, Forecast<CombatRewardDetails>>(StringComparer.Ordinal);
+        var treasureBaselines = new Dictionary<string, Forecast<TreasureRoomDetails>>(StringComparer.Ordinal);
+        var eventBaselines = new Dictionary<string, Forecast<EventContentDetails>?>(StringComparer.Ordinal);
+        var detailRoutesComputed = 0;
+        var detailsTruncated = false;
+        MerchantChoiceBranchService? merchantChoices = null;
         foreach (var worldline in worldlines)
         {
+            var baselineKey = string.Join(",", worldline.ResolvedRooms.Select(type => (int)type));
+            if (clock.ElapsedMilliseconds >= DetailMilliseconds)
+            {
+                detailsTruncated = true;
+                continue;
+            }
+            detailRoutesComputed++;
+            if (worldline.TargetRoomType == RoomType.Shop)
+            {
+                var key = MerchantRouteKey(worldline);
+                if (!merchantForecasts.ContainsKey(key))
+                {
+                    if (!merchantBaselines.TryGetValue(baselineKey, out var prediction))
+                        merchantBaselines[baselineKey] = prediction = player is null
+                        ? Forecast<MerchantInventoryForecast>.Unsupported(
+                            "No local player is available for merchant prediction.",
+                            PredictionDependency.PlayerState)
+                        : randomForeseer.PredictMerchantRoom(player, worldline.ResolvedRooms);
+                    if (player is not null && prediction is { HasValue: true }
+                        && (worldline.Path.Length > 1 || currentEvent is not null)
+                        && (merchantChoices?.HasBudget ?? true))
+                        prediction = Forecast<MerchantInventoryForecast>.Branch(
+                            (merchantChoices ??= new MerchantChoiceBranchService(maximumMilliseconds: 150, currentEvent: currentEvent)).Predict(player, worldline, prediction.Value!),
+                            prediction.Dependencies, "Inventories depend on the listed upstream choices; uncovered branches are explicit.");
+                    merchantForecasts[key] = DowngradeForUnavailableTravel(
+                        prediction,
+                        isTravelEnabled);
+                }
+            }
+
             if (worldline.TargetEncounter is { } targetEncounter)
             {
                 var key = RewardRouteKey(worldline, targetEncounter.Id);
                 if (!combatRewardForecasts.ContainsKey(key))
                 {
-                    var prediction = player is null
+                    var combatKey = baselineKey + "|" + targetEncounter.Id;
+                    if (!combatBaselines.TryGetValue(combatKey, out var prediction))
+                        combatBaselines[combatKey] = prediction = player is null
                         ? Forecast<CombatRewardDetails>.Unsupported(
                             "No local player is available for combat-reward prediction.",
                             PredictionDependency.PlayerState)
@@ -79,6 +174,13 @@ internal sealed class MapForecastService(IRandomForeseerAdapter randomForeseer)
                             player,
                             worldline.ResolvedRooms,
                             targetEncounter);
+                    if (player is not null && prediction.HasValue
+                        && (worldline.Path.Length > 1 || currentEvent is not null)
+                        && (merchantChoices?.HasBudget ?? true))
+                        prediction = Forecast<CombatRewardDetails>.Branch(
+                            (merchantChoices ??= new MerchantChoiceBranchService(maximumMilliseconds: 150, currentEvent: currentEvent))
+                                .PredictRewards(player, worldline, prediction.Value!), prediction.Dependencies,
+                            "Concrete upstream choices are replayed on isolated runs.");
                     combatRewardForecasts[key] = DowngradeForUnavailableTravel(
                         prediction,
                         isTravelEnabled);
@@ -90,11 +192,19 @@ internal sealed class MapForecastService(IRandomForeseerAdapter randomForeseer)
                 var key = RewardRouteKey(worldline);
                 if (!treasureForecasts.ContainsKey(key))
                 {
-                    var prediction = player is null
+                    if (!treasureBaselines.TryGetValue(baselineKey, out var prediction))
+                        treasureBaselines[baselineKey] = prediction = player is null
                         ? Forecast<TreasureRoomDetails>.Unsupported(
                             "No local player is available for treasure-room prediction.",
                             PredictionDependency.PlayerState)
                         : randomForeseer.PredictTreasureRoom(player, worldline.ResolvedRooms);
+                    if (player is not null && prediction.HasValue
+                        && (worldline.Path.Length > 1 || currentEvent is not null)
+                        && (merchantChoices?.HasBudget ?? true))
+                        prediction = Forecast<TreasureRoomDetails>.Branch(
+                            (merchantChoices ??= new MerchantChoiceBranchService(maximumMilliseconds: 150, currentEvent: currentEvent))
+                                .PredictTreasure(player, worldline, prediction.Value!), prediction.Dependencies,
+                            "Concrete upstream choices are replayed on isolated runs.");
                     treasureForecasts[key] = DowngradeForUnavailableTravel(
                         prediction,
                         isTravelEnabled);
@@ -106,7 +216,10 @@ internal sealed class MapForecastService(IRandomForeseerAdapter randomForeseer)
                 var key = RewardRouteKey(worldline, targetEvent.Id);
                 if (!eventContentForecasts.ContainsKey(key))
                 {
-                    var prediction = player is null
+                    // Event selection can depend on history and exact coordinates.
+                    var eventKey = baselineKey + "|" + targetEvent.Id + "|" + key;
+                    if (!eventBaselines.TryGetValue(eventKey, out var prediction))
+                        eventBaselines[eventKey] = prediction = player is null
                         ? Forecast<EventContentDetails>.Unsupported(
                             "No local player is available for event-content prediction.",
                             PredictionDependency.PlayerState | PredictionDependency.EventState)
@@ -132,27 +245,27 @@ internal sealed class MapForecastService(IRandomForeseerAdapter randomForeseer)
                 ? null
                 : generatedEncounters[worldline.TargetEncounter.Id].Details;
             var merchant = worldline.TargetRoomType == RoomType.Shop
-                ? merchantForecasts[worldline.FutureMerchantVisitOrdinal]
+                ? merchantForecasts.GetValueOrDefault(MerchantRouteKey(worldline))
                 : null;
             var combatRewards = worldline.TargetEncounter is { } rewardEncounter
-                ? combatRewardForecasts[RewardRouteKey(worldline, rewardEncounter.Id)]
+                ? combatRewardForecasts.GetValueOrDefault(RewardRouteKey(worldline, rewardEncounter.Id))
                 : null;
             var treasure = worldline.TargetRoomType == RoomType.Treasure
-                ? treasureForecasts[RewardRouteKey(worldline)]
+                ? treasureForecasts.GetValueOrDefault(RewardRouteKey(worldline))
                 : null;
             var eventContents = worldline.TargetEvent is { } contentEvent
-                ? eventContentForecasts[RewardRouteKey(worldline, contentEvent.Id)]
+                ? eventContentForecasts.GetValueOrDefault(RewardRouteKey(worldline, contentEvent.Id))
                 : null;
             return new RouteVariantForecast(
                 worldline.Route,
                 worldline.TargetRoomType,
                 eventDetails,
                 encounterDetails,
-                merchant,
+                ApplyConditions(merchant, routesTruncated || detailsTruncated),
                 worldline.HasUnmodeledStateDependency || !isTravelEnabled,
-                combatRewards,
-                treasure,
-                eventContents);
+                ApplyConditions(combatRewards, routesTruncated || detailsTruncated),
+                ApplyConditions(treasure, routesTruncated || detailsTruncated),
+                ApplyConditions(eventContents, routesTruncated || detailsTruncated));
         }).ToArray();
 
         var unknownRoom = BuildUnknownForecast(point, routeVariants, immediate);
@@ -166,6 +279,15 @@ internal sealed class MapForecastService(IRandomForeseerAdapter randomForeseer)
             isTravelEnabled);
         var merchant = BuildMerchantForecast(point, routeVariants, immediate, isTravelEnabled);
 
+        var incomplete = routesTruncated || detailsTruncated || !isTravelEnabled;
+        unknownRoom = ApplyConditions(unknownRoom, incomplete || routeVariants.Any(v => v.HasUnmodeledStateDependency));
+        events = ApplyConditions(events, incomplete || routeVariants.Any(v => v.HasUnmodeledStateDependency));
+        encounter = ApplyConditions(encounter, incomplete
+            || (encounter?.Dependencies.HasFlag(PredictionDependency.UnknownMapPoint) == true
+                && routeVariants.Any(v => v.HasUnmodeledStateDependency)));
+        merchant = ApplyConditions(merchant, incomplete);
+        monsterHp = ApplyConditions(monsterHp, incomplete);
+
         return new MapNodeForecast(
             point,
             minimumSteps,
@@ -176,7 +298,11 @@ internal sealed class MapForecastService(IRandomForeseerAdapter randomForeseer)
             monsterHp,
             merchant,
             routeVariants,
-            exploration.WasTruncated);
+            routesTruncated)
+        {
+            DetailsTruncated = detailsTruncated,
+            DetailRoutesComputed = detailRoutesComputed
+        };
     }
 
     private static string RewardRouteKey(RouteWorldline worldline, ModelId? encounterId = null) =>
@@ -184,7 +310,17 @@ internal sealed class MapForecastService(IRandomForeseerAdapter randomForeseer)
             ",",
             worldline.ResolvedRooms.Select(roomType => ((int)roomType).ToString()))
         + "|"
-        + (encounterId?.ToString() ?? string.Empty);
+        + (encounterId?.ToString() ?? string.Empty)
+        + "|" + string.Join(">", worldline.Path.Steps.Select(step => $"{step.Point.coord.row},{step.Point.coord.col}"));
+
+    private static string MerchantRouteKey(RouteWorldline worldline) => RewardRouteKey(worldline);
+
+    internal static Forecast<T>? ApplyConditions<T>(Forecast<T>? forecast, bool conditional) =>
+        conditional && forecast is { HasValue: true }
+                    && forecast.Accuracy is ForecastAccuracy.Exact or ForecastAccuracy.ExactForCurrentWorldline
+            ? Forecast<T>.Branch(forecast.Value!, forecast.Dependencies,
+                "Only computed routes and the currently modeled intervening state are covered.")
+            : forecast;
 
     private static Forecast<T> DowngradeForUnavailableTravel<T>(
         Forecast<T> forecast,
@@ -360,16 +496,14 @@ internal sealed class MapForecastService(IRandomForeseerAdapter randomForeseer)
                 : null;
         }
 
-        var ordinals = shops
+        var valued = shops
             .Where(forecast => forecast.HasValue)
-            .Select(forecast => forecast.Value!.FutureVisitOrdinal)
-            .Distinct()
+            .GroupBy(forecast => MerchantInventoryKey(forecast.Value!))
             .ToArray();
-        if (ordinals.Length == 1)
+        if (valued.Length == 1)
         {
-            var forecast = shops.First(candidate =>
-                candidate.HasValue && candidate.Value!.FutureVisitOrdinal == ordinals[0]);
-            if (isShopPoint && immediate && isTravelEnabled && ordinals[0] == 1)
+            var forecast = valued[0].First();
+            if (isShopPoint && immediate && isTravelEnabled && forecast.Value!.FutureVisitOrdinal == 1)
                 return forecast;
 
             return Forecast<MerchantInventoryForecast>.Branch(
@@ -382,7 +516,7 @@ internal sealed class MapForecastService(IRandomForeseerAdapter randomForeseer)
                     : "Conditional on the unknown room resolving to a shop; earlier rewards, purchases, restocks, or removals can change it.");
         }
 
-        if (ordinals.Length > 1)
+        if (valued.Length > 1)
         {
             return Forecast<MerchantInventoryForecast>.BranchWithoutValue(
                 PredictionDependency.Shops
@@ -390,9 +524,12 @@ internal sealed class MapForecastService(IRandomForeseerAdapter randomForeseer)
                 | PredictionDependency.RelicGrabBag
                 | PredictionDependency.CardRarityOdds
                 | PredictionDependency.PlayerState,
-                "Different feasible routes reach this as a different future merchant visit.");
+                "Different feasible routes pass different intervening rooms, so the threaded worldlines stock this shop differently.");
         }
 
         return shops[0];
     }
+
+    private static string MerchantInventoryKey(MerchantInventoryForecast inventory) =>
+        ForecastContentKey.Merchant(inventory);
 }

@@ -48,6 +48,13 @@ internal sealed partial class PreCombatForecastPanelControl : PanelContainer
     private int _activeTargetIndex = -1;
     private string? _stateToken;
     private bool _refreshAfterCurrent;
+    private bool _targetsPrepared;
+    private bool _preparedForTravel;
+    private NMapScreen? _preparedScreen;
+    private LiveFingerprint? _preparedState;
+    private string? _preparedLanguage;
+
+    internal int TargetCollectionCount { get; private set; }
 
     internal event Action? PresentationChanged;
 
@@ -226,9 +233,29 @@ internal sealed partial class PreCombatForecastPanelControl : PanelContainer
         _screen = screen;
         if (IsRunning)
             return;
+        if (mapChanged)
+            _targetsPrepared = false;
+        if (Visible)
+            PrepareTargets();
+    }
 
+    private void PrepareTargets()
+    {
+        if (_screen is not { } screen || IsRunning)
+            return;
+        var state = LiveFingerprint.Capture(screen._runState);
+        if (_targetsPrepared && _preparedState is not null && _preparedState.DescribeDifference(state) is null
+            && ReferenceEquals(screen, _preparedScreen) && screen.IsTravelEnabled == _preparedForTravel
+            && _preparedLanguage == MegaCrit.Sts2.Core.Localization.LocManager.Instance?.Language)
+            return;
         _targets = CollectTargets(screen);
+        TargetCollectionCount++;
         _stateToken = TryCaptureStateToken(screen._runState);
+        _preparedState = state;
+        _preparedLanguage = MegaCrit.Sts2.Core.Localization.LocManager.Instance?.Language;
+        _targetsPrepared = true;
+        _preparedForTravel = screen.IsTravelEnabled;
+        _preparedScreen = screen;
         RebuildRows();
         ConfigureSimulation(screen._runState);
         UpdateReadySummary();
@@ -237,6 +264,7 @@ internal sealed partial class PreCombatForecastPanelControl : PanelContainer
 
     internal void ShowWithoutCalculating()
     {
+        PrepareTargets();
         Visible = true;
         PresentationChanged?.Invoke();
     }
@@ -272,6 +300,8 @@ internal sealed partial class PreCombatForecastPanelControl : PanelContainer
         foreach (var point in screen._mapPointDictionary.Values
                      .Where(node => node.State != MapPointState.Traveled)
                      .Select(node => node.Point)
+                     .Where(point => point.PointType is MapPointType.Monster or MapPointType.Elite
+                         or MapPointType.Boss or MapPointType.Unknown)
                      .DistinctBy(point => point.coord)
                      .OrderBy(point => point.coord.row)
                      .ThenBy(point => point.coord.col))
@@ -329,15 +359,17 @@ internal sealed partial class PreCombatForecastPanelControl : PanelContainer
             .ToList();
     }
 
-    private static IReadOnlyList<PreCombatForecastTarget> BuildPointTargets(RunState run, MapPoint point)
+    internal static IReadOnlyList<PreCombatForecastTarget> BuildPointTargets(RunState run, MapPoint point)
     {
-        var exploration = RouteStateExplorer.Explore(run, point);
+        var exploration = RouteStateExplorer.Explore(run, point, static intermediate =>
+            intermediate.PointType is not (MapPointType.Monster or MapPointType.Elite
+                or MapPointType.Boss or MapPointType.Ancient));
         if (exploration.Paths.Count == 0)
             return [];
 
         var targetTotalFloor = run.TotalFloor - run.ActFloor + point.coord.row + 1;
         var results = new List<PreCombatForecastTarget>();
-        foreach (var worldline in RouteWorldlinePredictor.Predict(run, point, exploration.Paths))
+        foreach (var worldline in RouteWorldlinePredictor.Predict(run, point, exploration.Paths, firstCombatOnly: true))
         {
             if (worldline.TargetEncounter is null
                 || worldline.TargetRoomType is not (RoomType.Monster or RoomType.Elite or RoomType.Boss))
@@ -1029,7 +1061,7 @@ internal sealed partial class PreCombatForecastPanelControl : PanelContainer
                     : "\n条件结果：已应用休息后 HP；其他沿途奖励、锻造及触发尚未应用"
                 : string.Empty;
             var cacheText = fromCache ? "缓存结果 · " : string.Empty;
-            _state.Text = $"{cacheText}预计战损 {result.ProjectedHpLoss?.ToString() ?? "?"} HP · {potionText}\n{confidence}{elapsed}{assumption}";
+            _state.Text = $"{cacheText}预计战损 {result.ProjectedHpLoss?.ToString() ?? "?"} HP · {potionText}\n{confidence}{elapsed}{assumption}\n战损对应求解器选定的打法，找到终局不保证最优或实战结果相同";
             SetStatus(ManualPreCombatItemStatus.Succeeded);
             _calculateButton.Text = "重新计算";
         }
@@ -1089,7 +1121,12 @@ internal sealed partial class PreCombatForecastToggleButton : Button
             _panel.PresentationChanged += ApplyState;
         }
         if (!_panel.IsRunning)
-            _panel.Visible = expanded;
+        {
+            if (expanded)
+                _panel.ShowWithoutCalculating();
+            else
+                _panel.Visible = false;
+        }
         Disabled = !Entry.CombatSolver.SupportsPreCombatForecast;
         ApplyState();
     }

@@ -56,6 +56,11 @@ internal static class DebugForecastSmokeTest
         }
 
         ValidateForecastItemFormatting();
+        ShadowPresentationRegressionTests.Run(run);
+        RoutePerformanceRegressionTests.Run(run);
+        PredictionAccuracyRegressionTests.Run(run);
+        RewardChoiceRegressionTests.Run(run);
+        CausalChoiceRegressionTests.Run(run);
         ValidateRoutePlan(run);
 
         var points = map.GetAllMapPoints()
@@ -385,6 +390,11 @@ internal static class DebugForecastSmokeTest
         }
 
         var seedOverviewPanel = RunSeedOverviewPanel.Refresh(__instance);
+        var overviewPreparations = seedOverviewPanel.PreparationCount;
+        if (!seedOverviewPanel.Visible && overviewPreparations != 0)
+            throw new InvalidOperationException("A collapsed overview must not predict ancient options on map refresh.");
+        seedOverviewPanel.ShowPrepared();
+        seedOverviewPanel.Visible = false;
         var topBar = NRun.Instance?.GlobalUi.TopBar
                      ?? throw new InvalidOperationException(
                          "Seed Oracle self-test could not locate the active run top bar.");
@@ -426,6 +436,14 @@ internal static class DebugForecastSmokeTest
 
         var preCombatTargets = PreCombatForecastPanelControl.CollectTargets(__instance);
         var preCombatPanel = PreCombatForecastPanel.Refresh(__instance);
+        var hiddenCollections = preCombatPanel.TargetCollectionCount;
+        preCombatPanel.Configure(__instance, mapChanged: false);
+        preCombatPanel.Configure(__instance, mapChanged: false);
+        if (hiddenCollections != 0 || preCombatPanel.TargetCollectionCount != hiddenCollections)
+            throw new InvalidOperationException("A collapsed pre-combat panel must not collect route targets during map refresh.");
+        preCombatPanel.ShowWithoutCalculating();
+        var preparedCollections = preCombatPanel.TargetCollectionCount;
+        preCombatPanel.Collapse();
         var preCombatToggle = topBar.GetNodeOrNull<PreCombatForecastToggleButton>(
             PreCombatForecastToggleButton.NodeName);
         if (preCombatToggle is null
@@ -470,11 +488,13 @@ internal static class DebugForecastSmokeTest
         preCombatToggle.EmitSignal(Godot.BaseButton.SignalName.Pressed);
         if (preCombatToggle.IsExpanded != preCombatWasExpanded
             || preCombatPanel.Visible != preCombatWasExpanded
-            || preCombatPanel.IsRunning)
+            || preCombatPanel.IsRunning
+            || preCombatPanel.TargetCollectionCount != preparedCollections)
         {
             throw new InvalidOperationException(
                 "Seed Oracle pre-combat toggle did not restore its initial idle state.");
         }
+        Smoke.SmokeReport.Add("route-panel-lifecycle PASS: hidden_collections=0 explicit_open=1 unchanged_reopen=cached worker=idle");
 
         var player = LocalContext.GetMe(run)
                      ?? throw new InvalidOperationException("Seed Oracle self-test could not obtain the local player.");

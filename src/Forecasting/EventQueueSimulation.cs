@@ -35,8 +35,11 @@ internal sealed class EventQueueSimulation(
         if (consume)
         {
             _visitedEventIds.Add(result.Id);
+            run.AddVisitedEvent(result);
             _eventsVisited++;
         }
+
+        run.Act._rooms.eventsVisited = _eventsVisited;
 
         return result;
     }
