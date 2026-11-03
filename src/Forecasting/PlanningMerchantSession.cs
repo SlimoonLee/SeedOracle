@@ -1,7 +1,5 @@
 using MegaCrit.Sts2.Core.Entities.Merchant;
 using MegaCrit.Sts2.Core.Entities.Cards;
-using MegaCrit.Sts2.Core.Entities.Gold;
-using MegaCrit.Sts2.Core.Commands;
 using MegaCrit.Sts2.Core.Hooks;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Rooms;
@@ -79,17 +77,9 @@ internal sealed class PlanningMerchantSession : IDisposable
         var entry = Inventory.CardRemovalEntry;
         if (entry is null || !entry.IsStocked || !entry.EnoughGold || !card.IsRemovable
             || !Hook.ShouldAllowMerchantCardRemoval(state.Run, state.Player)) return false;
-        // OneOffSynchronizer normally selects a live player's target. The
-        // planner already has that target; keep its native command/hook order
-        // without sending a message or opening the live removal screen.
-        var cost = entry.Cost;
-        PlayerCmd.LoseGold(cost, state.Player, GoldLossType.Spent).GetAwaiter().GetResult();
-        CardPileCmd.RemoveFromDeck(card).GetAwaiter().GetResult();
-        state.Player.ExtraFields.CardShopRemovalsUsed++;
-        entry.SetUsed();
-        Hook.AfterItemPurchased(state.Run, state.Player, entry, cost).GetAwaiter().GetResult();
-        entry.InvokePurchaseCompleted(entry);
-        return true;
+        if (card.Pile?.Type != PileType.Deck || !ReferenceEquals(card.Owner, state.Player)) return false;
+
+        return ShadowMerchantRemovalPatch.RemoveAsync(entry, card, entry.Cost).GetAwaiter().GetResult();
     }
 
     private sealed class RequiredMerchantSelector : ICardSelector

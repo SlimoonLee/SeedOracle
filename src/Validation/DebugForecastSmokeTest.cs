@@ -57,6 +57,7 @@ internal static class DebugForecastSmokeTest
 
         ValidateForecastItemFormatting();
         ShadowPresentationRegressionTests.Run(run);
+        ShadowDeathIsolationRegressionTests.Run(run);
         RoutePerformanceRegressionTests.Run(run);
         PredictionAccuracyRegressionTests.Run(run);
         RewardChoiceRegressionTests.Run(run);

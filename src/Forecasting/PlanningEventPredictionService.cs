@@ -352,6 +352,7 @@ internal sealed class PlanningEventPredictionService
                 // the game itself instead of an ever-growing event table.
                 var declaredCapability = GetEventPlanningCapability(entryName, option);
                 var combatEncounterId = option.IsLocked
+                    || declaredCapability.Kind is EventPlanningKind.Minigame or EventPlanningKind.RunEnding
                     ? null
                     : TryCaptureNativeEventCombat(
                         livePlayer,
@@ -669,11 +670,14 @@ internal sealed class PlanningEventPredictionService
 
     private static async Task ReplayPreviousStepsAsync(EventModel model, IReadOnlyList<EventPlanStep>? steps)
     {
+        var capabilities = new PlanningEventPredictionService();
         foreach (var step in steps ?? [])
         {
             var option = model.CurrentOptions.FirstOrDefault(candidate => candidate.TextKey == step.TextKey);
             if (model.IsFinished || option is null || option.IsLocked)
                 throw new InvalidOperationException($"事件路径已失效：{step.TextKey}，请从事件起点重新选择。");
+            if (capabilities.GetEventPlanningCapability(model.GetType().Name, option).Kind == EventPlanningKind.RunEnding)
+                throw new InvalidOperationException("该事件路径会终止跑局，已停止预演。");
             using var selector = ShadowIsolation.UseSelector(new ScriptedCardSelector(step.CardPicks), step.TakeRewards ?? true);
             using var capture = ShadowIsolation.CaptureEventCombats();
             await option.Chosen();

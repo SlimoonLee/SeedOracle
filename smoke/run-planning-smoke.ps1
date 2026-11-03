@@ -166,6 +166,8 @@ try {
     Select-String -LiteralPath $report -Pattern 'PASS:|SUMMARY:' | ForEach-Object Line
     if ($process.ExitCode -ne 0) { throw "Planning audit exited with code $($process.ExitCode). Inspect $log" }
     if ($SelfTest -and (-not (Select-String -LiteralPath $report -Pattern '^accuracy-regression PASS:') -or
+                       -not (Select-String -LiteralPath $report -Pattern '^shadow-death-isolation PASS:') -or
+                       -not (Select-String -LiteralPath $report -Pattern '^shadow-merchant-isolation PASS:') -or
                        -not (Select-String -LiteralPath $report -Pattern '^route-performance PASS:') -or
                        -not (Select-String -LiteralPath $report -Pattern '^route-panel-lifecycle PASS:') -or
                        -not (Select-String -LiteralPath $report -Pattern '^route-reward-refresh PASS:') -or
