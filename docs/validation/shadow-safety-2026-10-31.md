@@ -23,7 +23,7 @@
 
 ## 本轮验证与本机安装
 
-在独立 APPDATA/LOCALAPPDATA 和复制的资料下运行原版 headless 游戏，启用 RitsuLib、Random Foreseer、Combat Solver 与当前 SeedOracle Debug。修复后的完整 `-SelfTest` 与规划审计进程退出码为 0；报告和日志分别保存在 `.local/shadow-safety-20261031/verified-smoke-report.txt` 与 `verified-smoke.log`。
+在独立 APPDATA/LOCALAPPDATA 和复制的资料下运行原版 headless 游戏，启用 RitsuLib、Random Foreseer 0.13.20、Combat Solver 与当前 SeedOracle Debug。修复后的完整 `-SelfTest` 与规划审计进程退出码为 0；最终报告和日志分别保存在 `.local/shadow-safety-20261031/verified-release-smoke-report.txt` 与 `verified-release-smoke.log`。
 
 - `shadow-death-isolation PASS`：直接、间接、作用域结束后的死亡，以及原版满屋芝士低血选项均正确致死影子；蜥蜴尾巴、瓶中精灵恢复量及消耗正确，强制死亡绕过防死，混合真实/影子目标拒绝执行。测试进程中的 live 跑局、全局管理器状态与进度序列化值未变，`OnEnded`、战斗失败与结束界面调用为 0。
 - `shadow-merchant-isolation PASS`：阳伞自动获得 7 张商品卡并仅删除指定的影子牌，免费费用、删牌次数、库存与历史正确；缺少选择时明确拒绝。真实删牌同步器、原始阳伞后台任务、地图输入改动与放弃确认框调用均为 0。
