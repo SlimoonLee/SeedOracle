@@ -148,30 +148,34 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
 
         var header = new HBoxContainer();
         header.AddThemeConstantOverride(ThemeConstants.BoxContainer.Separation, 8);
-        header.CustomMinimumSize = new Vector2(0, 44);
         column.AddChild(header);
         _title = PreCombatPanelStyles.CreateLabel(
             Chinese ? "极速商店 · 求购与全景" : "Blitz shop · wishes & panorama",
             18, StsColors.gold, bold: true);
+        _title.ClipText = true;
+        _title.SizeFlagsHorizontal = SizeFlags.ExpandFill;
         header.AddChild(_title);
-        var headerGap = new Control
+        // The tabs are absolutely anchored to the panel's top-right corner:
+        // an explicit rect cannot drift from its hit area the way a
+        // container-computed child did (the user-visible symptom was a
+        // clickable strip below each drawn button). They live on a plain
+        // Control overlay because the PanelContainer would otherwise refit
+        // them into its content area.
+        var tabOverlay = new Control
         {
-            SizeFlagsHorizontal = SizeFlags.ExpandFill,
             MouseFilter = MouseFilterEnum.Ignore
         };
-        header.AddChild(headerGap);
-        // The tab buttons are built exactly like the item chips below (text
-        // sized, generous hit rect) — the user-facing symptom was a hit area
-        // limited to the bottom sliver of the drawn button.
-        _plannerTab = HeaderButton(Chinese ? "求购" : "Wishes");
+        tabOverlay.SetAnchorsPreset(LayoutPreset.FullRect);
+        AddChild(tabOverlay);
+        _plannerTab = HeaderTabButton(Chinese ? "求购" : "Wishes", -352, -240);
         _plannerTab.Pressed += () => SwitchMode(true);
-        header.AddChild(_plannerTab);
-        _panoramaTab = HeaderButton(Chinese ? "全景" : "Panorama");
+        tabOverlay.AddChild(_plannerTab);
+        _panoramaTab = HeaderTabButton(Chinese ? "全景" : "Panorama", -232, -120);
         _panoramaTab.Pressed += () => SwitchMode(false);
-        header.AddChild(_panoramaTab);
-        _collapse = HeaderButton(Chinese ? "收起" : "Hide");
+        tabOverlay.AddChild(_panoramaTab);
+        _collapse = HeaderTabButton(Chinese ? "收起" : "Hide", -112, -8);
         _collapse.Pressed += ToggleExpansion;
-        header.AddChild(_collapse);
+        tabOverlay.AddChild(_collapse);
 
         // Everything below the header hides when the window folds, so the
         // folded state is a title bar that stays put — the window can never
@@ -245,11 +249,20 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
         if (expanded && _panorama is null && !_buildPending && !_stepping) RequestCompute();
     }
 
-    private static Button HeaderButton(string text)
+    /// <summary>A header tab pinned to the panel's top-right corner: the
+    /// anchors fix the rect, so the hit area and the drawn button coincide by
+    /// construction. `right`/`left` are offsets from the panel's right edge.</summary>
+    private static Button HeaderTabButton(string text, float left, float right)
     {
         var button = PreCombatPanelStyles.CreateButton(text, 0f);
-        button.CustomMinimumSize = new Vector2(0, 40);
-        button.SizeFlagsVertical = SizeFlags.Fill;
+        button.AnchorLeft = 1f;
+        button.AnchorRight = 1f;
+        button.AnchorTop = 0f;
+        button.AnchorBottom = 0f;
+        button.OffsetLeft = left;
+        button.OffsetRight = right;
+        button.OffsetTop = 10f;
+        button.OffsetBottom = 52f;
         button.ToggleMode = true;
         return button;
     }
