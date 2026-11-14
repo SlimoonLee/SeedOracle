@@ -89,14 +89,59 @@ internal static class BlitzShopAudit
         var deckVerdict = "no-row";
         if (preview is not null && _deckBefore is not null)
         {
-            deckVerdict = preview.Purchased && !preview.NeedsCardPick
-                ? Compare(preview, entry.Player, _deckBefore)
-                : "pick-dependent";
+            deckVerdict = preview.Purchased
+                ? preview.NeedsCardPick && preview.TransformChoices.Count > 0
+                    ? VerifyTransform(preview, entry.Player, _deckBefore)
+                    : preview.NeedsCardPick ? "pick-dependent" : Compare(preview, entry.Player, _deckBefore)
+                : "declined";
         }
         _deckBefore = null;
 
         Entry.Logger.Info($"[BlitzAudit] slot={slot} {entry.MerchantEntryType} "
             + $"prefix=[{string.Join(",", prefix)}] deck={deckVerdict}");
+    }
+
+    /// <summary>
+    /// The transform's real deck swap (removed source → added result) against
+    /// the row's table: for every card the player removed, the row must list
+    /// it as a source and the added card must be that source's promised
+    /// result. This is the check that was missing when a transformed curse or
+    /// a different-pool card turned a promised result into another one.
+    /// </summary>
+    internal static string VerifyTransform(
+        BlitzYieldForecast preview,
+        Player player,
+        Dictionary<(string Id, bool Upgraded), int> before)
+    {
+        var after = BlitzMerchantProbe.CountDeck(player);
+        var (gained, _) = BlitzMerchantProbe.DiffDeck(player, before, after);
+        var removed = before
+            .Where(pair => after.GetValueOrDefault(pair.Key) < pair.Value)
+            .Select(pair => pair.Key).ToList();
+        if (removed.Count == 0)
+            return gained.Count == 0 ? "transform OK (nothing removed?)" : "MISMATCH nothing removed but "
+                + string.Join("/", gained.Select(item => item.Name)) + " appeared";
+        var problems = new List<string>();
+        foreach (var removedKey in removed)
+        {
+            var choice = preview.TransformChoices.FirstOrDefault(candidate =>
+                candidate.Source.Id?.Entry == removedKey.Item1
+                && candidate.Source.IsUpgraded == removedKey.Item2);
+            if (choice is null)
+            {
+                problems.Add($"removed {removedKey.Item1} is not a source in the row's table");
+                continue;
+            }
+            var landed = gained.Any(item =>
+                item.Id?.Entry == choice.Result.Id?.Entry
+                && item.IsUpgraded == choice.Result.IsUpgraded);
+            if (!landed)
+                problems.Add($"{removedKey.Item1}{(removedKey.Item2 ? "+" : "")}→row says {choice.Result.Name} but got "
+                    + string.Join("/", gained.Select(item => item.Name)));
+        }
+        return problems.Count == 0
+            ? $"transform OK ({string.Join("→", removed.Select(key => key.Item1))})"
+            : "MISMATCH " + string.Join("; ", problems);
     }
 
     private static int SlotOf(MerchantInventory inventory, BlitzMerchantEntry entry)
