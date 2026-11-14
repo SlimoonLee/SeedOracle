@@ -406,7 +406,9 @@ internal static class BlitzShopPlanRegressionTests
             new(1, inventory.BlitzEntries[1], [Row([]), Row([0])]),
             new(2, inventory.BlitzEntries[2], [Row([])])
         };
-        var table = new BlitzShopPanorama(inventory, 3, goods, []);
+        var table = new BlitzShopPanorama(inventory, 3, goods,
+            [],
+            [new BlitzStreamDelta(0, 0), new BlitzStreamDelta(9, 0), new BlitzStreamDelta(0, 0)]);
 
         // A's "after B" variant: B has to go first, as a filler.
         var solved = BlitzShopPlanService.Solve(table,
@@ -417,6 +419,8 @@ internal static class BlitzShopPlanRegressionTests
         Require(solved.FillerSlots.SequenceEqual([1]),
             "the positioning purchase was not reported as a filler");
         Require(solved.ChoicesLeft == 1, $"two buys left {solved.ChoicesLeft} picks, not 1");
+        Require(solved.TotalValidOrders >= 1 && solved.TotalSolutionSets >= 1,
+            "the solver reported zero valid orders for a solvable wish");
 
         // A after B and B after A cannot both hold.
         var conflict = BlitzShopPlanService.Solve(table,
@@ -430,7 +434,9 @@ internal static class BlitzShopPlanRegressionTests
         var tight = new BlitzShopPanorama(inventory, 2,
             [new BlitzPlanGood(0, inventory.BlitzEntries[0], [Row([]), Row([1, 2])]),
              new BlitzPlanGood(1, inventory.BlitzEntries[1], [Row([])]),
-             new BlitzPlanGood(2, inventory.BlitzEntries[2], [Row([])])], []);
+             new BlitzPlanGood(2, inventory.BlitzEntries[2], [Row([])])],
+            [],
+            [new BlitzStreamDelta(0, 0), new BlitzStreamDelta(0, 0), new BlitzStreamDelta(0, 0)]);
         var outOfPicks = BlitzShopPlanService.Solve(tight,
             [new BlitzShopPlanService.BlitzWish(0, [[1, 2]])]);
         Require(!outOfPicks.Solved, "the solver satisfied a wish beyond the pick budget");

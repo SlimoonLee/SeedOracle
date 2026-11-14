@@ -977,11 +977,61 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
             return;
         }
 
+        // All solutions for a single wish: a good's contents depend only on the
+        // SET bought before it (the stream advance), so every allowed set is
+        // one essentially-different solution and any order inside it works.
+        if (wishes.Count == 1)
+        {
+            var wish = wishes[0];
+            var wishGood = panorama.GoodAt(wish.Slot);
+            var wishKey = _wishes.GetValueOrDefault(wish.Slot);
+            var targetChip = wishKey is null
+                ? null
+                : ChipsOf(wishGood!).FirstOrDefault(candidate => candidate.Key == wishKey.ChipKey);
+            _list.AddChild(PreCombatPanelStyles.CreateLabel(
+                (chinese ? "所有可行解（目标：" : "all solutions (target: ")
+                + (targetChip?.Label ?? "?") + (chinese ? "）" : ")"),
+                15, StsColors.gold, bold: true));
+            var sets = wish.AllowedPrefixes
+                .OrderBy(prefix => prefix.Count)
+                .ThenBy(prefix => string.Join(",", prefix))
+                .ToList();
+            var shownSolutions = 0;
+            foreach (var set in sets)
+            {
+                if (shownSolutions >= MaxAlternativeLines) break;
+                var shops = set.Sum(slot => panorama.StreamDeltas[slot].Shops);
+                var where = set.Count == 0
+                    ? chinese ? "直接买" : "buy outright"
+                    : chinese
+                        ? "先买 " + DescribePrefix(set, chinese) + " 后再买"
+                        : "buy " + DescribePrefix(set, chinese) + " first, then";
+                var cost = set.Count == 0
+                    ? ""
+                    : chinese
+                        ? $"（垫位 {set.Count} 次，Shops+{shops}）"
+                        : $" ({set.Count} filler, Shops+{shops})";
+                _list.AddChild(BodyLabel($"· {where}{cost}"));
+                shownSolutions++;
+            }
+            if (sets.Count > shownSolutions)
+                _list.AddChild(BodyLabel(chinese
+                    ? $"……另有 {sets.Count - shownSolutions} 种先买组合"
+                    : $"...{sets.Count - shownSolutions} more combinations"));
+            _list.AddChild(BodyLabel(chinese
+                ? "（集合内任意顺序均可：同一集合过同样多的随机数，不同顺序只改变垫位货物自身的内容）"
+                : "(any order inside a set works: same stream advance; order only changes what the fillers give)"));
+        }
+
         // The Crystal-Ball plan line: a header with the click count, then the
         // route as glyphs, then one row of item chips per step.
         _list.AddChild(PreCombatPanelStyles.CreateLabel(
             (chinese ? "计划：" : "plan: ") + solution.Steps.Count
             + (chinese ? " 次点击" : " clicks"), 15, StsColors.gold, bold: true));
+        if (solution.TotalValidOrders > 1)
+            _list.AddChild(BodyLabel(chinese
+                ? $"该组合共有 {solution.TotalValidOrders} 种可行点击顺序（{solution.TotalSolutionSets} 种垫位组合），此处显示其一。"
+                : $"{solution.TotalValidOrders} valid click orders across {solution.TotalSolutionSets} filler sets; showing one."));
         _list.AddChild(BodyLabel(string.Join(" → ", solution.Steps.Select(step => Glyph(step.Slot)))));
         for (var index = 0; index < solution.Steps.Count; index++)
         {

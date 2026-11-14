@@ -31,6 +31,9 @@ internal sealed record BlitzPlanGood(int Slot, BlitzMerchantEntry Entry, IReadOn
         outcome.PrefixSlots.Count == prefix.Count && !outcome.PrefixSlots.Except(prefix).Any());
 }
 
+/// <summary>How far one shelf good moves the two streams the goods read.</summary>
+internal sealed record BlitzStreamDelta(int Shops, int Rewards);
+
 /// <summary>
 /// The whole shelf at once: every available good priced against every reachable
 /// set of predecessors. The planner window is a pure view over this — clicking
@@ -40,7 +43,8 @@ internal sealed record BlitzShopPanorama(
     MerchantInventory Inventory,
     int ChoicesRemaining,
     IReadOnlyList<BlitzPlanGood> Goods,
-    IReadOnlyList<string> Notes)
+    IReadOnlyList<string> Notes,
+    IReadOnlyList<BlitzStreamDelta> StreamDeltas)
 {
     /// <summary>
     /// Changes whenever a purchase would change an answer: remaining picks or
@@ -244,7 +248,12 @@ internal static class BlitzShopPlanService
                 .Select(pair => new BlitzPlanGood(
                     pair.Key, _inventory.BlitzEntries[pair.Key], pair.Value))
                 .ToList();
-            return new BlitzShopPanorama(_inventory, _remaining, goods, Notes(_inventory, goods));
+            var streamDeltas = Enumerable.Range(0, _inventory.BlitzEntries.Count)
+                .Select(slot => new BlitzStreamDelta(
+                    _preview.Delta(_inventory.BlitzEntries[slot].MerchantEntryType).Shops,
+                    _preview.Delta(_inventory.BlitzEntries[slot].MerchantEntryType).Rewards))
+                .ToList();
+            return new BlitzShopPanorama(_inventory, _remaining, goods, Notes(_inventory, goods), streamDeltas);
         }
     }
 
@@ -286,16 +295,22 @@ internal static class BlitzShopPlanService
     internal sealed record BlitzWish(int Slot, IReadOnlyList<IReadOnlyList<int>> AllowedPrefixes);
 
     /// <summary>
-    /// A solved buy order for a wish list, or the reason none exists.
+    /// A solved buy order for a wish list, or the reason none exists. Because a
+    /// good's contents depend only on the SET bought before it (never their
+    /// order), every distinct predecessor set is one essentially-different
+    /// solution and each set admits every valid order of itself — the counts
+    /// report how many of each exist.
     /// </summary>
     internal sealed record BlitzWishSolution(
         bool Solved,
         IReadOnlyList<BlitzPlanStep> Steps,
         int ChoicesLeft,
         IReadOnlyList<int> FillerSlots,
-        string? Reason)
+        string? Reason,
+        int TotalValidOrders,
+        int TotalSolutionSets)
     {
-        public static readonly BlitzWishSolution None = new(false, [], 0, [], null);
+        public static readonly BlitzWishSolution None = new(false, [], 0, [], null, 0, 0);
     }
 
     /// <summary>
@@ -327,6 +342,9 @@ internal static class BlitzShopPlanService
             + 2 * (panorama.Goods.Any(good => good.Entry.MerchantEntryType == BlitzMerchantEntryType.TwoMoreChoices)
                 ? 1 : 0);
 
+        BlitzWishSolution? first = null;
+        var validOrders = 0;
+        var solutionSets = new HashSet<string>();
         for (var fillerCount = 0; fillerCount <= extras.Count; fillerCount++)
         {
             foreach (var fillers in Combinations(extras, fillerCount))
@@ -351,11 +369,16 @@ internal static class BlitzShopPlanService
                     // playability, TMC timing included.
                     var sequence = Simulate(panorama, order);
                     if (!sequence.Valid) continue;
-                    return new BlitzWishSolution(true, sequence.Steps, sequence.ChoicesLeft,
-                        fillers, null);
+                    validOrders++;
+                    solutionSets.Add(string.Join(",", fillers));
+                    first ??= new BlitzWishSolution(true, sequence.Steps, sequence.ChoicesLeft,
+                        fillers, null, 0, 0);
                 }
             }
         }
+
+        if (first is { } solved)
+            return solved with { TotalValidOrders = validOrders, TotalSolutionSets = solutionSets.Count };
 
         return BlitzWishSolution.None with
         {
