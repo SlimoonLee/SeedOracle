@@ -148,19 +148,28 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
 
         var header = new HBoxContainer();
         header.AddThemeConstantOverride(ThemeConstants.BoxContainer.Separation, 8);
+        header.CustomMinimumSize = new Vector2(0, 44);
         column.AddChild(header);
         _title = PreCombatPanelStyles.CreateLabel(
             Chinese ? "极速商店 · 求购与全景" : "Blitz shop · wishes & panorama",
             18, StsColors.gold, bold: true);
         header.AddChild(_title);
-        header.AddChild(new Control { SizeFlagsHorizontal = SizeFlags.ExpandFill });
-        _plannerTab = ModeButton(Chinese ? "求购" : "Wishes", 110f);
+        var headerGap = new Control
+        {
+            SizeFlagsHorizontal = SizeFlags.ExpandFill,
+            MouseFilter = MouseFilterEnum.Ignore
+        };
+        header.AddChild(headerGap);
+        // The tab buttons are built exactly like the item chips below (text
+        // sized, generous hit rect) — the user-facing symptom was a hit area
+        // limited to the bottom sliver of the drawn button.
+        _plannerTab = HeaderButton(Chinese ? "求购" : "Wishes");
         _plannerTab.Pressed += () => SwitchMode(true);
         header.AddChild(_plannerTab);
-        _panoramaTab = ModeButton(Chinese ? "全景" : "Panorama", 110f);
+        _panoramaTab = HeaderButton(Chinese ? "全景" : "Panorama");
         _panoramaTab.Pressed += () => SwitchMode(false);
         header.AddChild(_panoramaTab);
-        _collapse = PreCombatPanelStyles.CreateButton(Chinese ? "收起" : "Hide", 90f);
+        _collapse = HeaderButton(Chinese ? "收起" : "Hide");
         _collapse.Pressed += ToggleExpansion;
         header.AddChild(_collapse);
 
@@ -236,9 +245,11 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
         if (expanded && _panorama is null && !_buildPending && !_stepping) RequestCompute();
     }
 
-    private static Button ModeButton(string text, float width)
+    private static Button HeaderButton(string text)
     {
-        var button = PreCombatPanelStyles.CreateButton(text, width);
+        var button = PreCombatPanelStyles.CreateButton(text, 0f);
+        button.CustomMinimumSize = new Vector2(0, 40);
+        button.SizeFlagsVertical = SizeFlags.Fill;
         button.ToggleMode = true;
         return button;
     }
