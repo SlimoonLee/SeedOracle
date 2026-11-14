@@ -271,6 +271,12 @@ internal sealed partial class PreCombatForecastPanelControl : PanelContainer
 
     internal void Collapse()
     {
+        // The map screen is torn down by RunManager.ClearScreens() when entering an act.
+        // A disposed native node must not be touched here: any property access would
+        // throw ObjectDisposedException and the surviving wrapper would later be
+        // finalized from GC.RunFinalizers().
+        if (!GodotObject.IsInstanceValid(this) || IsQueuedForDeletion())
+            return;
         if (IsRunning)
             return;
         Visible = false;
@@ -282,6 +288,8 @@ internal sealed partial class PreCombatForecastPanelControl : PanelContainer
 
     internal void CancelAndHide()
     {
+        if (!GodotObject.IsInstanceValid(this) || IsQueuedForDeletion())
+            return;
         StopCalculation();
         Visible = false;
         RouteNodeMarkerOverlay.ClearAll();
@@ -547,6 +555,11 @@ internal sealed partial class PreCombatForecastPanelControl : PanelContainer
             InterveningMapPoints = target.InterveningMapPoints,
             ForceRefresh = forceRefresh
         };
+        var budget = options.SearchBudgetMilliseconds;
+        var timeout = CombatSolverTimeoutPolicy.Choose(budget);
+        options = options with { OverallTimeoutMilliseconds = timeout };
+        _activeMonitor = new CombatSolverProgressMonitor(timeout);
+        _progressRefreshElapsed = 0d;
         _ = RunSingleAsync(
             run,
             target,
@@ -589,6 +602,13 @@ internal sealed partial class PreCombatForecastPanelControl : PanelContainer
                     $"{row.RouteName}计算完成；结果已按当前跑局状态和搜索设置缓存。可继续选择其他路线。",
                     StsColors.cream);
             }
+            else if (result.TimedOut)
+            {
+                SetSummary(
+                    $"{row.RouteName}：{CombatSolverTimeoutPolicy.ExplainTimeout(
+                        result.TimeoutMilliseconds ?? CombatSolverTimeoutPolicy.MaximumMilliseconds, true)}",
+                    StsColors.gold);
+            }
             else if (result.Status.Equals("Cancelled", StringComparison.OrdinalIgnoreCase))
             {
                 SetSummary($"已停止{row.RouteName}的计算；没有启动其他路线。", StsColors.gold);
@@ -623,6 +643,7 @@ internal sealed partial class PreCombatForecastPanelControl : PanelContainer
         {
             if (generation == _batchGeneration && GodotObject.IsInstanceValid(this))
             {
+                _activeMonitor = null;
                 IsRunning = false;
                 _activeTargetIndex = -1;
                 _cancellation?.Dispose();
@@ -641,16 +662,9 @@ internal sealed partial class PreCombatForecastPanelControl : PanelContainer
     private CombatSolverForecastOptions BuildOptions()
     {
         var searchBudget = SelectedSearchBudgetMilliseconds;
-        var overallTimeout = searchBudget switch
-        {
-            <= 5_000 => 50_000,
-            <= 8_000 => 60_000,
-            <= 12_000 => 75_000,
-            _ => 100_000,
-        };
         return new CombatSolverForecastOptions(
             searchBudget,
-            overallTimeout,
+            CombatSolverTimeoutPolicy.Choose(searchBudget),
             SelectedParallelism,
             CancelWorkerWhenCallerCancels: true,
             CloseWorkerAfterRequest: !KeepWorkerAlive,
@@ -996,7 +1010,7 @@ internal sealed partial class PreCombatForecastPanelControl : PanelContainer
             (_state.Text, var color) = status switch
             {
                 ManualPreCombatItemStatus.Ready => ("尚未计算", StsColors.cream),
-                ManualPreCombatItemStatus.Running => ("计算中 · 后台求解器处理中", StsColors.gold),
+                ManualPreCombatItemStatus.Running => ("计算中 · 启动求解进程", StsColors.gold),
                 ManualPreCombatItemStatus.Cancelled => ("已取消；可再次计算", new Color(0.63f, 0.75f, 0.79f)),
                 ManualPreCombatItemStatus.Succeeded => (_state.Text, new Color(0.48f, 0.92f, 0.47f)),
                 _ => (_state.Text, StsColors.red),
@@ -1006,6 +1020,19 @@ internal sealed partial class PreCombatForecastPanelControl : PanelContainer
                 _calculateButton.Text = "停止";
             else if (status is ManualPreCombatItemStatus.Ready or ManualPreCombatItemStatus.Cancelled)
                 _calculateButton.Text = "计算";
+        }
+
+        /// <summary>
+        /// The solver reports nothing while it runs, so the row shows the phase
+        /// inferred from the worker process plus elapsed time against the ceiling.
+        /// </summary>
+        public void SetProgress(CombatSolverProgress progress)
+        {
+            var text = progress.DescribeCompact(true);
+            if (_state.Text == text)
+                return;
+            _state.Text = text;
+            _state.AddThemeColorOverride(ThemeConstants.Label.FontColor, StsColors.gold);
         }
 
         public void SetStopping()
@@ -1030,6 +1057,15 @@ internal sealed partial class PreCombatForecastPanelControl : PanelContainer
             if (!result.IsSuccess)
             {
                 HasResult = false;
+                if (result.TimedOut)
+                {
+                    _state.Text = CombatSolverTimeoutPolicy.ExplainTimeout(
+                        result.TimeoutMilliseconds ?? CombatSolverTimeoutPolicy.MaximumMilliseconds, true);
+                    SetStatus(ManualPreCombatItemStatus.Failed);
+                    _state.AddThemeColorOverride(ThemeConstants.Label.FontColor, StsColors.gold);
+                    _calculateButton.Text = "重试";
+                    return;
+                }
                 _state.Text = result.Status.Equals("Cancelled", StringComparison.OrdinalIgnoreCase)
                     ? "已取消"
                     : $"无法计算：{ShortError(result.Error ?? result.Status)}";
@@ -1115,7 +1151,9 @@ internal sealed partial class PreCombatForecastToggleButton : Button
     {
         if (!ReferenceEquals(_panel, panel))
         {
-            if (_panel is not null)
+            // An old panel may already have been freed with the previous map screen.
+            // Unsubscribing from a disposed wrapper throws ObjectDisposedException.
+            if (_panel is not null && GodotObject.IsInstanceValid(_panel))
                 _panel.PresentationChanged -= ApplyState;
             _panel = panel;
             _panel.PresentationChanged += ApplyState;
@@ -1129,6 +1167,17 @@ internal sealed partial class PreCombatForecastToggleButton : Button
         }
         Disabled = !Entry.CombatSolver.SupportsPreCombatForecast;
         ApplyState();
+    }
+
+    /// <summary>Drops the panel reference when the map screen goes away, so the
+    /// managed wrapper is not kept alive past its native object's lifetime
+    /// (a stale wrapper finalizing on the GC thread crashes coreclr).</summary>
+    internal void Unbind()
+    {
+        if (_panel is not null && GodotObject.IsInstanceValid(_panel))
+            _panel.PresentationChanged -= ApplyState;
+        _panel = null;
+        IsExpanded = false;
     }
 
     private void Toggle()
@@ -1179,8 +1228,31 @@ internal static class PreCombatForecastPanel
     private static PreCombatForecastToggleButton? _currentToggle;
     private static bool _isExpanded;
 
+    private static bool IsUsable(Node? node) =>
+        node is not null
+        && GodotObject.IsInstanceValid(node)
+        && !node.IsQueuedForDeletion();
+
+    /// <summary>Drops references to wrappers whose native node has already been
+    /// freed. Keeping them in static fields delays GC until the wrapper is
+    /// finalized on the finalizer thread, where GodotObject.Dispose() touches
+    /// the dead native pointer and crashes coreclr with 0xC0000005.</summary>
+    private static void DetachStaleReferences()
+    {
+        if (IsUsable(_currentToggle))
+            _currentToggle!.Unbind();
+        _currentPanel = null;
+        _currentToggle = null;
+    }
+
     public static PreCombatForecastPanelControl Refresh(NMapScreen screen, bool mapChanged = false)
     {
+        if ((_currentPanel is not null && !IsUsable(_currentPanel))
+            || (_currentToggle is not null && !IsUsable(_currentToggle)))
+        {
+            DetachStaleReferences();
+        }
+
         var panel = screen.GetNodeOrNull<PreCombatForecastPanelControl>(
             PreCombatForecastPanelControl.NodeName);
         if (panel is null || !GodotObject.IsInstanceValid(panel) || panel.IsQueuedForDeletion())
@@ -1212,13 +1284,13 @@ internal static class PreCombatForecastPanel
 
     internal static void CollapseSafely()
     {
-        if (_currentPanel is null
-            || !GodotObject.IsInstanceValid(_currentPanel)
-            || _currentPanel.IsQueuedForDeletion())
+        if (_currentPanel is not null && !IsUsable(_currentPanel))
         {
+            DetachStaleReferences();
             return;
         }
-        _currentPanel.Collapse();
+        if (_currentPanel is not null)
+            _currentPanel.Collapse();
         _isExpanded = false;
     }
 
@@ -1226,14 +1298,27 @@ internal static class PreCombatForecastPanel
     {
         try
         {
-            _currentPanel?.CancelAndHide();
-            _isExpanded = false;
-            if (_currentToggle is not null
-                && GodotObject.IsInstanceValid(_currentToggle)
-                && !_currentToggle.IsQueuedForDeletion())
+            // NMapScreen.Close is called while RunManager.ClearScreens() is tearing
+            // the screen down, so the panel wrapper is often already disposed here.
+            // Touching it reproduces "Object name: PreCombatForecastPanelControl".
+            if (IsUsable(_currentPanel))
             {
-                _currentToggle.Visible = false;
+                _currentPanel!.CancelAndHide();
             }
+            else if (_currentPanel is not null)
+            {
+                DetachStaleReferences();
+            }
+
+            if (IsUsable(_currentToggle))
+            {
+                _currentToggle!.Visible = false;
+            }
+            else if (_currentToggle is not null)
+            {
+                DetachStaleReferences();
+            }
+            _isExpanded = false;
         }
         catch (Exception exception)
         {

@@ -279,6 +279,12 @@ internal sealed class PlanningEventPredictionService
         ("TheLegendsWereTrue", "INITIAL.options.SLOWLY_FIND_AN_EXIT", EventPlanningKind.RewardChoice),
         ("WhisperingHollow", "GOLD", EventPlanningKind.RewardChoice),
         ("WarHistorianRepy", "UNLOCK_CHEST", EventPlanningKind.RewardChoice),
+        // v0.113.0: these Neow relics create cards through
+        // CardFactory.CreateForReward on the player's Rewards stream. The RF
+        // event mirror does not fast-forward those draws, so downstream combat
+        // rewards would be claimed as exact when they are not.
+        ("Neow", "ARCANE_SCROLL", EventPlanningKind.CardOrUiChoice),
+        ("Neow", "SCROLL_BOXES", EventPlanningKind.CardOrUiChoice),
         ("Trial", "DOUBLE_DOWN", EventPlanningKind.RunEnding)
     ];
 

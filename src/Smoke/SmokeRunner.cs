@@ -107,7 +107,8 @@ internal static class SmokeRunner
                 _autoSlayer = new AutoSlayer();
                 try
                 {
-                    _autoSlayer.Start(seed, logFile);
+                    // v0.113.0 added an explicit AutoSlay mode between seed and log file.
+                    _autoSlayer.Start(seed, mode: null, logFile: logFile);
                     Entry.Logger.Info($"[Smoke] autoslay started with seed {seed}");
                 }
                 catch (Exception startFailure)
@@ -301,6 +302,7 @@ internal static class SmokeRunner
         {
             ForecastExperienceRegressionTests.Run(run);
             ExtendedForecastRegressionTests.Run(run);
+            CombatSolverProgressRegressionTests.Run();
         }
         catch (Exception exception)
         {
@@ -733,7 +735,12 @@ internal static class SmokeRunner
             0x504C_414E_0000_0000UL + (uint)sampleIndex,
             new CombatSolverForecastOptions(
                 SearchBudgetMilliseconds: 2_000,
-                OverallTimeoutMilliseconds: 30_000,
+                // The first sample pays for spawning the isolated game process;
+                // a warm worker answers well inside the shorter ceiling. Charging
+                // the cold spawn to the 30 s solve budget times out before the
+                // worker is even listening, and the half-started process then
+                // races the next sample for the worker's settings file.
+                OverallTimeoutMilliseconds: sampleIndex == 0 ? 120_000 : 30_000,
                 MaxDegreeOfParallelism: null,
                 ForceRefresh: true,
                 CloseWorkerAfterRequest: false,

@@ -59,9 +59,11 @@ internal static class MerchantMechanicsRegressionTests
         var courierInput = planning.Capture(courier);
         var cases = new[]
         {
-            (Pick: new MerchantPick(MerchantCategory.CharacterCard, 0), Delta: new Counters(2,2,0)),
-            (Pick: new MerchantPick(MerchantCategory.ColorlessCard, 0), Delta: new Counters(1,2,0)),
-            (Pick: new MerchantPick(MerchantCategory.Relic, 2), Delta: new Counters(1,1,0)),
+            // v0.113.0: every shop rarity/upgrade/price roll now lives on the
+            // Shops stream, so Courier restocks no longer touch Rewards.
+            (Pick: new MerchantPick(MerchantCategory.CharacterCard, 0), Delta: new Counters(0,4,0)),
+            (Pick: new MerchantPick(MerchantCategory.ColorlessCard, 0), Delta: new Counters(0,3,0)),
+            (Pick: new MerchantPick(MerchantCategory.Relic, 2), Delta: new Counters(0,2,0)),
             (Pick: new MerchantPick(MerchantCategory.Potion, 0), Delta: new Counters(0,3,0))
         };
         foreach (var (pick, delta) in cases)
@@ -121,11 +123,17 @@ internal static class MerchantMechanicsRegressionTests
         using (ShadowIsolation.UseSelector(new ExplicitSelector(deckTargets: 3)))
         {
             var before = Counters.Read(astrolabe);
-            var allBefore = astrolabe.Player.PlayerRng.ToSerializable();
+            var transformationsBefore = astrolabe.Player.PlayerRng.Transformations.ToSerializable().counter;
             RelicCmd.Obtain<Astrolabe>(astrolabe.Player).GetAwaiter().GetResult();
-            Require(Counters.Read(astrolabe) - before == new Counters(0,0,3)
-                && JsonSerializer.Serialize(allBefore) == JsonSerializer.Serialize(astrolabe.Player.PlayerRng.ToSerializable()),
-                "Astrolabe must use Niche, not Rewards or the player's transformation RNG");
+            var transformationsAfter = astrolabe.Player.PlayerRng.Transformations.ToSerializable().counter;
+            // v0.113.0: Astrolabe's transforms moved to the player-level
+            // Transformations stream; Rewards/Shops/Niche stay untouched.
+            // SerializableRng exposes counter as a field, so plain
+            // JsonSerializer.Serialize is not a usable stream fingerprint.
+            var delta = Counters.Read(astrolabe) - before;
+            Require(delta == new Counters(0,0,0)
+                && transformationsAfter - transformationsBefore == 3,
+                $"v0.113.0: Astrolabe must use Transformations (delta={delta}, transformations={transformationsAfter - transformationsBefore})");
         }
 
         // Independent oracle: call the native entry wrapper directly, outside
@@ -146,7 +154,7 @@ internal static class MerchantMechanicsRegressionTests
                 {
                     var inventory = MerchantInventory.CreateForNormalMerchant(native.Player);
                     var entry = inventory.CardEntries.ElementAt(offer.Slot);
-                    Require(entry.OnTryPurchaseWrapper(inventory).GetAwaiter().GetResult(), "direct native purchase rejected");
+                    Require(entry.OnTryPurchaseUnsynchronized(inventory).GetAwaiter().GetResult(), "direct native purchase rejected");
                 }
                 finally { native.Run.PopCurrentRoom(); }
             }

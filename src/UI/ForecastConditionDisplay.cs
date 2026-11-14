@@ -33,11 +33,17 @@ internal sealed class ForecastConditionDisplay
         }
     }
 
-    internal void AppendPrerequisites(List<string> lines, bool chinese, string prefix)
+    internal void AppendPrerequisites(List<string> lines, bool chinese, string prefix, bool includeChoices = true,
+        bool includeShop = true)
     {
-        AppendScope("", common.Values);
-        foreach (var route in routes.Values)
-            AppendScope(route.Label, route.Conditions.Values);
+        if (includeChoices)
+        {
+            AppendScope("", common.Values);
+            foreach (var route in routes.Values)
+                AppendScope(route.Label, route.Conditions.Values);
+        }
+        if (!includeShop)
+            return;
         foreach (var shop in shops)
         {
             var unavailable = shop.Offers.Where(offer => offer.Availability == ShopOfferAvailability.Unaffordable).ToArray();

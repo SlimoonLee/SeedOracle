@@ -133,6 +133,8 @@ internal static class RouteMarkerPlanner
 
     private static string OutcomeKey(RouteVariantForecast variant, Dictionary<object, string>? keys)
     {
+        // A shop keeps its own grouping: the panel merges equal stocks itself, and
+        // the shop tooltip needs the per-route forecast to exist at all.
         var merchantKey = Cached(variant.Merchant, merchant => merchant is { HasValue: true }
             ? $"{merchant.Accuracy}:{ForecastContentKey.Merchant(merchant.Value!)}:{ForecastContentKey.MerchantConditions(merchant.Value!)}"
             : merchant is null ? string.Empty : $"merchant:{merchant.Accuracy}");
@@ -196,10 +198,9 @@ internal static class RouteMarkerPlanner
         var potions = string.Join(",", value.Potions.Select(item => ItemKey(item.Item)));
         var relics = string.Join(",", value.Relics.Select(item => ItemKey(item.Item)));
         var branches = System.Text.Json.JsonSerializer.Serialize(new
-            { value.Possibilities, value.PossibilitiesTruncated, value.HuntPreviewLimit,
-                value.ReferenceCondition, value.ReferenceChoicePaths, Branches = value.ChoiceBranches.Select(branch => new
-                    { branch.Condition, branch.ChoicePaths, Outcome = ForecastContentKey.Combat(branch.Outcome) }) });
-        return $"combat:{forecast.Accuracy}:{value.Gold}:{cards}:{potions}:{relics}:{branches}";
+            { value.Possibilities, value.PossibilitiesTruncated, value.HuntPreviewLimit });
+        return $"combat:{forecast.Accuracy}:{value.Gold}:{cards}:{potions}:{relics}:{branches}:"
+               + BranchOutcomes(value.ChoiceBranches, ForecastContentKey.Combat);
     }
 
     private static string TreasureKey(Forecast<TreasureRoomDetails>? forecast)
@@ -207,11 +208,21 @@ internal static class RouteMarkerPlanner
         if (forecast is not { HasValue: true })
             return forecast is null ? string.Empty : $"treasure:{forecast.Accuracy}";
 
-        var value = forecast.Value!;
-        return $"treasure:{forecast.Accuracy}:{ForecastContentKey.Treasure(value)}:"
-               + System.Text.Json.JsonSerializer.Serialize(new { value.ReferenceCondition, value.ReferenceChoicePaths,
-                   Branches = value.ChoiceBranches.Select(branch => new
-                       { branch.Condition, branch.ChoicePaths, Outcome = ForecastContentKey.Treasure(branch.Outcome) }) });
+        // Only what the chest can hold decides a colour. How a route got here is a
+        // condition, not a different result: one chest reached nine ways is still
+        // one chest. A branch that changes the contents is a different result, so
+        // it stays part of the key.
+        return $"treasure:{forecast.Accuracy}:{ForecastContentKey.Treasure(forecast.Value!)}:"
+               + BranchOutcomes(forecast.Value!.ChoiceBranches, ForecastContentKey.Treasure);
     }
 
+    private static string BranchOutcomes<T>(IReadOnlyList<RewardChoiceBranch<T>> branches, Func<T, string> key)
+        where T : class
+    {
+        return string.Join(
+            "|",
+            branches.Select(branch => key(branch.Outcome))
+                .Distinct(StringComparer.Ordinal)
+                .OrderBy(outcome => outcome, StringComparer.Ordinal));
+    }
 }

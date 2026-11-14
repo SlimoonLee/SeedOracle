@@ -27,7 +27,10 @@ internal static class CausalChoiceRegressionTests
         var merchantChanges = 0;
         var rewardChanges = 0;
         var treasureChanges = 0;
-        for (var fixture = 0; fixture < 32 && (merchantChanges == 0 || rewardChanges == 0 || treasureChanges == 0); fixture++)
+        // v0.113.0 moved every shop stock/price roll onto the Shops stream, so
+        // Neow choices can no longer change downstream merchant inventory.
+        // Keep fixtures until the reward and treasure branches are covered.
+        for (var fixture = 0; fixture < 32 && (rewardChanges == 0 || treasureChanges == 0); fixture++)
         {
             var seed = "NEOW_DIFF_" + fixture;
             var initial = planning.Capture(planning.CreateState(live, player));
@@ -94,6 +97,7 @@ internal static class CausalChoiceRegressionTests
             var lines = new List<string>();
             MapForecastTooltipBuilder.AppendMerchantContents(lines, shop, true);
             var differentShops = shop.ChoiceBranches.Count(branch => ForecastChoiceDiffFormatter.Merchant(shop, branch.Inventory, true).Count > 0);
+            Require(differentShops == 0, "v0.113.0: Neow choices must not change downstream shop stock");
             Require(differentShops == 0 || lines.Any(line => line.Contains("相对基础")), "merchant tooltip omitted concrete replacement");
             Require(!lines.Any(line => line.Contains("未覆盖") || line.Contains("重算") || line.Contains("未穷尽")), "merchant boilerplate survived");
             if (merchantChanges == 0 && differentShops > 0)
@@ -106,7 +110,7 @@ internal static class CausalChoiceRegressionTests
             treasureChanges += chest.ChoiceBranches.Count(branch => ForecastChoiceDiffFormatter.Treasure(chest, branch.Outcome, true).Count > 0);
             Require(PlanningPredictionService.StateToken(start) == PlanningPredictionService.StateToken(input), "Neow branch mutated input");
         }
-        Require(checkedOptions >= 3 && merchantChanges > 0 && rewardChanges > 0 && treasureChanges > 0,
+        Require(checkedOptions >= 3 && rewardChanges > 0 && treasureChanges > 0,
             $"missing concrete fixtures: options={checkedOptions}, shops={merchantChanges}, rewards={rewardChanges}, treasure={treasureChanges}");
         ValidateDiffs(player.Deck.Cards[0]);
         ForecastConditionRegressionTests.Run(planning, live, player);

@@ -55,13 +55,23 @@ internal static class ForecastConditionRegressionTests
         lines.Clear();
         MapForecastTooltipBuilder.AppendRewards(lines, new([], RoomType.Monster, null, null, null, true,
             Forecast<CombatRewardDetails>.Exact(partialReward)), true);
-        Require(lines.Any(line => line.Contains("跳过/双重打击")), "partial combat reference menu must keep its restriction");
+        // The reward is the same whichever of the enumerated paths you take, so the
+        // path list is not part of the answer. Restricted coverage still shows up as
+        // the "条件预测" badge instead of a wall of prerequisites.
+        Require(!lines.Any(line => line.Contains("前提") || line.Contains("跳过/双重打击")),
+            "a reward identical along every enumerated path must not name those paths");
 
         var partial = stock with { ReferenceChoicePaths = paths.Take(2).ToArray(), ChoicesTruncated = true };
         lines.Clear();
         MapForecastTooltipBuilder.AppendMerchantContents(lines, partial, true);
         Require(lines.Any(line => line.Contains("跳过/双重打击")) && !lines.Any(line => line.Contains("任意")),
             "partially evaluated menu must retain the actual subset");
+        // A stock with nothing conditional on it is just a list: no "Base stock:"
+        // label with an empty condition in front of it.
+        lines.Clear();
+        MapForecastTooltipBuilder.AppendMerchantContents(lines, stock, true);
+        Require(!lines.Any(line => line.StartsWith("基础库存")) && lines.Any(line => line.StartsWith("角色卡")),
+            "a single stock with no conditions must not print an empty base header");
 
         string[] binary = ["0", "1"];
         var diagonal = new[] { new[] { Fact("a", "0", binary), Fact("b", "0", binary) },
@@ -115,22 +125,112 @@ internal static class ForecastConditionRegressionTests
             { Facts = [.. prefix, routeBlue, Option("share"), Target("share", value, six)] })
             .Concat(three.Select(value => new MerchantForecastCase("raw tear " + value, changedA, 1)
                 { Facts = [.. prefix, routeBlue, Option("tear"), Target("tear", value, three)] }))
-            .Append(new("raw green", changedB, 1) { Facts = [routeGreen] }).ToArray();
+            .Append(new("raw green", changedB, 1) { Facts = [.. prefix, routeGreen] }).ToArray();
         lines.Clear();
         MapForecastTooltipBuilder.AppendMerchantSummary(lines, cases, true);
         var text = string.Join("\n", lines);
         Require(lines.Count(line => line.Contains("2、3层选牌：任意选择")) == 1
             && !text.Contains("跳过选牌") && !text.Contains("来源牌"),
             "proven equivalent prior-floor choices must explicitly say any choice once");
-        Require(text.Contains("4层脑蛭：分享知识") && text.Contains("4层脑蛭：把它扯下来")
+        Require(text.Contains("脑蛭：分享知识") && text.Contains("脑蛭：把它扯下来")
             && lines.Count(line => line.Contains("相对基础")) == 2
             && lines.Count(line => line.Contains("②D 48金") && line.Contains("③E 48金")) == 2,
             "each alternative must give one complete compact change list");
         Require(!text.Contains("→") && !text.Contains("，变化：")
-            && lines.Count(line => line.Contains("青色线路：2、3层选牌：任意选择")) == 1,
-            "route-local freedom must appear once without being called a prerequisite");
+            && !text.Contains("青色线路") && text.Contains("绿色线路")
+            && lines.Count(line => line.Contains("2、3层选牌：任意选择")) == 1,
+            "route order must not label a stock the event option already explains");
         Require(text.Length < 650, "screenshot-equivalent condition chains remain too verbose");
+        Require(!text.Contains("种前期选法结果相同"),
+            "groups with different stock must keep their distinguishing conditions");
         Smoke.SmokeReport.Add("condition-summary EXAMPLE " + string.Join(" | ", lines));
+        // Same shop reached in two different orders (monster→event vs event→monster).
+        // The order is not the cause: the event option is. The tooltip must name the
+        // option once instead of printing one colour-labelled block per route.
+        ForecastChoiceFact OrderOption(int floor, string value, string label) =>
+            new($"event:{floor}:BrainLeech:page:option", $"{floor}层脑蛭", value, label, optionMenu,
+                Kind: ForecastChoiceKind.EventOption, Floor: floor)
+            { CauseKey = "event:BrainLeech:option", CauseLabel = "脑蛭" };
+        var orderCases = new[]
+        {
+            new MerchantForecastCase("raw", baseline, 1) { Facts = [.. prefix, routeBlue, OrderOption(3, "share", "分享知识")] },
+            new MerchantForecastCase("raw", changedA, 1) { Facts = [.. prefix, routeBlue, OrderOption(3, "tear", "把它扯下来")] },
+            new MerchantForecastCase("raw", baseline, 1) { Facts = [.. prefix, routeGreen, OrderOption(2, "share", "分享知识")] },
+            new MerchantForecastCase("raw", changedA, 1) { Facts = [.. prefix, routeGreen, OrderOption(2, "tear", "把它扯下来")] }
+        };
+        lines.Clear();
+        MapForecastTooltipBuilder.AppendMerchantSummary(lines, orderCases, true);
+        var causeText = string.Join("\n", lines);
+        Require(causeText.Contains("基础库存：脑蛭：分享知识")
+            && causeText.Contains("脑蛭：把它扯下来（相对基础）：")
+            && !causeText.Contains("青色线路") && !causeText.Contains("绿色线路")
+            && !causeText.Contains("3层脑蛭") && !causeText.Contains("2层脑蛭")
+            && lines.Count(line => line.Contains("相对基础")) == 1,
+            "the event option, not the route order, must be the only discriminator: " + causeText);
+        Smoke.SmokeReport.Add("condition-summary CAUSE " + causeText.Replace('\n', '|'));
+        // Same option, same floors, different stocks on disjoint routes: here the
+        // route itself is the cause and must stay visible.
+        var conflictCases = new[]
+        {
+            new MerchantForecastCase("raw", baseline, 1) { Facts = [.. prefix, routeBlue, OrderOption(3, "share", "分享知识")] },
+            new MerchantForecastCase("raw", changedA, 1) { Facts = [.. prefix, routeGreen, OrderOption(2, "share", "分享知识")] },
+            new MerchantForecastCase("raw", changedB, 1) { Facts = [.. prefix, routeBlue, OrderOption(3, "tear", "把它扯下来")] }
+        };
+        lines.Clear();
+        MapForecastTooltipBuilder.AppendMerchantSummary(lines, conflictCases, true);
+        var conflictText = string.Join("\n", lines);
+        Require(conflictText.Contains("青色线路") && conflictText.Contains("绿色线路"),
+            "a condition that yields different stocks on disjoint routes must keep its route: " + conflictText);
+        // One stock reachable through many correlated upstream picks: the
+        // product is unreadable and useless, so it collapses to a count.
+        var wide = Enumerable.Range(0, 9).Select(index => "w" + index).ToArray();
+        var correlated = Enumerable.Range(0, 6).Select(index => new MerchantForecastCase("raw " + index, baseline, 1)
+        {
+            Facts =
+            [
+                new ForecastChoiceFact("wide:a", "3层选牌", "w" + index, "牌" + index, wide),
+                new ForecastChoiceFact("wide:b", "4层选牌", "w" + index, "牌" + index, wide)
+            ]
+        }).ToArray();
+        lines.Clear();
+        MapForecastTooltipBuilder.AppendMerchantSummary(lines, correlated, true);
+        var pooled = string.Join("\n", lines);
+        Require(pooled.Contains("基础库存（6 种前期选法结果相同）") && !pooled.Contains("；或")
+            && lines.Count(line => line.Contains("角色卡")) == 1,
+            "one pooled stock must not enumerate every upstream combination: " + pooled);
+        Smoke.SmokeReport.Add("condition-summary POOLED " + pooled.Replace('\n', '|'));
+        // The screenshot case: one stock reachable from every route and every
+        // upstream pick. Route labels and "prerequisite" lines are the same noise
+        // as the enumeration and must disappear with it.
+        var pickMenu = Enumerable.Range(0, 8).Select(index => "n" + index).ToArray();
+        var wideMenu = Enumerable.Range(0, 8).Select(index => "m" + index).ToArray();
+        ForecastChoiceFact Pick2(string value, string label) =>
+            new("combat:2", "2层第1组选牌", value, label, pickMenu, Kind: ForecastChoiceKind.CardReward, Floor: 2);
+        MerchantForecastCase RoutedCase(ForecastChoiceFact route, ForecastChoiceFact prior, int pick) => new("raw", baseline, 1)
+        {
+            Facts =
+            [
+                route,
+                prior,
+                new ForecastChoiceFact("neow", "涅奥", "m" + pick, "选项" + pick, wideMenu),
+                new ForecastChoiceFact("f3", "3层第1组选牌", "m" + pick, "牌" + pick, wideMenu)
+            ]
+        };
+        var routePool = Enumerable.Range(0, 5)
+            .SelectMany(index => new[]
+            {
+                RoutedCase(routeBlue, Pick2("skip", "跳过"), index),
+                RoutedCase(routeGreen, Pick2("take", "拿牌"), index)
+            }).ToArray();
+        lines.Clear();
+        MapForecastTooltipBuilder.AppendMerchantSummary(lines, routePool, true);
+        var routePooled = string.Join("\n", lines);
+        Require(routePooled.Contains("基础库存（10 种前期选法结果相同）")
+            && !routePooled.Contains("青色线路") && !routePooled.Contains("绿色线路")
+            && !routePooled.Contains("前提") && !routePooled.Contains("或")
+            && !routePooled.Contains("2层第1组选牌"),
+            "route labels and prerequisites must collapse with the enumeration: " + routePooled);
+        Smoke.SmokeReport.Add("condition-summary ROUTED " + routePooled.Replace('\n', '|'));
         var screenshotStock = baseline with
         {
             CharacterCards = [Store("头槌", 52), Store("劫掠", 72), Store("战鼓", 72), Store("破灭", 24, true), Store("燃烧", 75)],
@@ -211,6 +311,38 @@ internal static class ForecastConditionRegressionTests
         var predictedRewards = new MerchantChoiceBranchService(512, 48, 30000).PredictRewards(state.Player, combatRoute, initialRewards.Detach());
         Require(predictedRewards.ReferenceChoicePaths.Count > 0,
             "native combat-to-combat adapter must retain structured reference paths, including unconditional ones");
+        // Node audit: one-species encounters state the name once, and a uniform
+        // lineup does not repeat that name in front of every HP value.
+        MapForecastTooltip BuildEncounter(EncounterDetails details, IReadOnlyList<MonsterHpDetails> hp) =>
+            MapForecastTooltipBuilder.Build(new MapNodeForecast(
+                new MapPoint(0, 1) { PointType = MapPointType.Monster }, 1, 1, null, null,
+                Forecast<IReadOnlyList<EncounterDetails>>.Exact([details]),
+                hp.Count == 0 ? null : Forecast<IReadOnlyList<MonsterHpDetails>>.Exact(hp),
+                null, [new([], RoomType.Monster, null, details, null, true)], false))!;
+        var singleLineup = new EncounterDetails(encounter.Id, "花园幽灵鳗",
+            ["花园幽灵鳗", "花园幽灵鳗", "花园幽灵鳗", "花园幽灵鳗"]);
+        var encounterText = string.Join("\n", BuildEncounter(singleLineup,
+            [new("花园幽灵鳗", 29), new("花园幽灵鳗", 27), new("花园幽灵鳗", 28)]).Descriptions);
+        Require(encounterText.Contains("遭遇：花园幽灵鳗 ×4") && !encounterText.Contains("怪物：")
+            && encounterText.Contains("HP：29 / 27 / 28"),
+            "single-species encounters must not repeat names: " + encounterText);
+        var mixedText = string.Join("\n", BuildEncounter(
+                new EncounterDetails(encounter.Id, "一些噬尸蛞蝓", ["噬尸蛞蝓", "酸液史莱姆"]),
+                [new("噬尸蛞蝓", 29), new("酸液史莱姆", 27)]).Descriptions);
+        Require(mixedText.Contains("怪物：噬尸蛞蝓 + 酸液史莱姆")
+            && mixedText.Contains("HP：噬尸蛞蝓 29 / 酸液史莱姆 27"),
+            "mixed lineups must keep the monster names: " + mixedText);
+        Smoke.SmokeReport.Add("node-audit ENCOUNTER " + encounterText.Replace('\n', '|'));
+        var eventDetails = new EventDetails(encounter.Id, "脑蛭");
+        var unknownEvent = MapForecastTooltipBuilder.Build(new MapNodeForecast(
+            new MapPoint(0, 2) { PointType = MapPointType.Unknown }, 2, 2,
+            Forecast<RoomType>.Exact(RoomType.Event),
+            Forecast<IReadOnlyList<EventDetails>>.Exact([eventDetails]),
+            null, null, null, [new([], RoomType.Event, eventDetails, null, null, true)], false))!;
+        var unknownText = string.Join("\n", unknownEvent.Descriptions);
+        Require(!unknownText.Contains("? →") && unknownText.Contains("事件：脑蛭"),
+            "a resolved question mark must not restate its room type: " + unknownText);
+        Smoke.SmokeReport.Add("node-audit UNKNOWN " + unknownText.Replace('\n', '|'));
         OrdinaryCardChoiceRegressionTests.Run(planning, live, player);
         Smoke.SmokeReport.Add($"condition-summary PASS: full_menu=any_choice partial_menu=retained correlation=preserved event_targets=collapsed per_case=complete route_prerequisites=once native_paths={actualPaths.Length} native_reward_paths={predictedRewards.ReferenceChoicePaths.Count} duplicate_source_labels={duplicateLabels} fixture_chars={text.Length} native_raw_chars={rawLength} native_display_chars={nativeText.Length} elapsed_ms={timer.ElapsedMilliseconds}");
 

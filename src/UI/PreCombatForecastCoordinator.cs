@@ -49,8 +49,10 @@ internal static class PreCombatForecastCoordinator
         new(StringComparer.Ordinal);
     private static readonly Dictionary<string, CombatSolverForecastResult> LatestCompletedByTarget =
         new(StringComparer.Ordinal);
-    private static readonly Dictionary<string, Task<CombatSolverForecastResult>> Active =
-        new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, PendingForecast> Active = new(StringComparer.Ordinal);
+
+    /// <summary>A request already in flight plus the ceiling it was started with.</summary>
+    private sealed record PendingForecast(Task<CombatSolverForecastResult> Task, int TimeoutMilliseconds);
 
     /// <summary>
     /// Hover rendering is deliberately read-only. A worker is started only by the visible manual forecast panel.
@@ -193,32 +195,35 @@ internal static class PreCombatForecastCoordinator
         var effectiveOptions = options with { ForceRefresh = forceRefresh };
         var targetKey = BuildTargetKey(stateToken, target);
         var key = BuildRequestKey(stateToken, target, effectiveOptions);
-        Task<CombatSolverForecastResult> task;
+        PendingForecast pending;
         lock (Sync)
         {
             if (!forceRefresh && Completed.TryGetValue(key, out var completed))
                 return completed;
-            if (!Active.TryGetValue(key, out task!))
+            if (!Active.TryGetValue(key, out pending!))
             {
                 var encounter = ModelDb.GetById<EncounterModel>(target.Encounter.Id);
-                task = Entry.CombatSolver.ForecastAsync(
-                    run,
-                    encounter,
-                    target.ActFloor,
-                    target.Point.coord.col,
-                    target.RoomType,
-                    target.Point.PointType,
-                    target.IsSecondBoss,
-                    effectiveOptions,
-                    cancellationToken);
-                Active.Add(key, task);
+                var timeout = CombatSolverTimeoutPolicy.Choose(options.SearchBudgetMilliseconds);
+                pending = new PendingForecast(
+                    Entry.CombatSolver.ForecastAsync(
+                        run,
+                        encounter,
+                        target.ActFloor,
+                        target.Point.coord.col,
+                        target.RoomType,
+                        target.Point.PointType,
+                        target.IsSecondBoss,
+                        effectiveOptions with { OverallTimeoutMilliseconds = timeout },
+                        cancellationToken),
+                    timeout);
+                Active.Add(key, pending);
             }
         }
 
         CombatSolverForecastResult result;
         try
         {
-            result = await task;
+            result = (await pending.Task) with { TimeoutMilliseconds = pending.TimeoutMilliseconds };
         }
         catch (Exception exception)
         {
@@ -260,6 +265,11 @@ internal static class PreCombatForecastCoordinator
         string.Join(';', (target.InterveningMapPoints ?? []).Select(static step =>
             $"{step.MapColumn},{step.ActFloor},{step.MapPointType},{step.RoomType}")));
 
+    /// <summary>
+    /// The wall-clock ceiling is deliberately absent: a successful result is
+    /// produced by the search budget, and the ceiling only decides how long we
+    /// wait, so including it split the cache into one entry per timeout choice.
+    /// </summary>
     private static string BuildRequestKey(
         string stateToken,
         PreCombatForecastTarget target,
@@ -267,7 +277,6 @@ internal static class PreCombatForecastCoordinator
         '|',
         BuildTargetKey(stateToken, target),
         options.SearchBudgetMilliseconds,
-        options.OverallTimeoutMilliseconds,
         options.MaxDegreeOfParallelism?.ToString() ?? "configured");
 
     private static CombatSolverForecastResult Failure(string status, string error) => new(

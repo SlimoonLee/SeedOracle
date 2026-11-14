@@ -80,6 +80,11 @@ internal sealed partial class RandomForeseerAdapter
         // decision before their result can be threaded downstream.
         ("RoomFullOfCheese", "INITIAL.options.GORGE", EventPlanningKind.CardOrUiChoice),
         ("BrainLeech", "RIP", EventPlanningKind.CardOrUiChoice),
+        // v0.113.0: these Neow relics create cards through
+        // CardFactory.CreateForReward on Rewards; the shadow event mirror does
+        // not fast-forward those draws, so downstream results stay conditional.
+        ("Neow", "ARCANE_SCROLL", EventPlanningKind.CardOrUiChoice),
+        ("Neow", "SCROLL_BOXES", EventPlanningKind.CardOrUiChoice),
 
         ("Trial", "DOUBLE_DOWN", EventPlanningKind.RunEnding),
     ];
@@ -230,7 +235,10 @@ internal sealed partial class RandomForeseerAdapter
             }
             var before = Capture(shadowPlayer);
 
-            using (CardSelectCmd.PushSelector(new ScriptedCardSelector(plannedCardPick)))
+            // v0.113.0: selectors live on RunManager's per-player stack. The
+            // ShadowIsolation frame makes the scripted selector visible to the
+            // cloned shadow player through ShadowCardSelectorPatch.
+            using (ShadowIsolation.UseSelector(new ScriptedCardSelector(plannedCardPick)))
             {
                 await options[optionIndex].Chosen();
             }

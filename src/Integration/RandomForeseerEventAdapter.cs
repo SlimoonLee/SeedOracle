@@ -230,7 +230,7 @@ internal sealed partial class RandomForeseerAdapter
 
     private static bool IsRandomForeseerPredictionTip(IHoverTip tip) =>
         tip.Id.StartsWith("RandomForeseer:Prediction", StringComparison.Ordinal)
-        || tip.GetType().Assembly == typeof(global::RandomForeseer.RandomForeseerCode.Entry).Assembly;
+        || tip.GetType().Assembly == RandomForeseerTypes.Assembly;
 
     private static IReadOnlyList<EventPredictionSetDetails> BuildPredictionSets(
         IReadOnlyList<IHoverTip> tips, EventModel model, EventOption option)
@@ -347,9 +347,8 @@ internal sealed partial class RandomForeseerAdapter
 
     private static EventBridge CreateEventBridge()
     {
-        var assembly = typeof(global::RandomForeseer.RandomForeseerCode.Entry).Assembly;
-        var predictionType = assembly.GetType(
-            "RandomForeseer.RandomForeseerCode.OutOfCombat.EventOptionPrediction");
+        var assembly = RandomForeseerTypes.Assembly;
+        var predictionType = RandomForeseerTypes.Find("OutOfCombat.EventOptionPrediction");
         var registry = predictionType?.GetField("Registry", AnyStatic)?.GetValue(null);
         var registryType = registry?.GetType();
         var predictors = registryType?.GetField("_predictors", AnyInstance)?.GetValue(registry) as IDictionary;

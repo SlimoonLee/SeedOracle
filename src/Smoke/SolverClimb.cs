@@ -550,7 +550,7 @@ internal static class SolverClimb
         var predictedEncounterId = Interlocked.Exchange(ref _pendingEncounterId, null);
         if (pending is not null)
         {
-            AutoSlayer.CurrentWatchdog?.Reset("solver climb: waiting for combat solver forecast");
+            Watchdog.Current?.Reset("solver climb: waiting for combat solver forecast");
             var completed = await Task.WhenAny(pending.Task, Task.Delay(TimeSpan.FromSeconds(70), ct))
                 .ConfigureAwait(false);
             forecast = completed == pending.Task
@@ -649,7 +649,7 @@ internal static class SolverClimb
         }
         SmokeReport.Add(FormatFightLine(row));
 
-        AutoSlayer.CurrentWatchdog?.Reset("solver climb: waiting for combat end");
+        Watchdog.Current?.Reset("solver climb: waiting for combat end");
         await WaitHelper.Until(
             () => CombatManager.Instance is null || !CombatManager.Instance.IsInProgress,
             ct, TimeSpan.FromMinutes(3), "solver climb: combat did not end").ConfigureAwait(false);

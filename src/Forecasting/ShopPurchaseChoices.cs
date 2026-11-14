@@ -54,7 +54,7 @@ internal static class ShopPurchaseChoices
     internal static bool CanIgnoreAddedCards(PlanningPredictionService.State state, bool nextIsFixedCombat,
         IEnumerable<ForecastItemDetails> cards) => nextIsFixedCombat && OrdinaryCardChoiceEquivalence.HasNativePools(state)
             && state.Run.IterateHookListeners(null).All(model =>
-                ReferenceEquals(model, state.Run.MultiplayerScalingModel) || IsIndependent(model))
+                model is MegaCrit.Sts2.Core.Models.MultiplayerScalingModel || IsIndependent(model))
             && cards.All(IsIndependentCard);
 
     internal static MerchantPick Pick(MerchantInventoryForecast stock, int slot)

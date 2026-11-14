@@ -410,11 +410,15 @@ internal sealed class PlanningPredictionService
         return clone;
     }
 
-    internal void AdvanceRoomsBeforeTarget(State state, IReadOnlyList<RoomType> resolvedRooms)
+    internal void AdvanceRoomsBeforeTarget(
+        State state,
+        IReadOnlyList<RoomType> resolvedRooms,
+        IReadOnlyList<MapPoint>? resolvedPoints = null)
     {
         var visited = new Dictionary<RoomType, int>();
-        foreach (var type in resolvedRooms.Take(resolvedRooms.Count - 1))
+        for (var index = 0; index < resolvedRooms.Count - 1; index++)
         {
+            var type = resolvedRooms[index];
             EncounterModel? encounter = null;
             if (type.IsCombatRoom())
             {
@@ -431,11 +435,14 @@ internal sealed class PlanningPredictionService
                 };
                 visited[type] = offset + 1;
             }
-            AdvanceRoom(state, type, encounter);
+            // The point is only needed to recognise quest-marked chests; a
+            // caller that cannot supply coordinates keeps the old behaviour.
+            var point = resolvedPoints is { } points && index < points.Count ? points[index] : null;
+            AdvanceRoom(state, type, encounter, point);
         }
     }
 
-    internal void AdvanceRoom(State state, RoomType roomType, EncounterModel? encounter)
+    internal void AdvanceRoom(State state, RoomType roomType, EncounterModel? encounter, MapPoint? mapPoint = null)
     {
         switch (roomType)
         {
@@ -449,7 +456,7 @@ internal sealed class PlanningPredictionService
                 _ = GenerateMerchant(state);
                 break;
             case RoomType.Treasure:
-                _ = GenerateTreasure(state, isPriorRoom: true);
+                _ = GenerateTreasure(state, isPriorRoom: true, mapPoint);
                 break;
             case RoomType.RestSite:
                 EnterRestSite(state);
@@ -600,7 +607,7 @@ internal sealed class PlanningPredictionService
         CardRewardAlternative.Generate(reward).Select(alternative => new CardRewardAlternativeDetails(
             alternative.OptionId, alternative.Title.GetFormattedText(), alternative.AfterSelected)).ToArray());
 
-    internal TreasureRoomDetails GenerateTreasure(State state, bool isPriorRoom)
+    internal TreasureRoomDetails GenerateTreasure(State state, bool isPriorRoom, MapPoint? mapPoint = null)
     {
         state.TreasureRoomsAdvanced++;
         var relics = new List<RewardItemDetails>();
@@ -630,23 +637,128 @@ internal sealed class PlanningPredictionService
                 localReceivesTreasure |= ReferenceEquals(runPlayer, state.Player);
             }
 
+            // Blitz (v0.113) appends shared relics after the per-player pull:
+            // one extra in singleplayer (which also grants a second picking
+            // round) and two extras in multiplayer. The extras roll their own
+            // rarity, never use the first-chest tutorial override, and are
+            // added even when every player's treasure was suppressed, so this
+            // must not be gated on relics.Count.
+            if (state.Run.GameMode == GameMode.Blitz)
+            {
+                var extraRelics = state.Run.Players.Count > 1 ? 2 : 1;
+                for (var index = 0; index < extraRelics; index++)
+                {
+                    var rarity = RelicFactory.RollRarity(state.Run.Rng.TreasureRoomRelics);
+                    var relic = state.Run.SharedRelicGrabBag.PullFromFront(rarity, state.Run)
+                                ?? RelicFactory.FallbackRelic;
+                    relics.Add(new RewardItemDetails(ForecastItemDetails.Relic(relic)));
+                }
+            }
+
             var gold = 0;
-            if (localReceivesTreasure)
+            // v0.113.0 OneOffSynchronizer.DoTreasureRoomRewards wraps the whole
+            // payout in `GameMode != Blitz`: a Blitz chest pays no gold, runs no
+            // SpoilsMap quest and, crucially, never advances Rewards RNG.
+            if (localReceivesTreasure && state.Run.GameMode != GameMode.Blitz)
             {
                 gold = state.Player.PlayerRng.Rewards.NextInt(42, 53);
                 if (state.Player.RunState.AscensionLevel >= (int)MegaCrit.Sts2.Core.Entities.Ascension.AscensionLevel.Poverty)
                     gold = (int)(gold * 0.75);
+                // The chest gold is paid first and the SpoilsMap quest second,
+                // so the +600 lands after the Poverty multiplier.
+                gold += CompleteSpoilsMapQuests(state.Player, mapPoint);
             }
 
-            if (isPriorRoom && state.Run.Players.Count == 1 && relics.Count == 1)
+            // A chest reached on the way to a later node still hands its relics
+            // to the run, and the shared bag already gave them up. Drop them
+            // from the private bag too so later combat, shop and event rollups
+            // cannot offer the same relic again.
+            if (isPriorRoom && state.Run.Players.Count == 1)
             {
-                var relic = ModelDb.GetById<RelicModel>(relics[0].Id);
-                state.Player.RelicGrabBag.Remove(relic);
+                foreach (var relic in relics)
+                    state.Player.RelicGrabBag.Remove(ModelDb.GetById<RelicModel>(relic.Id));
             }
 
             return new TreasureRoomDetails(gold, relics, relics.Count == 0);
         }
         finally { state.Run.PopCurrentRoom(); }
+    }
+
+    /// <summary>
+    /// Reads the generated Blitz goods through their own hover tips. Every
+    /// entry that needs a placeholder (Glam, CardEnchant, Prismatic) overrides
+    /// <c>Title</c>/<c>Description</c> and fills it, so the plain text here
+    /// matches what the game shows on the same icon.
+    /// </summary>
+    private static IReadOnlyList<BlitzMerchantItemForecast> DescribeBlitzEntries(MerchantInventory inventory,
+        IReadOnlyList<BlitzYieldForecast>? yields)
+    {
+        var entries = new List<BlitzMerchantItemForecast>(inventory.BlitzEntries.Count);
+        for (var index = 0; index < inventory.BlitzEntries.Count; index++)
+        {
+            var entry = inventory.BlitzEntries[index];
+            string title;
+            string description;
+            try
+            {
+                title = entry.Title.GetFormattedText();
+                description = entry.Description.GetFormattedText();
+            }
+            catch (Exception)
+            {
+                // A missing localization entry must not cost the whole shop.
+                title = entry.MerchantEntryType.ToString();
+                description = string.Empty;
+            }
+            entries.Add(new BlitzMerchantItemForecast(
+                title,
+                description.Replace("\r", string.Empty),
+                entry.IsRare,
+                entry.IsCursed,
+                entry.IsStocked)
+            {
+                Yield = yields is not null && index < yields.Count
+                    ? yields[index]
+                    : BlitzYieldForecast.Empty
+            });
+        }
+        return entries;
+    }
+
+    /// <summary>
+    /// Mirrors <c>OneOffSynchronizer.TryHandleSpoilsMap</c>: the chest pays the
+    /// SpoilsMap bonus only when the point it is opened on carries the quest
+    /// mark, then removes the card. Map markers are not part of the save, so a
+    /// shadow clone normally sees an empty <see cref="MapPoint.Quests"/> and
+    /// has to recognise the quest from the deck instead: the map is only ever
+    /// created in act 1 and pins itself to act index 1.
+    /// </summary>
+    private static bool IsSpoilsChest(Player player, MapPoint? mapPoint)
+    {
+        if (mapPoint is null || mapPoint.PointType != MapPointType.Treasure)
+            return false;
+        if (mapPoint.Quests.Any(quest => quest is SpoilsMap))
+            return true;
+        return player.Deck.Cards.OfType<SpoilsMap>()
+            .Any(map => map.SpoilsActIndex == player.RunState.CurrentActIndex);
+    }
+
+    private static int CompleteSpoilsMapQuests(Player player, MapPoint? mapPoint)
+    {
+        if (!IsSpoilsChest(player, mapPoint))
+            return 0;
+
+        // Native loops over every SpoilsMap in the deck, so a duplicated map
+        // pays twice. Removing the card is what keeps a later chest in the same
+        // shadow run from paying the same quest again.
+        var maps = player.Deck.Cards.OfType<SpoilsMap>().ToArray();
+        var gold = 0;
+        foreach (var map in maps)
+        {
+            gold += map.DynamicVars.Gold.IntValue;
+            CardPileCmd.RemoveFromDeck(map, showPreview: false).GetAwaiter().GetResult();
+        }
+        return gold;
     }
 
     internal MerchantInventoryForecast GenerateMerchant(State state)
@@ -655,8 +767,20 @@ internal sealed class PlanningPredictionService
         return shop.Describe();
     }
 
-    internal static MerchantInventoryForecast DescribeMerchant(MerchantInventory inventory, int ordinal)
+    internal static MerchantInventoryForecast DescribeMerchant(MerchantInventory inventory, int ordinal,
+        IReadOnlyList<BlitzYieldForecast>? blitzYields = null)
     {
+        // Blitz shops sell actions, not priced goods: five weighted picks plus
+        // one cursed pick, each free and each resolving its own selection after
+        // purchase. The goods themselves are rolled when the shop is generated,
+        // so they are predictable even though their contents are not.
+        if (inventory.IsBlitzShop)
+            return new MerchantInventoryForecast([], [], [], [], -1, ordinal)
+            {
+                BlitzEntries = DescribeBlitzEntries(inventory, blitzYields),
+                BlitzChoices = Math.Max(0, inventory.BlitzChoicesRemaining)
+            };
+
         using var pricing = ShadowIsolation.EvaluateLocalMerchantPrice();
         MerchantItemForecast Empty() => new(ForecastItemDetails.Text("—"), -1);
         MerchantItemForecast Card(MerchantCardEntry entry) => entry.CreationResult is { } result ? new(

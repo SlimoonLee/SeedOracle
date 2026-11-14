@@ -130,7 +130,7 @@ internal sealed class CombatSolverAdapter : ICombatSolverAdapter
                 WorkerIdleTimeoutMilliseconds = options.WorkerIdleTimeoutMilliseconds,
             },
             cancellationToken: cancellationToken);
-        return ToForecastResult(result);
+        return Measure(encounter, options, ToForecastResult(result));
     }
 
     public Task<CombatSolverForecastResult> SimulatePlanningAsync(
@@ -193,7 +193,7 @@ internal sealed class CombatSolverAdapter : ICombatSolverAdapter
                 WorkerIdleTimeoutMilliseconds = options.WorkerIdleTimeoutMilliseconds,
             },
             cancellationToken);
-        return ToForecastResult(result);
+        return Measure(encounter, options, ToForecastResult(result));
     }
 
     private static CombatSolverForecastResult UnsupportedPlanningResult() => new(
@@ -247,7 +247,26 @@ internal sealed class CombatSolverAdapter : ICombatSolverAdapter
                 WorkerIdleTimeoutMilliseconds = options.WorkerIdleTimeoutMilliseconds,
             },
             cancellationToken);
-        return ToForecastResult(result);
+        return Measure(encounter, options, ToForecastResult(result));
+    }
+
+    /// <summary>
+    /// Stamps the applied ceiling on the result so the UI can explain a timeout,
+    /// and leaves a trace: the worker discards everything it computed, so a
+    /// timeout is only diagnosable from the numbers around it.
+    /// </summary>
+    private static CombatSolverForecastResult Measure(EncounterModel encounter, CombatSolverForecastOptions options,
+        CombatSolverForecastResult result)
+    {
+        var measured = result with { TimeoutMilliseconds = options.OverallTimeoutMilliseconds };
+        if (measured.TimedOut)
+        {
+            Entry.Logger.Info(
+                $"[CombatSolver] timeout encounter={encounter.Id.Entry} budget={options.SearchBudgetMilliseconds}ms "
+                + $"ceiling={options.OverallTimeoutMilliseconds}ms elapsed={measured.TotalElapsedMilliseconds:0}ms");
+        }
+
+        return measured;
     }
 
     private static CombatSolverForecastResult ToForecastResult(PreCombatForecastResult result) => new(

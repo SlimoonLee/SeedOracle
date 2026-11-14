@@ -109,8 +109,32 @@ internal sealed partial class RoutePlanPanelControl
         var generation = _planRevision;
         var samples = new List<PlannedCombatSample>();
         var running = false;
+        var sampleTotal = 0;
         var cancellation = new CancellationTokenSource();
-        section.TreeExiting += () => cancellation.Cancel();
+        CombatSolverProgressMonitor? monitor = null;
+        // The solver has no progress callback: tick the worker state so a long
+        // search shows elapsed time instead of a frozen "simulating" label.
+        var progressTimer = new Godot.Timer { WaitTime = 0.5, OneShot = false, Autostart = false };
+        section.AddChild(progressTimer);
+        progressTimer.Timeout += () =>
+        {
+            if (cancellation.IsCancellationRequested)
+            {
+                running = false;
+                monitor = null;
+                progressTimer.Stop();
+                return;
+            }
+            if (!running || monitor is null)
+                return;
+            status.Text = (chinese ? $"正在模拟 {samples.Count + 1}/{sampleTotal}…" : $"Simulating {samples.Count + 1}/{sampleTotal}…")
+                + " · " + monitor.Snapshot().Describe(chinese);
+        };
+        section.TreeExiting += () =>
+        {
+            cancellation.Cancel();
+            progressTimer.Stop();
+        };
         if (!Entry.CombatSolver.SupportsPlanningSimulation)
         {
             status.Text = chinese ? "CombatSolver 未提供规划状态模拟 API。" : "CombatSolver planning API is unavailable.";
@@ -187,6 +211,8 @@ internal sealed partial class RoutePlanPanelControl
         void FinishSimulation(string? error = null)
         {
             running = false;
+            monitor = null;
+            progressTimer.Stop();
             if (cancellation.IsCancellationRequested || _planRevision != generation)
                 return;
             startButton.Disabled = false;
@@ -237,6 +263,11 @@ internal sealed partial class RoutePlanPanelControl
             {
                 var index = samples.Count;
                 var seed = StableCombatSeed(stateToken, encounter.Id.Entry, index);
+                // Every request gets the API maximum: a long evaluation that is
+                // cut short loses its whole result, which costs more than waiting.
+                const int budget = 5_000;
+                var timeout = CombatSolverTimeoutPolicy.Choose(budget);
+                monitor = new CombatSolverProgressMonitor(timeout);
                 // The API captures Godot state synchronously. Every request,
                 // and all result rendering, starts on the dispatcher thread.
                 var pending = Entry.CombatSolver.SimulatePlanningAsync(
@@ -249,8 +280,8 @@ internal sealed partial class RoutePlanPanelControl
                     mapPointType,
                     seed,
                     new CombatSolverForecastOptions(
-                        SearchBudgetMilliseconds: 5_000,
-                        OverallTimeoutMilliseconds: 50_000,
+                        SearchBudgetMilliseconds: budget,
+                        OverallTimeoutMilliseconds: timeout,
                         MaxDegreeOfParallelism: null,
                         ForceRefresh: true,
                         CloseWorkerAfterRequest: false,
@@ -279,6 +310,8 @@ internal sealed partial class RoutePlanPanelControl
             startButton.Disabled = true;
             countSelect.Disabled = true;
             var count = countSelect.Selected + 1;
+            sampleTotal = count;
+            progressTimer.Start();
             status.Text = chinese ? $"正在模拟 0/{count}…" : $"Simulating 0/{count}…";
             StartNextSample(count);
         }

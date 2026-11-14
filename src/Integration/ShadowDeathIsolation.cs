@@ -12,12 +12,17 @@ namespace SeedOracle.Integration;
 // Kill's native win-condition check reads a cloned run, then ends the GLOBAL
 // RunManager and CombatManager. Intercept before that method (including its
 // music/UI work and other mods' OnEnded postfixes) can ever be reached.
+// v0.113.0 added a CardModel? source overload; every Kill path now funnels
+// through Kill(IReadOnlyCollection<Creature>, CardModel?, bool), so patching
+// the old 2-argument wrapper would let single-target deaths reach the global
+// win-condition check (RunManager.OnEnded / ShowGameOverScreen).
 [HarmonyPatch(typeof(CreatureCmd), nameof(CreatureCmd.Kill),
-    new[] { typeof(IReadOnlyCollection<Creature>), typeof(bool) })]
+    new[] { typeof(IReadOnlyCollection<Creature>), typeof(CardModel), typeof(bool) })]
 internal static class ShadowCreatureDeathPatch
 {
     [HarmonyPrefix]
-    private static bool Prefix(IReadOnlyCollection<Creature> creatures, bool force, ref Task __result)
+    private static bool Prefix(IReadOnlyCollection<Creature> creatures, CardModel? cardSource,
+        bool force, ref Task __result)
     {
         if (!creatures.Any(creature => ShadowIsolation.IsShadowPlayer(creature.Player)))
             return true;
@@ -28,11 +33,12 @@ internal static class ShadowCreatureDeathPatch
                                       || creature.CombatState is not null))
             throw new InvalidOperationException("影子事件的死亡目标不是独立的非战斗玩家，已停止预演。");
 
-        __result = KillAsync(creatures, force);
+        __result = KillAsync(creatures, cardSource, force);
         return false;
     }
 
-    private static async Task KillAsync(IReadOnlyCollection<Creature> creatures, bool force)
+    private static async Task KillAsync(IReadOnlyCollection<Creature> creatures,
+        CardModel? cardSource, bool force)
     {
         foreach (var creature in creatures.ToArray())
         {
@@ -59,7 +65,7 @@ internal static class ShadowCreatureDeathPatch
                 if (force || creature.MaxHp <= 0 || Hook.ShouldDie(run, null, creature, out preventer))
                 {
                     creature.InvokeDiedEvent();
-                    await Hook.AfterDeath(run, null, creature, wasRemovalPrevented: false, 0f);
+                    await Hook.AfterDeath(run, null, creature, cardSource, false, 0f);
                     foreach (var power in creature.RemoveAllPowersAfterDeath())
                         await power.AfterRemoved(creature);
                     player.DeactivateHooks();
@@ -67,7 +73,7 @@ internal static class ShadowCreatureDeathPatch
                 }
                 if (recursion >= 10)
                     throw new InvalidOperationException("影子事件的防死效果未能恢复生命，已停止预演。");
-                await Hook.AfterDeath(run, null, creature, wasRemovalPrevented: true, 0f);
+                await Hook.AfterDeath(run, null, creature, cardSource, true, 0f);
                 await Hook.AfterPreventingDeath(run, null, preventer!, creature);
                 if (!creature.IsDead) break;
             }

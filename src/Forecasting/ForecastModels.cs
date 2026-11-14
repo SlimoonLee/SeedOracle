@@ -190,7 +190,95 @@ internal sealed record MerchantInventoryForecast(
     public IReadOnlyList<MerchantChoiceBranch> ChoiceBranches { get; init; } = [];
     public IReadOnlyList<string> UnresolvedChoices { get; init; } = [];
     public bool ChoicesTruncated { get; init; }
+
+    /// <summary>
+    /// Blitz replaces priced stock with six one-shot goods (five weighted picks
+    /// plus one cursed pick). The set is fixed when the shop is generated, so it
+    /// is predictable; what each good hands over is chosen after purchase and is
+    /// not.
+    /// </summary>
+    public IReadOnlyList<BlitzMerchantItemForecast> BlitzEntries { get; init; } = [];
+
+    /// <summary>How many of those goods this visit can still take.</summary>
+    public int BlitzChoices { get; init; }
 }
+
+internal sealed record BlitzMerchantItemForecast(
+    string Title,
+    string Description,
+    bool IsRare,
+    bool IsCursed,
+    bool IsAvailable)
+{
+    /// <summary>
+    /// What taking this as the next pick hands over. Every good rolls its
+    /// contents at purchase time out of the same streams the shop already used,
+    /// so the figure holds only while nothing else was bought first in the same
+    /// visit.
+    /// </summary>
+    public BlitzYieldForecast Yield { get; init; } = BlitzYieldForecast.Empty;
+}
+
+internal sealed record BlitzYieldForecast
+{
+    internal static readonly BlitzYieldForecast Empty = new();
+
+    /// <summary>One list per offered card-reward screen.</summary>
+    public IReadOnlyList<IReadOnlyList<ForecastItemDetails>> CardScreens { get; init; } = [];
+
+    public IReadOnlyList<ForecastItemDetails> Relics { get; init; } = [];
+    public IReadOnlyList<ForecastItemDetails> Potions { get; init; } = [];
+
+    /// <summary>Cards that join the deck with the purchase, curses included.</summary>
+    public IReadOnlyList<ForecastItemDetails> GainedCards { get; init; } = [];
+
+    /// <summary>Deck cards the purchase upgrades without asking.</summary>
+    public IReadOnlyList<ForecastItemDetails> UpgradedCards { get; init; } = [];
+
+    public int MaxHpDelta { get; init; }
+    public int HealedHp { get; init; }
+
+    /// <summary>Extra picks this purchase grants for the rest of the visit.</summary>
+    public int ExtraChoices { get; init; }
+
+    /// <summary>The purchase stops at a deck selection only the player can make.</summary>
+    public bool NeedsCardPick { get; init; }
+
+    /// <summary>
+    /// For a transform good: every card the selection accepts, with what it
+    /// becomes. Each candidate reads the transformation stream from the same
+    /// position, so picking any of them is answered without guessing.
+    /// </summary>
+    public IReadOnlyList<BlitzCardChoiceOutcome> TransformChoices { get; init; } = [];
+
+    /// <summary>How many deck cards that selection accepts.</summary>
+    public int PickableCards { get; init; }
+
+    /// <summary>False when the shadow purchase itself failed; nothing is claimed then.</summary>
+    public bool Resolved { get; init; }
+
+    /// <summary>
+    /// Whether the shop actually took the good. A declined deck pick leaves this
+    /// false while <see cref="Resolved"/> stays true: the probe ran, the
+    /// purchase is still waiting for the player.
+    /// </summary>
+    public bool Purchased { get; init; }
+}
+
+/// <summary>One selectable deck card and the card it would turn into.</summary>
+internal sealed record BlitzCardChoiceOutcome(ForecastItemDetails Source, ForecastItemDetails Result)
+{
+    /// <summary>
+    /// How the source becomes available: "deck" (already in the library),
+    /// "reward" (a card an earlier buy's screen offers) or "curse" (a curse an
+    /// earlier buy hands over). Null on the hover's legacy table.
+    /// </summary>
+    public string? Origin { get; init; }
+
+    /// <summary>For reward/curse sources, the shelf slot that provides them.</summary>
+    public IReadOnlyList<int> ViaSlots { get; init; } = [];
+}
+
 
 internal sealed record MerchantChoiceBranch(string Condition, MerchantInventoryForecast Inventory)
 {

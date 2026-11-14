@@ -39,6 +39,10 @@ internal static class ShadowIsolation
     private static readonly AsyncLocal<bool> MerchantGeneration = new();
     private static readonly AsyncLocal<bool> LocalPriceEvaluation = new();
     private static readonly AsyncLocal<bool> MerchantPurchase = new();
+    // v0.113.0 moved shop inventories off MerchantRoom onto the live
+    // MerchantSynchronizer. Shadow predictions keep their own per-player
+    // inventories here instead of touching the live run.
+    private static readonly AsyncLocal<Dictionary<Player, MerchantInventory>?> ShadowMerchantInventories = new();
     private sealed class ShadowPlayerIdentity { }
     private static readonly ConditionalWeakTable<Player, ShadowPlayerIdentity> ShadowPlayers = new();
 
@@ -89,6 +93,21 @@ internal static class ShadowIsolation
         MerchantGeneration.Value = true;
         return new CallbackScope(() => MerchantGeneration.Value = previous);
     }
+
+    internal static IDisposable UseMerchantInventories(IReadOnlyList<MerchantInventory> inventories)
+    {
+        var map = new Dictionary<Player, MerchantInventory>(ReferenceEqualityComparer.Instance);
+        foreach (var inventory in inventories)
+            map[inventory.Player] = inventory;
+        var previous = ShadowMerchantInventories.Value;
+        ShadowMerchantInventories.Value = map;
+        return new CallbackScope(() => ShadowMerchantInventories.Value = previous);
+    }
+
+    internal static MerchantInventory? FindMerchantInventory(Player player) =>
+        ShadowMerchantInventories.Value is { } map && map.TryGetValue(player, out var inventory)
+            ? inventory
+            : null;
 
     internal static IDisposable EvaluateLocalMerchantPrice()
     {
@@ -344,14 +363,44 @@ internal static class ShadowIsolation
     }
 }
 
-[HarmonyPatch(typeof(CardSelectCmd), nameof(CardSelectCmd.Selector), MethodType.Getter)]
+// v0.113.0 replaced CardSelectCmd's global selector stacks with a per-player
+// CardSelectorStack owned by RunManager. A Prefix keeps a cloned shadow player
+// out of the live run's slot lookup (which would throw for an out-of-run
+// player) while still answering every scripted selection deterministically.
+[HarmonyPatch(typeof(MegaCrit.Sts2.Core.CardSelection.CardSelectorStack),
+    nameof(MegaCrit.Sts2.Core.CardSelection.CardSelectorStack.GetSelector))]
 internal static class ShadowCardSelectorPatch
 {
-    [HarmonyPostfix]
-    private static void Postfix(ref ICardSelector? __result)
+    [HarmonyPrefix]
+    private static bool Prefix(Player player, ref ICardSelector? __result)
     {
-        if (ShadowIsolation.Selector is { } selector)
+        if (ShadowIsolation.Selector is { } selector
+            && ReferenceEquals(player, ShadowIsolation.ActiveShadowPlayer))
+        {
             __result = selector;
+            return false;
+        }
+        return true;
+    }
+}
+
+// v0.113.0: bundle selection reserves a choice id on the LIVE
+// PlayerChoiceSynchronizer before consulting any selector. A cloned shadow
+// player is not in that collection, so the native path throws. Mirror the
+// engine's own TestMode default (first bundle) to keep both the planner and
+// the headless native fixture deterministic without touching live state.
+[HarmonyPatch(typeof(CardSelectCmd), nameof(CardSelectCmd.FromChooseABundleScreen))]
+internal static class ShadowBundleSelectionPatch
+{
+    [HarmonyPrefix]
+    private static bool Prefix(Player player,
+        IReadOnlyList<IReadOnlyList<CardModel>> bundles,
+        ref Task<IEnumerable<CardModel>> __result)
+    {
+        if (!ShadowIsolation.IsShadowPlayer(player)) return true;
+        __result = Task.FromResult<IEnumerable<CardModel>>(
+            bundles.Count == 0 ? [] : bundles[0].ToArray());
+        return false;
     }
 }
 

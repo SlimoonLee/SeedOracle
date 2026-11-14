@@ -142,8 +142,10 @@ internal static class ForecastTooltipPaging
         else
         {
             MapHoverTipPresentation.HideTip(target);
+            // v0.113.0 made HoverTip.Id read-only; the native ctor derives a
+            // stable id from the title LocString, which is sufficient here.
             var tip = new HoverTip(target._runState.Act.Title, navigation + pages[pageIndex])
-                { Title = pageTitle, Id = $"{Entry.ModId}:paged:{target.Point.coord}:{pageIndex}" };
+                { Title = pageTitle };
             set = NHoverTipSet.CreateAndShow(target, tip, HoverTip.GetHoverTipAlignment(target));
             currentSet = set is null ? null : new(set);
             if (set is not null)

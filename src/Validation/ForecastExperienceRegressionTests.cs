@@ -413,7 +413,7 @@ internal static class ForecastExperienceRegressionTests
             return inner.PredictMerchantRoom(player, rooms);
         }
         public Forecast<CombatRewardDetails> PredictCombatRewards(Player player, IReadOnlyList<RoomType> rooms, EncounterModel encounter) => inner.PredictCombatRewards(player, rooms, encounter);
-        public Forecast<TreasureRoomDetails> PredictTreasureRoom(Player player, IReadOnlyList<RoomType> rooms) => inner.PredictTreasureRoom(player, rooms);
+        public Forecast<TreasureRoomDetails> PredictTreasureRoom(Player player, IReadOnlyList<RoomType> rooms, IReadOnlyList<MapPoint>? points = null) => inner.PredictTreasureRoom(player, rooms, points);
         public Forecast<EventContentDetails>? PredictEventContents(Player player, IReadOnlyList<RoomType> rooms, EventModel model) => inner.PredictEventContents(player, rooms, model);
     }
 

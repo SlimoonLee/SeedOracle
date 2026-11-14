@@ -11,6 +11,9 @@ internal sealed record MerchantStockGroup(
     MerchantInventoryForecast Inventory, IReadOnlyList<string> Conditions, long Weight)
 {
     public IReadOnlyList<ForecastChoiceConditionFormatter.Term> Terms { get; init; } = [];
+
+    /// <summary>Distinct upstream combinations that reached this exact stock.</summary>
+    public int CaseCount { get; init; } = 1;
 }
 
 internal static class MerchantForecastSummary
@@ -28,15 +31,16 @@ internal static class MerchantForecastSummary
         IEnumerable<MerchantForecastCase> Expand(string? condition, IReadOnlyList<ForecastChoicePath> paths,
             MerchantInventoryForecast stock, int weight)
         {
+            var route = string.IsNullOrEmpty(routeCondition) ? null
+                : new ForecastChoiceFact("route", "", routeCondition, routeCondition, [],
+                    Closed: false, Kind: ForecastChoiceKind.Route);
             if (paths.Count == 0)
-                yield return new(Condition(condition), stock, routeCount * weight);
+                yield return new(Condition(condition), stock, routeCount * weight) { Facts = route is null ? null : [route] };
             else
                 foreach (var path in paths)
                     yield return new(Condition(path.Condition), stock, routeCount)
                     {
-                        Facts = string.IsNullOrEmpty(routeCondition) ? path.Facts :
-                            [new("route", "", routeCondition, routeCondition, [], Closed: false, Kind: ForecastChoiceKind.Route),
-                                .. path.Facts]
+                        Facts = route is null ? path.Facts : [route, .. path.Facts]
                     };
         }
 
@@ -47,7 +51,7 @@ internal static class MerchantForecastSummary
     internal static IReadOnlyList<MerchantStockGroup> Group(IEnumerable<MerchantForecastCase> cases)
     {
         var keys = new Dictionary<MerchantInventoryForecast, string>(ReferenceEqualityComparer.Instance);
-        return cases.GroupBy(item => Key(item.Inventory), StringComparer.Ordinal)
+        var groups = cases.GroupBy(item => Key(item.Inventory), StringComparer.Ordinal)
             .Select(group => new MerchantStockGroup(group.First().Inventory,
                 group.Select(item => item.Condition).Where(condition => condition.Length > 0)
                     .Distinct(StringComparer.Ordinal).ToArray(),
@@ -55,9 +59,17 @@ internal static class MerchantForecastSummary
             {
                 Terms = ForecastChoiceConditionFormatter.Reduce(group.Select(item => item.Facts
                     ?? (item.Condition.Length == 0 ? [] : new ForecastChoiceFact[]
-                        { new("legacy", "", item.Condition, item.Condition, [], Closed: false) })))
+                        { new("legacy", "", item.Condition, item.Condition, [], Closed: false) }))),
+                CaseCount = group.Count()
             })
             .OrderByDescending(group => group.Weight).ToArray();
+        // One precondition repeated in every block is noise; a route label answers
+        // "how did I get here", not "why is this stock different". Only the choices
+        // that actually moved the RNG belong in the condition.
+        var terms = groups.SelectMany(group => group.Terms).ToArray();
+        ForecastChoiceConditionFormatter.UnifySharedCells(terms);
+        ForecastChoiceConditionFormatter.DropIncidentalRoutes(terms);
+        return groups;
 
         string Key(MerchantInventoryForecast inventory)
         {

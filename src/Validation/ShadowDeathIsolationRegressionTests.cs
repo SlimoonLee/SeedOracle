@@ -116,7 +116,7 @@ internal static class ShadowDeathIsolationRegressionTests
     {
         var shadow = planning.Restore(input);
         planning.AddRelic(shadow, ModelDb.Relic<LordsParasol>().Id);
-        var room = new MerchantRoom { _runState = shadow.Run };
+        var room = new MerchantRoom();
         shadow.Run.PushRoom(room);
         try
         {
@@ -127,7 +127,7 @@ internal static class ShadowDeathIsolationRegressionTests
             // have separate native-merchant regressions.
             stock._relicEntries.Clear();
             stock._potionEntries.Clear();
-            room.Inventories.Add(stock);
+            using var merchantScope = ShadowIsolation.UseMerchantInventories([stock]);
             var selected = shadow.Player.Deck.Cards.First(card => card.IsRemovable);
             var cards = shadow.Player.Deck.Cards.Count;
             var gold = shadow.Player.Gold;
@@ -153,8 +153,9 @@ internal static class ShadowDeathIsolationRegressionTests
         // Exercise the native removal wrapper without an ambient frame too.
         var delayed = planning.Restore(input);
         var removal = new MerchantCardRemovalEntry(delayed.Player);
+        removal.SetPurchaseUncancelable();
         rejected = false;
-        try { removal.OnTryPurchaseWrapper(null, ignoreCost: true, cancelable: false).GetAwaiter().GetResult(); }
+        try { removal.OnTryPurchaseUnsynchronized(null, ignoreCost: true).GetAwaiter().GetResult(); }
         catch (InvalidOperationException) { rejected = true; }
         Require(rejected && !removal.Used, "after-scope removal reached the live synchronizer or guessed a target");
     }
@@ -193,7 +194,10 @@ internal static class ShadowGlobalBoundaryProbe
         AccessTools.DeclaredMethod(typeof(RunManager), nameof(RunManager.OnEnded)),
         AccessTools.DeclaredMethod(typeof(CombatManager), nameof(CombatManager.LoseCombat)),
         AccessTools.DeclaredMethod(typeof(NRun), nameof(NRun.ShowGameOverScreen)),
-        AccessTools.DeclaredMethod(typeof(OneOffSynchronizer), nameof(OneOffSynchronizer.DoLocalMerchantCardRemoval)),
+        // v0.113.0 removed OneOffSynchronizer.DoLocalMerchantCardRemoval; the
+        // live purchase boundary now lives on MerchantSynchronizer.
+        AccessTools.DeclaredMethod(typeof(MegaCrit.Sts2.Core.Multiplayer.Game.MerchantSynchronizer),
+            nameof(MegaCrit.Sts2.Core.Multiplayer.Game.MerchantSynchronizer.PurchaseLocalEntry)),
         AccessTools.DeclaredMethod(typeof(LordsParasol), "PurchaseEverything"),
         AccessTools.DeclaredMethod(typeof(NMapScreen), nameof(NMapScreen.SetTravelEnabled)),
         AccessTools.DeclaredMethod(typeof(NAbandonRunConfirmPopup), nameof(NAbandonRunConfirmPopup.Create))

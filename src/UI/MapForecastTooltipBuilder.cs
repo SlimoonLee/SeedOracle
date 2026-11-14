@@ -188,7 +188,13 @@ internal static class MapForecastTooltipBuilder
         else
         {
             var lines = new List<string>();
-            if (forecast.UnknownRoom is { } unknown)
+            // "? → Event" followed by the single known event says the same thing
+            // twice; the event line already answers the room type.
+            var resolvedEvent = forecast.UnknownRoom is { HasValue: true } room
+                                && room.Value == RoomType.Event
+                                && forecast.Events is { HasValue: true } knownEvent
+                                && knownEvent.Value!.Count == 1;
+            if (forecast.UnknownRoom is { } unknown && !resolvedEvent)
                 AppendUnknown(lines, unknown, chinese);
             if (forecast.Events is { } events)
                 AppendEvents(lines, events, chinese);
@@ -354,12 +360,16 @@ internal static class MapForecastTooltipBuilder
         if (hasSharedEncounter)
         {
             var encounter = encounters[0]!;
+            var merged = MergeSingleMonster(encounter);
+            if (merged is null)
+            {
+                panels[0].Insert(0, chinese
+                    ? $"怪物：{FormatMonsters(encounter.Monsters, true)}"
+                    : $"Monsters: {FormatMonsters(encounter.Monsters, false)}");
+            }
             panels[0].Insert(0, chinese
-                ? $"怪物：{string.Join(" + ", encounter.Monsters)}"
-                : $"Monsters: {string.Join(" + ", encounter.Monsters)}");
-            panels[0].Insert(0, chinese
-                ? $"Boss：{encounter.Title}"
-                : $"Boss: {encounter.Title}");
+                ? $"Boss：{encounter.Title}{merged}"
+                : $"Boss: {encounter.Title}{merged}");
         }
 
         panels[0].Insert(0, chinese
@@ -435,8 +445,7 @@ internal static class MapForecastTooltipBuilder
         var choices = RewardForecastSummary.Group(rewards, rewards.ReferenceCondition,
             rewards.ReferenceChoicePaths, rewards.ChoiceBranches, ForecastContentKey.Combat);
         var conditions = new ForecastConditionDisplay(choices.SelectMany(group => group.Terms), chinese);
-        conditions.AppendPrerequisites(lines, chinese, "  ");
-        AppendOutcomeCondition(lines, conditions.Format(choices[0].Terms), chinese, "  ");
+        AppendRewardPredicates(lines, choices, conditions, chinese, "  ");
         lines.Add("  " + string.Join(chinese ? "；" : "; ", parts)
                   + "  " + Badge(rewardForecast.Accuracy, chinese));
         AppendRewardAlternatives(lines, rewards, chinese, "  ");
@@ -499,12 +508,16 @@ internal static class MapForecastTooltipBuilder
 
         if (variant.Encounter is { } encounter)
         {
+            var merged = MergeSingleMonster(encounter);
             lines.Add(chinese
-                ? $"{routeLabel}：{RoomName(variant.RoomType, true)} · {encounter.Title}"
-                : $"{routeLabel}: {RoomName(variant.RoomType, false)} · {encounter.Title}");
-            lines.Add(chinese
-                ? $"  怪物：{string.Join(" + ", encounter.Monsters)}"
-                : $"  Monsters: {string.Join(" + ", encounter.Monsters)}");
+                ? $"{routeLabel}：{RoomName(variant.RoomType, true)} · {encounter.Title}{merged}"
+                : $"{routeLabel}: {RoomName(variant.RoomType, false)} · {encounter.Title}{merged}");
+            if (merged is null)
+            {
+                lines.Add(chinese
+                    ? $"  怪物：{FormatMonsters(encounter.Monsters, true)}"
+                    : $"  Monsters: {FormatMonsters(encounter.Monsters, false)}");
+            }
             AppendRewards(lines, variant, chinese, "  ");
             return;
         }
@@ -520,9 +533,11 @@ internal static class MapForecastTooltipBuilder
             }
 
             var ordinal = merchant.Value!.FutureVisitOrdinal;
-            lines.Add(chinese
-                ? $"{routeLabel}：从当前起第 {ordinal} 次商店"
-                : $"{routeLabel}: merchant visit {ordinal} from now");
+            lines.Add(ordinal > 1
+                ? chinese
+                    ? $"{routeLabel}：从当前起第 {ordinal} 次商店"
+                    : $"{routeLabel}: merchant visit {ordinal} from now"
+                : $"{routeLabel}：{(chinese ? "商店" : "Merchant")}");
             AppendMerchantContents(lines, merchant.Value, chinese, "  ");
             return;
         }
@@ -600,12 +615,16 @@ internal static class MapForecastTooltipBuilder
         if (encounters.Count == 1)
         {
             var encounter = encounters[0];
+            var merged = MergeSingleMonster(encounter);
             lines.Add(chinese
-                ? $"遭遇：{encounter.Title}  {Badge(forecast.Accuracy, true)}"
-                : $"Encounter: {encounter.Title}  {Badge(forecast.Accuracy, false)}");
-            lines.Add(chinese
-                ? $"怪物：{string.Join(" + ", encounter.Monsters)}"
-                : $"Monsters: {string.Join(" + ", encounter.Monsters)}");
+                ? $"遭遇：{encounter.Title}{merged}  {Badge(forecast.Accuracy, true)}"
+                : $"Encounter: {encounter.Title}{merged}  {Badge(forecast.Accuracy, false)}");
+            if (merged is null)
+            {
+                lines.Add(chinese
+                    ? $"怪物：{FormatMonsters(encounter.Monsters, true)}"
+                    : $"Monsters: {FormatMonsters(encounter.Monsters, false)}");
+            }
             return;
         }
 
@@ -613,7 +632,7 @@ internal static class MapForecastTooltipBuilder
             ? $"可能遭遇：{Badge(forecast.Accuracy, true)}"
             : $"Possible encounters: {Badge(forecast.Accuracy, false)}");
         foreach (var encounter in encounters)
-            lines.Add($"• {encounter.Title}: {string.Join(" + ", encounter.Monsters)}");
+            lines.Add($"• {encounter.Title}: {FormatMonsters(encounter.Monsters, true)}");
     }
 
     private static void AppendHp(
@@ -626,7 +645,12 @@ internal static class MapForecastTooltipBuilder
             return;
         }
 
-        var hp = string.Join(" / ", forecast.Value!.Select(monster => $"{monster.Monster} {monster.Hp}"));
+        var entries = forecast.Value!;
+        // The names were already listed above; repeating them per HP value adds a
+        // whole line of duplicates. Keep them only when the lineup is mixed.
+        var uniform = entries.Select(monster => monster.Monster).Distinct(StringComparer.Ordinal).Count() == 1;
+        var hp = string.Join(" / ", entries.Select(monster =>
+            uniform ? monster.Hp.ToString() : $"{monster.Monster} {monster.Hp}"));
         lines.Add(chinese
             ? $"HP：{hp}  {Badge(forecast.Accuracy, true)}"
             : $"HP: {hp}  {Badge(forecast.Accuracy, false)}");
@@ -732,12 +756,28 @@ internal static class MapForecastTooltipBuilder
         if (groups.Count == 0)
             return;
         var conditions = new ForecastConditionDisplay(groups.SelectMany(group => group.Terms), chinese);
-        conditions.AppendPrerequisites(lines, chinese, prefix);
         var baseline = groups[0];
-        var baseCondition = conditions.Format(baseline.Terms);
-        if (groups.Count > 1 || baseCondition.Length > 0)
-            lines.Add(prefix + (chinese ? "基础库存" : "Base stock")
-                + (baseCondition.Length > 0 ? (chinese ? "：" : ": ") + baseCondition : (chinese ? "：" : ":")));
+        // With one group every enumerated combination ends in this same stock, so
+        // the only useful statement is how many were checked, not which they were.
+        var summarized = groups.Count == 1
+            ? ForecastConditionCompression.Summarize(baseline.Terms, baseline.CaseCount, chinese)
+            : null;
+        // Choice prerequisites would contradict the summary ("required" versus
+        // "any of them"); budget and slot warnings still apply.
+        conditions.AppendPrerequisites(lines, chinese, prefix, includeChoices: summarized is null);
+        if (summarized is not null)
+        {
+            lines.Add(prefix + (chinese ? "基础库存" : "Base stock") + summarized + (chinese ? "：" : ":"));
+        }
+        else
+        {
+            var baseCondition = conditions.Format(baseline.Terms);
+            // "Base stock:" with nothing after the colon is a label, not information.
+            if (baseCondition.Length > 0)
+                lines.Add(prefix + (chinese ? "基础库存：" : "Base stock: ") + baseCondition);
+            else if (groups.Count > 1)
+                lines.Add(prefix + (chinese ? "基础库存：" : "Base stock:"));
+        }
         AppendMerchantStock(lines, baseline.Inventory, chinese, prefix);
         foreach (var group in groups.Skip(1))
         {
@@ -751,6 +791,11 @@ internal static class MapForecastTooltipBuilder
     private static void AppendMerchantStock(List<string> lines, MerchantInventoryForecast merchant,
         bool chinese, string prefix)
     {
+        if (merchant.BlitzEntries.Count > 0)
+        {
+            AppendBlitzStock(lines, merchant, chinese, prefix);
+            return;
+        }
         AppendItems(lines, prefix + (chinese ? "角色卡" : "Character cards"), merchant.CharacterCards, chinese);
         AppendItems(lines, prefix + (chinese ? "无色卡" : "Colorless cards"), merchant.ColorlessCards, chinese);
         AppendItems(lines, prefix + (chinese ? "遗物" : "Relics"), merchant.Relics, chinese);
@@ -758,6 +803,44 @@ internal static class MapForecastTooltipBuilder
         lines.Add(chinese
             ? $"{prefix}删牌：{merchant.CardRemovalCost}金"
             : $"{prefix}Card removal: {merchant.CardRemovalCost}g");
+    }
+
+    // Blitz goods have no price and their titles are full sentences, so they get
+    // one line each plus the description the game itself shows on the same icon.
+    private static void AppendBlitzStock(List<string> lines, MerchantInventoryForecast merchant,
+        bool chinese, string prefix)
+    {
+        var take = merchant.BlitzChoices > 0
+            ? chinese ? $"（可带走 {merchant.BlitzChoices} 件）" : $" (take {merchant.BlitzChoices})"
+            : string.Empty;
+        lines.Add(prefix + (chinese ? "极速商店货物" : "Blitz shop goods") + take);
+        var anyYield = false;
+        for (var index = 0; index < merchant.BlitzEntries.Count; index++)
+        {
+            var entry = merchant.BlitzEntries[index];
+            var tags = new List<string>();
+            if (entry.IsRare) tags.Add(chinese ? "稀有" : "rare");
+            if (entry.IsCursed) tags.Add(chinese ? "诅咒" : "cursed");
+            if (!entry.IsAvailable) tags.Add(chinese ? "已购" : "used");
+            lines.Add(prefix + "  " + ForecastChoiceDiffFormatter.Slot(index) + " " + entry.Title
+                      + (tags.Count > 0 ? "（" + string.Join(chinese ? "，" : ", ", tags) + "）" : string.Empty));
+            foreach (var description in entry.Description.Split(
+                         '\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                lines.Add(prefix + "     " + description);
+            var yieldLines = BlitzYieldText.Lines(entry.Yield, chinese);
+            foreach (var line in yieldLines)
+                lines.Add(prefix + "     " + line);
+            anyYield |= yieldLines.Count > 0;
+        }
+
+        // Every good rolls its contents when it is bought, so the figures only
+        // describe the first pick of the visit.
+        if (anyYield)
+        {
+            lines.Add(prefix + (chinese
+                ? "  → 以上按“这一项先买”推算；先买别的会改变后续结果"
+                : "  -> figures assume this good is bought first"));
+        }
     }
 
     internal static void AppendRewards(
@@ -887,8 +970,7 @@ internal static class MapForecastTooltipBuilder
         var choices = RewardForecastSummary.Group(rewards, rewards.ReferenceCondition,
             rewards.ReferenceChoicePaths, rewards.ChoiceBranches, ForecastContentKey.Combat);
         var conditions = new ForecastConditionDisplay(choices.SelectMany(group => group.Terms), chinese);
-        conditions.AppendPrerequisites(lines, chinese, prefix);
-        AppendOutcomeCondition(lines, conditions.Format(choices[0].Terms), chinese, prefix);
+        AppendRewardPredicates(lines, choices, conditions, chinese, prefix);
         lines.Add(chinese
             ? $"{prefix}胜利掉落：[blue]{rewards.Gold}[/blue]金币  {Badge(forecast.Accuracy, true)}"
             : $"{prefix}Base rewards on victory: [blue]{rewards.Gold}[/blue] gold  {Badge(forecast.Accuracy, false)}");
@@ -990,8 +1072,7 @@ internal static class MapForecastTooltipBuilder
         var choices = RewardForecastSummary.Group(treasure, treasure.ReferenceCondition,
             treasure.ReferenceChoicePaths, treasure.ChoiceBranches, ForecastContentKey.Treasure);
         var conditions = new ForecastConditionDisplay(choices.SelectMany(group => group.Terms), chinese);
-        conditions.AppendPrerequisites(lines, chinese, prefix);
-        AppendOutcomeCondition(lines, conditions.Format(choices[0].Terms), chinese, prefix);
+        AppendRewardPredicates(lines, choices, conditions, chinese, prefix);
         if (treasure.IsEmpty)
         {
             lines.Add(chinese
@@ -1015,6 +1096,26 @@ internal static class MapForecastTooltipBuilder
             : $"{prefix}  Gold: [blue]{treasure.Gold}[/blue]");
         AppendRewardChanges(lines, choices, conditions, chinese, prefix,
             (before, after) => ForecastChoiceDiffFormatter.Treasure(before, after, chinese));
+    }
+
+    /// <summary>
+    /// Emits the prerequisites and the deciding condition for one reward outcome.
+    /// A single outcome means every enumerated path reaches the same reward, so the
+    /// paths, the shop budget and the unevaluated purchases along them cannot change
+    /// the answer: printing them only buries the reward line.
+    /// </summary>
+    private static void AppendRewardPredicates<T>(List<string> lines, IReadOnlyList<RewardOutcomeGroup<T>> groups,
+        ForecastConditionDisplay conditions, bool chinese, string prefix)
+    {
+        var single = groups.Count == 1;
+        var summarized = single
+            ? ForecastConditionCompression.Summarize(groups[0].Terms, groups[0].CaseCount, chinese)
+            : null;
+        conditions.AppendPrerequisites(lines, chinese, prefix, includeChoices: !single, includeShop: !single);
+        if (summarized is not null)
+            lines.Add(prefix + (chinese ? "条件" : "Conditions") + summarized + (chinese ? "：" : ":"));
+        else if (!single)
+            AppendOutcomeCondition(lines, conditions.Format(groups[0].Terms), chinese, prefix);
     }
 
     private static void AppendOutcomeCondition(List<string> lines, string condition, bool chinese, string prefix)
@@ -1064,6 +1165,32 @@ internal static class MapForecastTooltipBuilder
 
     private static string FormatItems(IEnumerable<ForecastItemDetails> items) =>
         string.Join(" / ", items.Select(ForecastItemFormatter.Format));
+
+    // A single-species encounter whose title already is that species does not
+    // need a second line repeating the name: fold the count into the title.
+    private static string? MergeSingleMonster(EncounterDetails encounter)
+    {
+        var distinct = encounter.Monsters.Distinct(StringComparer.Ordinal).ToArray();
+        if (distinct.Length != 1 || !string.Equals(distinct[0], encounter.Title, StringComparison.Ordinal))
+            return null;
+        return encounter.Monsters.Count > 1 ? $" ×{encounter.Monsters.Count}" : string.Empty;
+    }
+
+    private static string FormatMonsters(IEnumerable<string> monsters, bool chinese)
+    {
+        // Four identical enemies are one lineup, not four pieces of information.
+        var runs = new List<(string Name, int Count)>();
+        foreach (var name in monsters)
+        {
+            if (runs.Count > 0 && runs[^1].Name == name)
+                runs[^1] = (name, runs[^1].Count + 1);
+            else
+                runs.Add((name, 1));
+        }
+        return string.Join(" + ", runs.Select(run => run.Count == 1
+            ? run.Name
+            : run.Name + (chinese ? $" ×{run.Count}" : $" x{run.Count}")));
+    }
 
     private static string Badge(ForecastAccuracy accuracy, bool chinese) => accuracy switch
     {

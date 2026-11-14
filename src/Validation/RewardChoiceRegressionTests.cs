@@ -227,10 +227,18 @@ internal static class RewardChoiceRegressionTests
         combat.AddChildPoint(shop);
         var result = new MerchantChoiceBranchService(512, 32, 30000).Predict(state.Player,
             Route([combat, shop], [RoomType.Monster, RoomType.Shop]), planning.GenerateMerchant(planning.Restore(input)));
-        Require(result.ChoiceBranches.Count > 0, "combat choices produced no merchant state");
-        Require(result.ChoiceBranches.Any(branch => branch.Condition.Contains("重掷", StringComparison.OrdinalIgnoreCase)
-                || branch.Condition.Contains("Reroll", StringComparison.OrdinalIgnoreCase)),
-            "reroll state never reached downstream merchant branches");
+        // v0.113.0 moved shop card rarity/upgrade/price rolls from Rewards to
+        // Shops. Combat reward choices (including Driftwood rerolls) no longer
+        // change downstream merchant stock, but every branch must still be
+        // enumerated and the merged reference must match the native reroll path.
+        Require(result.ReferenceCondition is { } reference
+                && (reference.Contains("重掷", StringComparison.Ordinal)
+                    || reference.Contains("Reroll", StringComparison.OrdinalIgnoreCase))
+                && result.ReferenceCaseCount > 1 && !result.ChoicesTruncated
+                && result.UnresolvedChoices.Count == 0,
+            "combat choices produced no merchant state");
+        Require(result.ChoiceBranches.Count == 0,
+            "combat choices unexpectedly diverged downstream merchant stock in v0.113.0");
         var expected = planning.Restore(input);
         expected.Run.ActFloor = 2;
         var encounter = MerchantChoiceBranchService.ResolveEncounter(expected, RoomType.Monster);
@@ -244,8 +252,8 @@ internal static class RewardChoiceRegressionTests
         expected.Run.AddVisitedMapCoord(combat.coord);
         expected.Run.ActFloor = 3;
         var expectedShop = planning.GenerateMerchant(expected);
-        Require(result.ChoiceBranches.Any(branch => ForecastContentKey.Merchant(branch.Inventory)
-                == ForecastContentKey.Merchant(expectedShop)), "reroll downstream stock/prices mismatch");
+        Require(ForecastContentKey.MerchantStock(result) == ForecastContentKey.MerchantStock(expectedShop),
+            "merged downstream stock/prices mismatch native reroll path");
     }
 
     private static RouteWorldline Route(IReadOnlyList<MapPoint> points, IReadOnlyList<RoomType> types) => new(

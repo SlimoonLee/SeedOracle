@@ -60,6 +60,8 @@ internal static class DebugForecastSmokeTest
         ShadowDeathIsolationRegressionTests.Run(run);
         RoutePerformanceRegressionTests.Run(run);
         PredictionAccuracyRegressionTests.Run(run);
+        TreasureModeRegressionTests.Run(run);
+        BlitzShopPlanRegressionTests.Run(run);
         RewardChoiceRegressionTests.Run(run);
         CausalChoiceRegressionTests.Run(run);
         ValidateRoutePlan(run);

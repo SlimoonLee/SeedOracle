@@ -102,4 +102,12 @@ internal sealed record CombatSolverForecastResult(
     int? CombatEndedTurn,
     double? SearchElapsedMilliseconds,
     double? TotalElapsedMilliseconds,
-    string? Error);
+    string? Error)
+{
+    /// <summary>The wall-clock ceiling actually handed to Combat Solver for this request.</summary>
+    public int? TimeoutMilliseconds { get; init; }
+
+    public bool TimedOut => Status.Equals("TimedOut", StringComparison.OrdinalIgnoreCase);
+
+    public bool Cancelled => Status.Equals("Cancelled", StringComparison.OrdinalIgnoreCase);
+}

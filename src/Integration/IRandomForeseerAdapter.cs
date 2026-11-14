@@ -1,4 +1,5 @@
 using MegaCrit.Sts2.Core.Entities.Players;
+using MegaCrit.Sts2.Core.Map;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Rooms;
 using SeedOracle.Api;
@@ -25,7 +26,8 @@ internal interface IRandomForeseerAdapter
 
     Forecast<TreasureRoomDetails> PredictTreasureRoom(
         Player player,
-        IReadOnlyList<RoomType> resolvedRooms);
+        IReadOnlyList<RoomType> resolvedRooms,
+        IReadOnlyList<MapPoint>? resolvedPoints = null);
 
     Forecast<EventContentDetails>? PredictEventContents(
         Player player,

@@ -238,28 +238,40 @@ internal sealed class RoutePlanForecastService(PlanningPredictionService plannin
                         "按计划推进到该次进店的库存；实际购买、补货与删牌后应重算。");
                     if (entry.Choice is RoutePlanChoice.Merchant merchantChoice)
                     {
-                        var rejectedPurchases = 0;
-                        foreach (var (pick, planIndex) in merchantChoice.Picks.Select((pick, index) => (pick, index)))
-                        {
-                            var item = IndexOf(shop.Describe(), pick);
-                            try
-                            {
-                                if (shop.TryPurchase(pick)) outcome.MerchantPurchases.Add((planIndex, item));
-                                else rejectedPurchases++;
-                            }
-                            finally { gold = state.Player.Gold; }
-                        }
-                        if (merchantChoice.RemoveCard)
-                        {
-                            var removed = state.Player.Deck.Cards.FirstOrDefault(card => card.IsRemovable);
-                            if (removed is null || !shop.TryRemove(removed)) rejectedPurchases++;
-                            gold = state.Player.Gold;
-                        }
-
-                        if (rejectedPurchases > 0)
+                        // Blitz goods resolve through their own picker (which card
+                        // to upgrade, which reward to take). Replaying a planned
+                        // purchase would have to invent that pick, so the plan
+                        // stops at the shelf instead of reporting fake shortages.
+                        if (shop.Inventory.BlitzEntries.Count > 0)
                         {
                             outcome.Note = (outcome.Note is null ? "" : outcome.Note + "；")
-                                           + $"商店计划有 {rejectedPurchases} 项因金币、库存或药水槽条件不足未执行";
+                                           + "极速商店需进店后逐项选择，规划不代选";
+                        }
+                        else
+                        {
+                            var rejectedPurchases = 0;
+                            foreach (var (pick, planIndex) in merchantChoice.Picks.Select((pick, index) => (pick, index)))
+                            {
+                                var item = IndexOf(shop.Describe(), pick);
+                                try
+                                {
+                                    if (shop.TryPurchase(pick)) outcome.MerchantPurchases.Add((planIndex, item));
+                                    else rejectedPurchases++;
+                                }
+                                finally { gold = state.Player.Gold; }
+                            }
+                            if (merchantChoice.RemoveCard)
+                            {
+                                var removed = state.Player.Deck.Cards.FirstOrDefault(card => card.IsRemovable);
+                                if (removed is null || !shop.TryRemove(removed)) rejectedPurchases++;
+                                gold = state.Player.Gold;
+                            }
+
+                            if (rejectedPurchases > 0)
+                            {
+                                outcome.Note = (outcome.Note is null ? "" : outcome.Note + "；")
+                                               + $"商店计划有 {rejectedPurchases} 项因金币、库存或药水槽条件不足未执行";
+                            }
                         }
                     }
                     outcome.MerchantAfterPurchases = shop.Describe();
@@ -273,7 +285,7 @@ internal sealed class RoutePlanForecastService(PlanningPredictionService plannin
                 case RoomType.Treasure:
                 {
                     var goldBefore = gold;
-                    var treasure = planning.GenerateTreasure(state, isPriorRoom: false);
+                    var treasure = planning.GenerateTreasure(state, isPriorRoom: false, point);
                     outcome.Treasure = Forecast<TreasureRoomDetails>.Branch(
                         treasure,
                         PredictionDependency.Rewards | PredictionDependency.RelicGrabBag,

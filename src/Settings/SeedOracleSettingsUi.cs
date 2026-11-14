@@ -30,6 +30,19 @@ internal static class SeedOracleSettingsUi
                 }),
             () => SeedOracleSettings.Default.ShowMapForecastsOutsidePlan);
 
+    private static readonly IModSettingsValueBinding<bool> ShowBlitzShopPanel =
+        ModSettingsBindings.WithDefault(
+            ModSettingsBindings.Global<SeedOracleSettings, bool>(
+                Entry.ModId,
+                SeedOracleData.SettingsKey,
+                static settings => settings.ShowBlitzShopPanel,
+                static (settings, value) =>
+                {
+                    settings.ShowBlitzShopPanel = value;
+                    SeedOracleDispatcher.Post(BlitzShopPlanPanel.ApplySettingSafely);
+                }),
+            () => SeedOracleSettings.Default.ShowBlitzShopPanel);
+
     public static void Register()
     {
         RitsuLibFramework.RegisterModSettings(Entry.ModId, page => page
@@ -50,6 +63,13 @@ internal static class SeedOracleSettingsUi
                     Text(
                         "关闭后，普通模式隐藏种子先知的路线、标记和地图预测浮窗。打开计划面板后仍显示规划信息。",
                         "Hide Seed Oracle's routes, markers, and map forecast tooltips outside planning. Opening the plan panel still shows planning information."))
+                .AddToggle(
+                    "show_blitz_shop_panel",
+                    Text("极速商店：全景与规划窗口", "Blitz shop: panorama and planner window"),
+                    ShowBlitzShopPanel,
+                    Text(
+                        "在极速商店里提供“全景/规划”窗口，列出每件货物在各种先买组合下的内容。关闭后只保留货物浮窗里的预测。",
+                        "Adds a panorama/planner window to Blitz shops that lists what each good gives after every set of earlier purchases. Turning it off keeps only the per-good tooltip forecast."))
                 .AddToggle(
                     "use_card_art_thumbnails",
                     Text("使用卡图缩略图", "Use card-art thumbnails"),

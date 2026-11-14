@@ -197,7 +197,10 @@ internal sealed class MapForecastService(IRandomForeseerAdapter randomForeseer)
                         ? Forecast<TreasureRoomDetails>.Unsupported(
                             "No local player is available for treasure-room prediction.",
                             PredictionDependency.PlayerState)
-                        : randomForeseer.PredictTreasureRoom(player, worldline.ResolvedRooms);
+                        : randomForeseer.PredictTreasureRoom(
+                            player,
+                            worldline.ResolvedRooms,
+                            RoutePoints(worldline));
                     if (player is not null && prediction.HasValue
                         && (worldline.Path.Length > 1 || currentEvent is not null)
                         && (merchantChoices?.HasBudget ?? true))
@@ -314,6 +317,12 @@ internal sealed class MapForecastService(IRandomForeseerAdapter randomForeseer)
         + "|" + string.Join(">", worldline.Path.Steps.Select(step => $"{step.Point.coord.row},{step.Point.coord.col}"));
 
     private static string MerchantRouteKey(RouteWorldline worldline) => RewardRouteKey(worldline);
+
+    // Treasure contents need the concrete points, not just room types: the
+    // SpoilsMap quest chest is a Treasure point on this act's map, while a
+    // chest rolled by an Unknown point has no quest mark.
+    private static IReadOnlyList<MapPoint> RoutePoints(RouteWorldline worldline) =>
+        worldline.Path.Steps.Select(step => step.Point).ToArray();
 
     internal static Forecast<T>? ApplyConditions<T>(Forecast<T>? forecast, bool conditional) =>
         conditional && forecast is { HasValue: true }

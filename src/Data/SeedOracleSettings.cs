@@ -7,4 +7,6 @@ internal sealed class SeedOracleSettings
     public bool UseCardArtThumbnails { get; set; }
 
     public bool ShowMapForecastsOutsidePlan { get; set; } = true;
+
+    public bool ShowBlitzShopPanel { get; set; } = true;
 }

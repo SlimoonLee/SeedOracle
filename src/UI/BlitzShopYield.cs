@@ -1,0 +1,303 @@
+using System.Runtime.CompilerServices;
+using Godot;
+using HarmonyLib;
+using MegaCrit.Sts2.Core.Entities.Merchant;
+using MegaCrit.Sts2.Core.Entities.Players;
+using MegaCrit.Sts2.Core.HoverTips;
+using MegaCrit.Sts2.Core.Localization;
+using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Nodes.Screens.Shops;
+using MegaCrit.Sts2.Core.Runs;
+using SeedOracle.Forecasting;
+using SeedOracle.Integration;
+
+namespace SeedOracle.UI;
+
+/// <summary>
+/// Answers "what does this good actually hand over" for the icons inside a Blitz
+/// shop. The shelf lives on the live run there, so the probe starts from the
+/// current stream position: what it reports is exactly what buying next gives,
+/// including after some goods were already taken.
+/// </summary>
+internal static class BlitzShopYield
+{
+    private static readonly ConditionalWeakTable<MerchantInventory, Cache> Caches = new();
+
+    // Which inventory a good was put on screen from. Recording it while the slot
+    // binds means the hover talks about the shelf the player is looking at, even
+    // if the run's inventory lookup changes shape between versions.
+    private static readonly ConditionalWeakTable<BlitzMerchantEntry, Binding> Bindings = new();
+
+    private static readonly HashSet<string> Reported = new(StringComparer.Ordinal);
+
+    private sealed class Cache
+    {
+        internal int Choices = -1;
+        internal readonly Dictionary<int, string> Texts = new();
+    }
+
+    private sealed class Binding
+    {
+        internal MerchantInventory? Inventory;
+    }
+
+    internal static bool Chinese => LocManager.Instance?.Language is "zhs" or "zht";
+
+    /// <summary>
+    /// Remembers the inventory a slot was filled from. Called for every good the
+    /// shop puts on screen, before any hover can happen.
+    /// </summary>
+    internal static void Bind(BlitzMerchantEntry entry, Node slot)
+    {
+        try
+        {
+            var inventory = OwnerInventory(slot);
+            if (inventory is null) return;
+            Bindings.GetValue(entry, static _ => new Binding()).Inventory = inventory;
+        }
+        catch (Exception)
+        {
+            // Binding is a shortcut, never a requirement.
+        }
+    }
+
+    private static MerchantInventory? OwnerInventory(Node? node)
+    {
+        for (var depth = 0; node is not null && depth < 8; depth++)
+        {
+            if (node is NMerchantInventory panel && panel.Inventory is { } inventory) return inventory;
+            node = node.GetParent();
+        }
+        return null;
+    }
+
+    internal static bool TryDescribe(BlitzMerchantEntry entry, out string text)
+    {
+        text = string.Empty;
+        MerchantInventory? inventory = null;
+        var reason = "no reason recorded";
+        try
+        {
+            var player = entry.Player;
+            if (player is null)
+            {
+                reason = "the entry lost its player";
+            }
+            else if (ShadowIsolation.IsShadowPlayer(player))
+            {
+                // Expected on every probe copy: the prediction must never talk
+                // about itself and turn one box into two.
+                return false;
+            }
+            else if (player.RunState is not RunState run)
+            {
+                reason = "the player is not in a run";
+            }
+            else if (run.GameMode != GameMode.Blitz)
+            {
+                reason = "the run is " + run.GameMode;
+            }
+            else if ((inventory = Resolve(player, entry)) is null)
+            {
+                reason = "no inventory owns this good";
+            }
+            else if (!inventory.IsBlitzShop)
+            {
+                reason = "the inventory is not a blitz shelf";
+            }
+            else
+            {
+                var index = IndexOf(inventory, entry);
+                if (index < 0)
+                {
+                    reason = "the good is not on the shelf";
+                }
+                else
+                {
+                    text = Describe(inventory, index);
+                    if (text.Length > 0) return true;
+                    reason = "the shelf described nothing";
+                }
+            }
+        }
+        catch (Exception error)
+        {
+            // GetInventoryFor indexes a list, so an unexpected empty inventory
+            // arrives here. The type is enough to recognise it.
+            reason = "the lookup threw " + error.GetBaseException().GetType().Name;
+        }
+
+        ReportOnce(entry, reason);
+        return false;
+    }
+
+    private static MerchantInventory? Resolve(Player player, BlitzMerchantEntry entry)
+    {
+        if (Bindings.TryGetValue(entry, out var binding)
+            && binding.Inventory is { } bound
+            && ReferenceEquals(bound.Player, player))
+        {
+            return bound;
+        }
+        // The shop panel itself reads its inventory from here, so it is the same
+        // object the slots were filled from.
+        return RunManager.Instance?.MerchantSynchronizer?.GetInventoryFor(player);
+    }
+
+    private static int IndexOf(MerchantInventory inventory, BlitzMerchantEntry entry)
+    {
+        for (var slot = 0; slot < inventory.BlitzEntries.Count; slot++)
+            if (ReferenceEquals(inventory.BlitzEntries[slot], entry)) return slot;
+        return -1;
+    }
+
+    /// <summary>
+    /// One line per good type explains why the hover stayed silent, so a "still
+    /// nothing" report can be read out of the log instead of guessed at.
+    /// </summary>
+    private static void ReportOnce(BlitzMerchantEntry entry, string reason)
+    {
+        var key = entry.MerchantEntryType + ":" + reason;
+        lock (Reported)
+        {
+            if (!Reported.Add(key)) return;
+        }
+        Entry.Logger.Info($"[BlitzHover] no prediction for {entry.MerchantEntryType}: {reason}");
+    }
+
+    internal static string Describe(MerchantInventory inventory, int index)
+    {
+        var cache = Caches.GetValue(inventory, _ => new Cache());
+        // Any purchase spends a pick and moves the streams the remaining goods
+        // read, so the whole shelf is re-probed after one.
+        if (cache.Choices != inventory.BlitzChoicesRemaining)
+        {
+            cache.Texts.Clear();
+            cache.Choices = inventory.BlitzChoicesRemaining;
+        }
+        if (cache.Texts.TryGetValue(index, out var cached)) return cached;
+
+        var service = new PlanningPredictionService();
+        var snapshot = service.Capture(service.CreateState(
+            (RunState)inventory.Player.RunState, inventory.Player));
+        var entry = inventory.BlitzEntries[index];
+
+        var here = BlitzMerchantProbe.PredictInPlace(service.Restore(snapshot), entry);
+        var text = BlitzYieldText.Render(here, Chinese);
+        var after = Afterwards(service, snapshot, inventory, index, text);
+        if (after.Count > 0) text = text + "\n" + string.Join("\n", after);
+
+        cache.Texts[index] = text;
+        return text;
+    }
+
+    /// <summary>
+    /// Every purchase advances <c>Shops</c>, so what a good gives changes the
+    /// moment something else is taken first. Rather than guess which order the
+    /// player will use, this answers the first step of all of them: buy that
+    /// good, then this one, and report the ones that landed elsewhere.
+    /// </summary>
+    private static IReadOnlyList<string> Afterwards(
+        PlanningPredictionService service,
+        PlanningPredictionService.StateSnapshot snapshot,
+        MerchantInventory inventory,
+        int index,
+        string here)
+    {
+        var entry = inventory.BlitzEntries[index];
+        var groups = new List<Alternative>();
+        for (var slot = 0; slot < inventory.BlitzEntries.Count; slot++)
+        {
+            if (slot == index) continue;
+            var first = inventory.BlitzEntries[slot];
+            if (!first.IsStocked) continue;
+
+            var then = BlitzMerchantProbe.PredictAfter(service.Restore(snapshot), first, entry);
+            // A good that needs a deck pick of its own cannot be priced as a
+            // predecessor without inventing that pick.
+            if (!then.Resolved) continue;
+
+            var text = BlitzYieldText.Render(then, Chinese);
+            var group = groups.FirstOrDefault(candidate => candidate.Text == text);
+            if (group is null) groups.Add(new Alternative(text, first.Title.GetFormattedText()));
+            else group.Names.Add(first.Title.GetFormattedText());
+        }
+
+        var changed = groups.Where(group => group.Text != here).ToList();
+        if (changed.Count == 0)
+        {
+            return groups.Count == 0
+                ? []
+                : [Chinese
+                    ? "→ 先买哪一件都不会改变这一项"
+                    : "-> the order does not change this one"];
+        }
+
+        return changed.Select(group =>
+            "→ " + (Chinese ? "先买 " : "after ")
+            + string.Join(Chinese ? "、" : ", ", group.Names.Distinct().Take(2))
+            + (group.Names.Distinct().Count() > 2 ? (Chinese ? " 等" : "") : "")
+            + (Chinese ? " 后：" : ": ")
+            + Compact(group.Text)).ToArray();
+    }
+
+    private sealed class Alternative(string text, string name)
+    {
+        internal string Text { get; } = text;
+        internal List<string> Names { get; } = [name];
+    }
+
+    /// <summary>
+    /// Folds a multi-line prediction into one line so order and plan lists stay
+    /// short. Shared with the shop panorama window.
+    /// </summary>
+    internal static string Compact(string text) =>
+        string.Join(Chinese ? "；" : "; ",
+            text.Split('\n').Select(line => line.TrimStart('→', ' ').TrimEnd()));
+
+    /// <summary>
+    /// Merges the prediction into the game's own tip instead of adding a second
+    /// box: the player sees one tooltip with the same title, the native text and
+    /// the numbers underneath.
+    /// </summary>
+    internal static IReadOnlyList<IHoverTip> Compose(
+        IEnumerable<IHoverTip> tips, LocString title, string text)
+    {
+        var list = tips.ToList();
+        if (list.Count == 0 || list[0] is not HoverTip first) return list;
+        list[0] = new HoverTip(title, first.Description + "\n" + text, first.Icon);
+        return list;
+    }
+}
+
+// The slot builds its tooltip from BlitzMerchantEntry.HoverTips, so the
+// prediction joins the same box as the game's own title and description.
+[HarmonyPatch(typeof(BlitzMerchantEntry), nameof(BlitzMerchantEntry.HoverTips), MethodType.Getter)]
+internal static class BlitzMerchantHoverTipPatch
+{
+    [HarmonyPostfix]
+    private static void Postfix(BlitzMerchantEntry __instance, ref IEnumerable<IHoverTip> __result)
+    {
+        try
+        {
+            if (!BlitzShopYield.TryDescribe(__instance, out var text)) return;
+            __result = BlitzShopYield.Compose(__result, __instance.Title, text);
+        }
+        catch (Exception)
+        {
+            // A prediction must never cost the player the game's own tooltip.
+        }
+    }
+}
+
+// FillSlot is where a good lands on the shelf, and the slot already sits inside
+// the shop panel, so this is the one moment the mapping is certain.
+[HarmonyPatch(typeof(NBlitzMerchantSlot), nameof(NBlitzMerchantSlot.FillSlot))]
+internal static class BlitzSlotBindingPatch
+{
+    [HarmonyPostfix]
+    private static void Postfix(NBlitzMerchantSlot __instance, BlitzMerchantEntry entry)
+    {
+        BlitzShopYield.Bind(entry, __instance);
+    }
+}

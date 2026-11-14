@@ -358,7 +358,7 @@ internal static class DecisionLab
                             var selector = new TestCardSelector();
                             selector.PrepareToSelect([target.card]);
                             using var selection = ShadowIsolation.UseSelector(selector, takeRewards: false);
-                            var smith = new SmithRestSiteOption(state.Player) { SmithCount = 1 };
+                            var smith = new SmithRestSiteOption(state.Player);
                             if (await smith.OnSelect())
                                 action = $"火堆 SMITH {target.card.Title}+（槽 {target.slot}）";
                             else

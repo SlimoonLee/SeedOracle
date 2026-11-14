@@ -12,6 +12,14 @@ internal sealed record ForecastChoiceFact(string Key, string Heading, string Val
     // real menu (including reroll) so ordinary freedom cannot hide extra actions.
     public IReadOnlyList<string> EquivalentValues { get; init; } = [];
     public ForecastShopChoiceScope? Shop { get; init; }
+
+    // Position-independent identity of the choice itself. Two routes that visit
+    // the same event on different floors differ in Key (floor and pages are part
+    // of the scope) but not in cause: the option picked is what moved the RNG.
+    // Column() folds on CauseKey so those terms can merge across routes, and
+    // CauseLabel is what the tooltip shows instead of "4层脑蛭".
+    public string? CauseKey { get; init; }
+    public string? CauseLabel { get; init; }
 }
 
 internal sealed record ForecastChoicePath(string Condition, IReadOnlyList<ForecastChoiceFact> Facts);

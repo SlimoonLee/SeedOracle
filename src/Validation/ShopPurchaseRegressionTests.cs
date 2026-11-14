@@ -44,10 +44,13 @@ internal static class ShopPurchaseRegressionTests
         };
         var tooltip = Tooltip(fixtureReward);
         var text = string.Join("\n", tooltip.Descriptions);
-        Require(text.Contains("14层购牌：任意选择（137金内）") && text.Contains("飞溅") && text.Contains("166金")
-            && text.Contains("买不起") && !text.Contains("不购买/购买") && !text.Contains("前提：14层"),
-            "full screenshot-equivalent tooltip must replace purchase enumeration and explain omitted Splash");
-        Require(text.Length < 360, "shop explanation remains too verbose");
+        // The purchase provably leaves the reward unchanged, so the reward panel
+        // must not narrate the shop at all -- no purchase menu, no budget, no
+        // unaffordable list. Those belong to the shop panel, which keeps them.
+        Require(!text.Contains("14层购牌") && !text.Contains("飞溅") && !text.Contains("买不起")
+            && !text.Contains("不购买/购买") && !text.Contains("前提：14层") && text.Contains("突破"),
+            "a purchase that leaves the reward unchanged must not appear in the reward tooltip");
+        Require(text.Length < 220, "reward tooltip keeps narrating the shop");
         var missing = ShopPurchaseChoices.CompleteCoverage(new[] { new RewardChoiceBranch<CombatRewardDetails>("", fixtureReward)
             { ChoicePaths = fixtureReward.ReferenceChoicePaths } });
         Require(missing[0].ChoicePaths[0].Facts[0].Shop!.UncalculatedValues.Count == 0,
@@ -128,8 +131,14 @@ internal static class ShopPurchaseRegressionTests
             "the changing purchase was not paired with concrete extra cards");
         var limited = new MerchantChoiceBranchService(3, 48, 30000).PredictRewards(start.Player, route, baseline.Detach());
         var limitedText = string.Join("\n", Tooltip(limited).Descriptions);
-        Require(limitedText.Contains("未计算购买") && limitedText.Contains(ModelDb.Relic<PrayerWheel>().Title.GetFormattedText()),
-            "an affordable purchase lost to the budget must be named as unevaluated");
+        // The budget caveat belongs to the shop panel and to the forecast data.
+        // The reward panel stopped narrating the shop, so it must not print it.
+        var pending = limited.ReferenceChoicePaths.SelectMany(path => path.Facts)
+            .Where(fact => fact.Shop is not null)
+            .SelectMany(fact => fact.Shop!.Offers.Where(offer => fact.Shop!.UncalculatedValues.Contains(offer.Value)))
+            .Select(offer => offer.Item.Id.Entry).ToHashSet(StringComparer.Ordinal);
+        Require(pending.Contains("PRAYER_WHEEL") && !limitedText.Contains("未计算购买"),
+            "an affordable purchase lost to the budget must stay flagged without leaking into the reward panel");
         Require(limited.ReferenceChoicePaths.SelectMany(path => path.Facts).SelectMany(fact => fact.Shop?.Offers ?? [])
             .Where(offer => offer.Item.Id.Entry == "PRAYER_WHEEL").All(offer => offer.Availability == ShopOfferAvailability.Available),
             "budget exhaustion was incorrectly reported as insufficient gold");

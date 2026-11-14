@@ -89,8 +89,9 @@ internal sealed class MerchantChoiceBranchService(
 
     internal TreasureRoomDetails PredictTreasure(Player player, RouteWorldline route, TreasureRoomDetails baseline)
     {
+        var target = route.Path.Steps.Count > 0 ? route.Path.Steps[^1].Point : null;
         var outcomes = PredictTargets(player, route,
-            (state, type) => type == RoomType.Treasure ? planning.GenerateTreasure(state, false) : null,
+            (state, type) => type == RoomType.Treasure ? planning.GenerateTreasure(state, false, target) : null,
             ForecastContentKey.Treasure);
         return outcomes.Count == 0 ? baseline : outcomes[0].Outcome with
         {
@@ -165,7 +166,7 @@ internal sealed class MerchantChoiceBranchService(
                     branches = type switch
                     {
                         RoomType.Event when model is not null => ExpandEvent(planning.Capture(state), model, floor),
-                        RoomType.Treasure => ExpandTreasure(state, floor),
+                        RoomType.Treasure => ExpandTreasure(state, floor, point),
                         RoomType.Shop => ExpandShop(state, floor, IsImmediatelyBeforeFixedCombat(route, current.Step)),
                         RoomType.RestSite => ExpandRest(state, floor),
                         _ => [new Branch(planning.Capture(state), floor + type)]
@@ -264,7 +265,7 @@ internal sealed class MerchantChoiceBranchService(
                     }
                     else if (type == RoomType.Treasure)
                     {
-                        var chest = planning.GenerateTreasure(state, false);
+                        var chest = planning.GenerateTreasure(state, false, point);
                         PlayerCmd.GainGold(chest.Gold, state.Player).GetAwaiter().GetResult();
                         condition = Join(condition, floor + Text("跳过宝箱遗物", "skip chest relic"));
                         facts.Add(TreasureFact(state, chest, floor, "skip", Text("跳过遗物", "skip relic")));
@@ -374,7 +375,15 @@ internal sealed class MerchantChoiceBranchService(
         var heading = (number > 0 ? Text($"{number}层", $"{number}F ") : "") + model.Title.GetFormattedText();
         yield return new(scope + ":option", heading, OptionKey(option), option.Title,
             options.Where(item => !item.IsLocked).Select(OptionKey).Distinct().ToArray(),
-            Kind: ForecastChoiceKind.EventOption, Floor: number);
+            Kind: ForecastChoiceKind.EventOption, Floor: number)
+        {
+            // The option is the cause; the floor and the pages before it only say
+            // which route reached the event. Keying the column on the event lets
+            // two orders of the same route merge into one "BrainLeech: option"
+            // condition instead of two colour-labelled blocks.
+            CauseKey = $"event:{model.Id}:option",
+            CauseLabel = model.Title.GetFormattedText()
+        };
         foreach (var selection in option.CardSelections)
         {
             var selected = picks.Where(pick => pick.SelectionStep == selection.SelectionStep)
@@ -485,9 +494,9 @@ internal sealed class MerchantChoiceBranchService(
         return completed;
     }
 
-    private IReadOnlyList<Branch> ExpandTreasure(PlanningPredictionService.State state, string floor)
+    private IReadOnlyList<Branch> ExpandTreasure(PlanningPredictionService.State state, string floor, MapPoint point)
     {
-        var treasure = planning.GenerateTreasure(state, isPriorRoom: false);
+        var treasure = planning.GenerateTreasure(state, isPriorRoom: false, point);
         PlayerCmd.GainGold(treasure.Gold, state.Player).GetAwaiter().GetResult();
         var before = planning.Capture(state);
         var results = new List<Branch> { new(before, floor + Text("跳过宝箱遗物", "skip chest relic"))

@@ -83,7 +83,7 @@ foreach ($mod in $mods.GetEnumerator()) {
 $staleCombatSolverSeedOracle = Join-Path $game 'mods\CombatSolver'
 foreach ($name in @('SeedOracle.dll', 'SeedOracle.pdb', 'SeedOracle.json')) {
     $stale = Join-Path $staleCombatSolverSeedOracle $name
-    if (Test-Path -LiteralPath $stale) { Remove-Item -LiteralPath $stale -Force }
+    if (Test-Path -LiteralPath $stale) { [System.IO.File]::Delete($stale) }
 }
 $profile = Join-Path $roaming 'SlayTheSpire2\default\1'
 New-Item -ItemType Directory -Path $profile -Force | Out-Null
@@ -96,7 +96,7 @@ foreach ($save in Get-ChildItem -LiteralPath $profile -Recurse -File -Filter 'cu
     if (-not $resolved.StartsWith($profile + '\', [StringComparison]::OrdinalIgnoreCase)) {
         throw "Save is outside the isolated profile: $resolved"
     }
-    Remove-Item -LiteralPath $resolved -Force
+    [System.IO.File]::Delete($resolved)
 }
 $settingsPath = Join-Path $profile 'settings.save'
 $settings = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json -AsHashtable
@@ -112,12 +112,12 @@ foreach ($dependency in @('STS2-RitsuLib', 'RandomForeseer', 'CombatSolver')) {
     $compatRoot = Join-Path $directory 'compat'
     $compatVersioned = Get-ChildItem -LiteralPath $compatRoot -Directory -ErrorAction SilentlyContinue |
         Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName "$dependency.dll") } |
-        Sort-Object Name -Descending | Select-Object -First 1
+        Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
     if ($compatVersioned) { $buildArgs += "-p:RitsuLibReferenceTarget=$($compatVersioned.Name)" }
     if ($dependency -ne 'STS2-RitsuLib' -or -not (Test-Path -LiteralPath (Join-Path $directory 'RitsuLib.References.props'))) {
         $versioned = Get-ChildItem -LiteralPath (Join-Path $directory 'lib') -Directory -ErrorAction SilentlyContinue |
             Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName "$dependency.dll") } |
-            Sort-Object Name -Descending | Select-Object -First 1
+            Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
         if ($versioned) { $directory = $versioned.FullName }
     }
     $property = $dependency -eq 'STS2-RitsuLib' ? 'RitsuLibDir' : "${dependency}Dir"
@@ -127,7 +127,7 @@ foreach ($dependency in @('STS2-RitsuLib', 'RandomForeseer', 'CombatSolver')) {
 if ($LASTEXITCODE -ne 0) { throw 'Smoke build failed.' }
 $log = Join-Path $runtime 'godot.log'
 $report = Join-Path $game 'seed_oracle_smoke_report.txt'
-if (Test-Path -LiteralPath $report) { Remove-Item -LiteralPath $report -Force }
+if (Test-Path -LiteralPath $report) { [System.IO.File]::Delete($report) }
 $start = [Diagnostics.ProcessStartInfo]::new((Join-Path $game 'SlayTheSpire2.exe'))
 $start.WorkingDirectory = $game
 $start.UseShellExecute = $false
@@ -180,6 +180,9 @@ try {
                        -not (Select-String -LiteralPath $report -Pattern '^condition-tooltip-layout PASS: kind=combat') -or
                        -not (Select-String -LiteralPath $report -Pattern '^choice-branch-regression PASS:') -or
                        -not (Select-String -LiteralPath $report -Pattern '^causal-choice-regression PASS:') -or
+                       -not (Select-String -LiteralPath $report -Pattern '^treasure-spoils PASS:') -or
+                       -not (Select-String -LiteralPath $report -Pattern '^treasure-blitz PASS:') -or
+                       -not (Select-String -LiteralPath $report -Pattern '^blitz-merchant PASS:') -or
                        -not (Select-String -LiteralPath $log -Pattern '\[SelfTest\] PASS '))) {
         throw "Prediction accuracy/self-test checks did not pass. Inspect $report and $log"
     }

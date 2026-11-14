@@ -22,6 +22,29 @@ using PropertyInfo = System.Reflection.PropertyInfo;
 
 namespace SeedOracle.Integration;
 
+/// <summary>
+/// Random Foreseer 0.14.0 dropped the "RandomForeseerCode" namespace segment.
+/// Keep both roots so the reflection bridge also works with 0.13.x builds.
+/// </summary>
+internal static class RandomForeseerTypes
+{
+    private static readonly string[] Roots =
+    [
+        "RandomForeseer.",
+        "RandomForeseer.RandomForeseerCode."
+    ];
+
+    internal static System.Reflection.Assembly Assembly => typeof(global::RandomForeseer.Entry).Assembly;
+
+    internal static Type? Find(string relativeName)
+    {
+        foreach (var root in Roots)
+            if (Assembly.GetType(root + relativeName, throwOnError: false) is { } type)
+                return type;
+        return null;
+    }
+}
+
 internal sealed partial class RandomForeseerAdapter : IRandomForeseerAdapter
 {
     private const BindingFlags AnyStatic = BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
@@ -64,17 +87,12 @@ internal sealed partial class RandomForeseerAdapter : IRandomForeseerAdapter
 
     public RandomForeseerAdapter()
     {
-        var assembly = typeof(global::RandomForeseer.RandomForeseerCode.Entry).Assembly;
-        _contextType = assembly.GetType(
-            "RandomForeseer.RandomForeseerCode.OutOfCombat.RunPredictionContext");
-        var merchantPredictionType = assembly.GetType(
-            "RandomForeseer.RandomForeseerCode.OutOfCombat.MerchantRestockPrediction");
-        var hookMirrorsType = assembly.GetType(
-            "RandomForeseer.RandomForeseerCode.OutOfCombat.Mirrors.HookMirrors");
-        var cardRewardPredictionType = assembly.GetType(
-            "RandomForeseer.RandomForeseerCode.OutOfCombat.CardRewardPrediction");
-        var combatEndEffectPredictionType = assembly.GetType(
-            "RandomForeseer.RandomForeseerCode.OutOfCombat.CombatEndEffectPrediction");
+        var assembly = RandomForeseerTypes.Assembly;
+        _contextType = RandomForeseerTypes.Find("OutOfCombat.RunPredictionContext");
+        var merchantPredictionType = RandomForeseerTypes.Find("OutOfCombat.MerchantRestockPrediction");
+        var hookMirrorsType = RandomForeseerTypes.Find("OutOfCombat.Mirrors.HookMirrors");
+        var cardRewardPredictionType = RandomForeseerTypes.Find("OutOfCombat.CardRewardPrediction");
+        var combatEndEffectPredictionType = RandomForeseerTypes.Find("OutOfCombat.CombatEndEffectPrediction");
 
         _contextConstructor = _contextType?.GetConstructor(
             AnyInstance,
@@ -237,7 +255,7 @@ internal sealed partial class RandomForeseerAdapter : IRandomForeseerAdapter
 
         for (var index = 0; index < cardTypes.Length; index++)
         {
-            var entry = new MerchantCardEntry(player, inventory, pool, cardTypes[index]);
+            var entry = new MerchantCardEntry(player, pool, cardTypes[index]);
             entries.Add(entry);
             result.Add(PredictCard(context, inventory, entry, shops, index == saleIndex));
         }
@@ -260,7 +278,7 @@ internal sealed partial class RandomForeseerAdapter : IRandomForeseerAdapter
 
         foreach (var rarity in rarities)
         {
-            var entry = new MerchantCardEntry(player, inventory, pool, rarity);
+            var entry = new MerchantCardEntry(player, pool, rarity);
             entries.Add(entry);
             result.Add(PredictCard(context, inventory, entry, shops, isOnSale: false));
         }
@@ -427,7 +445,7 @@ internal sealed partial class RandomForeseerAdapter : IRandomForeseerAdapter
         {
         }
 
-        protected override Task<(bool, int)> OnTryPurchase(MerchantInventory? inventory, bool ignoreCost) =>
+        protected override Task<(bool, int)> OnTryPurchaseInternal(MerchantInventory? inventory, bool ignoreCost) =>
             Task.FromResult((false, 0));
 
         protected override void ClearAfterPurchase()

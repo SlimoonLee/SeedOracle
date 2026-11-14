@@ -21,6 +21,7 @@ internal static class ForecastContentKey
         Relics = inventory.Relics.Select(Entry),
         Potions = inventory.Potions.Select(Entry),
         inventory.CardRemovalCost, inventory.FutureVisitOrdinal,
+        Blitz = BlitzEntries(inventory),
         inventory.ReferenceCondition,
         Branches = inventory.ChoiceBranches.Select(branch => new
             { branch.Condition, Inventory = Merchant(branch.Inventory) }),
@@ -35,8 +36,30 @@ internal static class ForecastContentKey
         Colorless = inventory.ColorlessCards.Select(Entry),
         Relics = inventory.Relics.Select(Entry),
         Potions = inventory.Potions.Select(Entry),
-        inventory.CardRemovalCost
+        inventory.CardRemovalCost,
+        Blitz = BlitzEntries(inventory)
     });
+
+    private static IEnumerable<object> BlitzEntries(MerchantInventoryForecast inventory) =>
+        inventory.BlitzEntries.Select(entry => new
+        {
+            entry.Title, entry.Description, entry.IsRare, entry.IsCursed, entry.IsAvailable,
+            // Yields come out of the stream the goods did, so they rarely differ
+            // between equal shelves. Including them keeps a group honest when
+            // they somehow do.
+            Yield = new
+            {
+                Screens = entry.Yield.CardScreens.Select(screen => screen.Select(item => item.Name)),
+                Relics = entry.Yield.Relics.Select(item => item.Name),
+                Potions = entry.Yield.Potions.Select(item => item.Name),
+                Gained = entry.Yield.GainedCards.Select(item => item.Name),
+                Upgraded = entry.Yield.UpgradedCards.Select(item => item.Name),
+                entry.Yield.MaxHpDelta, entry.Yield.HealedHp, entry.Yield.ExtraChoices,
+                Transforms = entry.Yield.TransformChoices.Select(
+                    choice => new[] { choice.Source.Name, choice.Result.Name }),
+                entry.Yield.NeedsCardPick, entry.Yield.PickableCards, entry.Yield.Resolved
+            }
+        });
 
     internal static string MerchantConditions(MerchantInventoryForecast inventory) =>
         inventory.ReferenceChoicePaths.Count == 0 && inventory.ChoiceBranches.All(branch => branch.ChoicePaths.Count == 0)

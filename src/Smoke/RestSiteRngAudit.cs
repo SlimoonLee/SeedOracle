@@ -134,7 +134,8 @@ internal static class RestSiteRngAudit
             baseline.Player.Creature.SetCurrentHpInternal(Math.Max(1, baseline.Player.Creature.MaxHp / 2));
             var snapshot = planning.Capture(baseline);
             var beforeRng = CaptureRng(baseline.Run);
-            var smithCount = room.Options.OfType<SmithRestSiteOption>().Single().SmithCount;
+            // v0.113.0 removed SmithCount: the native option always upgrades one card.
+            var smithCount = 1;
             var candidates = baseline.Player.Deck.Cards.Select((card, slot) => (card, slot))
                 .Where(pair => pair.card.IsUpgradable).ToArray();
             if (candidates.Length < smithCount)
@@ -151,7 +152,7 @@ internal static class RestSiteRngAudit
                     using var selected = ShadowIsolation.UseSelector(selector, takeRewards: false);
                     RestSiteOption option = choice == "HEAL"
                         ? new HealRestSiteOption(state.Player)
-                        : new SmithRestSiteOption(state.Player) { SmithCount = smithCount };
+                        : new SmithRestSiteOption(state.Player);
                     if (!await option.OnSelect())
                         throw new InvalidOperationException($"Native {choice} option failed.");
                     state.Run.CurrentMapPointHistoryEntry!.GetEntry(state.Player.NetId).RestSiteChoices.Add(choice);

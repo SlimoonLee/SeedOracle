@@ -6,11 +6,34 @@ internal static class ForecastChoiceDiffFormatter
 {
     internal static string Slot(int index) => index < 10 ? "①②③④⑤⑥⑦⑧⑨⑩"[index].ToString() : (index + 1).ToString();
 
+    // Blitz goods are a fixed six-slot set, so a changed slot is a changed good.
+    private static void BlitzGoods(List<string> lines,
+        IReadOnlyList<BlitzMerchantItemForecast> before,
+        IReadOnlyList<BlitzMerchantItemForecast> after,
+        bool chinese)
+    {
+        if (before.Count == 0 && after.Count == 0)
+            return;
+        var slots = new List<string>();
+        for (var index = 0; index < Math.Max(before.Count, after.Count); index++)
+        {
+            var previous = index < before.Count ? before[index] : null;
+            var next = index < after.Count ? after[index] : null;
+            if (previous is not null && next is not null
+                && previous.Title == next.Title && previous.Description == next.Description)
+                continue;
+            slots.Add(Slot(index) + (next is null ? chinese ? "无" : "none" : next.Title));
+        }
+        if (slots.Count > 0)
+            lines.Add((chinese ? "货物：" : "Goods: ") + string.Join(chinese ? "、" : "; ", slots));
+    }
+
     // The base inventory already contains the previous item and price. Each
     // alternative gives a complete list of replacements, with only the delta.
     internal static IReadOnlyList<string> MerchantCompact(MerchantInventoryForecast before, MerchantInventoryForecast after, bool chinese)
     {
         var lines = new List<string>();
+        BlitzGoods(lines, before.BlitzEntries, after.BlitzEntries, chinese);
         Add(chinese ? "角色卡" : "Character", before.CharacterCards, after.CharacterCards);
         Add(chinese ? "无色卡" : "Colorless", before.ColorlessCards, after.ColorlessCards);
         Add(chinese ? "遗物" : "Relics", before.Relics, after.Relics);
@@ -46,6 +69,7 @@ internal static class ForecastChoiceDiffFormatter
     internal static IReadOnlyList<string> Merchant(MerchantInventoryForecast before, MerchantInventoryForecast after, bool chinese)
     {
         var lines = new List<string>();
+        BlitzGoods(lines, before.BlitzEntries, after.BlitzEntries, chinese);
         MerchantSlots(lines, chinese ? "角色卡" : "Character card", before.CharacterCards, after.CharacterCards, chinese);
         MerchantSlots(lines, chinese ? "无色卡" : "Colorless card", before.ColorlessCards, after.ColorlessCards, chinese);
         MerchantSlots(lines, chinese ? "遗物" : "Relic", before.Relics, after.Relics, chinese);

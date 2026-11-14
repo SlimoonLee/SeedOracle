@@ -68,6 +68,73 @@ internal static class ForecastChoiceConditionFormatter
             .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
     }
 
+    // One precondition repeated in every block is noise. A cell that every term
+    // carrying it agrees on is a precondition of the whole forecast, so give it to
+    // the terms that were built without it and let Common() print it once.
+    internal static void UnifySharedCells(IReadOnlyList<Term> terms)
+    {
+        if (terms.Count < 2)
+            return;
+        var shared = terms.SelectMany(term => term.Cells)
+            .GroupBy(pair => pair.Key, StringComparer.Ordinal)
+            .Where(group => group.Select(pair => ValueKey(pair.Value)).Distinct(StringComparer.Ordinal).Count() == 1)
+            .Select(group => (Key: group.Key, Cell: group.First().Value))
+            // Only unconditional statements ("any pick here gives the same
+            // result") may be extended to the terms that did not enumerate them.
+            // A concrete option must never leak into a group that never evaluated it.
+            .Where(item => IsChoiceFreedom(item.Cell))
+            .ToArray();
+        foreach (var (key, cell) in shared)
+        {
+            var carriers = terms.Count(term => term.Cells.ContainsKey(key));
+            if (carriers < 2 || carriers == terms.Count)
+                continue;
+            foreach (var term in terms.Where(term => !term.Cells.ContainsKey(key)))
+                term.Cells[key] = cell;
+        }
+    }
+
+    // A route label answers "how did I get here", not "why is this outcome
+    // different". Keep it only when nothing else in the term explains the
+    // difference, or when the term already covers every route considered.
+    internal static void DropIncidentalRoutes(IReadOnlyList<Term> terms)
+    {
+        if (terms.Count == 0)
+            return;
+        var common = Common(terms);
+        var routeCount = terms.SelectMany(term => term.Cells.Values)
+            .Where(cell => cell.Fact.Kind == ForecastChoiceKind.Route)
+            .SelectMany(cell => cell.Values.Keys).Distinct(StringComparer.Ordinal).Count();
+        // The same non-route condition leading to different outcomes on disjoint
+        // routes means the route itself is the cause. Never hide it there.
+        var entries = terms.Select(term => (Term: term, Key: WithoutRoutes(term),
+            Routes: Routes(term))).ToArray();
+        var causal = entries.Where(entry => entries.Any(other => !ReferenceEquals(entry.Term, other.Term)
+                && other.Key == entry.Key && !entry.Routes.Overlaps(other.Routes)))
+            .Select(entry => entry.Term).ToHashSet();
+        foreach (var term in terms)
+        {
+            var routeKeys = term.Cells.Where(pair => pair.Value.Fact.Kind == ForecastChoiceKind.Route)
+                .Select(pair => pair.Key).ToArray();
+            if (routeKeys.Length == 0 || causal.Contains(term))
+                continue;
+            var explained = term.Cells.Any(pair => pair.Value.Fact.Kind != ForecastChoiceKind.Route
+                && !common.ContainsKey(pair.Key));
+            foreach (var key in routeKeys)
+                if (explained || routeCount > 1 && term.Cells[key].Values.Count >= routeCount)
+                    term.Cells.Remove(key);
+        }
+    }
+
+    private static string WithoutRoutes(Term term) => JsonSerializer.Serialize(term.Cells
+        .Where(pair => pair.Value.Fact.Kind != ForecastChoiceKind.Route)
+        .OrderBy(pair => pair.Key, StringComparer.Ordinal)
+        .Select(pair => new { pair.Key, Values = ValueKey(pair.Value) }));
+
+    private static HashSet<string> Routes(Term term) => term.Cells.Values
+        .Where(cell => cell.Fact.Kind == ForecastChoiceKind.Route)
+        .SelectMany(cell => cell.Values.Keys).ToHashSet(StringComparer.Ordinal);
+
     internal static string Format(IEnumerable<Term> source, bool chinese,
         IReadOnlyDictionary<string, Cell>? omit = null)
     {
@@ -137,13 +204,17 @@ internal static class ForecastChoiceConditionFormatter
         parts.AddRange(cells.Select(cell =>
         {
             var values = string.Join("/", cell.Values.Values.Distinct(StringComparer.Ordinal));
-            return cell.Fact.Heading.Length == 0 ? values : cell.Fact.Heading + (chinese ? "：" : ": ") + values;
+            // CauseLabel is the position-free name of the choice ("脑蛭"), so a
+            // condition never claims a floor that only exists on one of the
+            // routes being compared.
+            var heading = cell.Fact.CauseLabel ?? cell.Fact.Heading;
+            return heading.Length == 0 ? values : heading + (chinese ? "：" : ": ") + values;
         }));
         return string.Join(chinese ? "；" : "; ", parts);
     }
 
     private static string Column(ForecastChoiceFact fact) => JsonSerializer.Serialize(new
-        { fact.Key, fact.Closed, Domain = fact.Domain.Distinct().Order(StringComparer.Ordinal), Shop = fact.Shop?.Key });
+        { Key = fact.CauseKey ?? fact.Key, fact.Closed, Domain = fact.Domain.Distinct().Order(StringComparer.Ordinal), Shop = fact.Shop?.Key });
 
     private static string ValueKey(Cell cell) => JsonSerializer.Serialize(cell.Values.Keys.Order(StringComparer.Ordinal));
 

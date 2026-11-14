@@ -3,7 +3,11 @@ using Term = SeedOracle.UI.ForecastChoiceConditionFormatter.Term;
 
 namespace SeedOracle.UI;
 
-internal sealed record RewardOutcomeGroup<T>(T Outcome, IReadOnlyList<Term> Terms);
+internal sealed record RewardOutcomeGroup<T>(T Outcome, IReadOnlyList<Term> Terms)
+{
+    /// <summary>Distinct upstream combinations that reached this exact outcome.</summary>
+    public int CaseCount { get; init; } = 1;
+}
 
 internal static class RewardForecastSummary
 {
@@ -13,6 +17,9 @@ internal static class RewardForecastSummary
         .GroupBy(branch => key(branch.Outcome), StringComparer.Ordinal)
         .Select(group => new RewardOutcomeGroup<T>(group.First().Outcome,
             ForecastChoiceConditionFormatter.Reduce(group.SelectMany(branch =>
-                ForecastChoiceConditionFormatter.Paths(branch.Condition, branch.ChoicePaths)))))
+                ForecastChoiceConditionFormatter.Paths(branch.Condition, branch.ChoicePaths))))
+        {
+            CaseCount = group.Sum(branch => Math.Max(1, branch.ChoicePaths.Count))
+        })
         .ToArray();
 }

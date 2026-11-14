@@ -172,6 +172,46 @@ internal static class PredictionAccuracyRegressionTests
         Require(MapForecastTooltipBuilder.Build(forecast with
             { Merchant = null, RouteVariants = [], RoutesTruncated = true }) is not null,
             "truncation must remain visible even when no route result was generated");
+
+        // Nine ways into the same chest is still one chest. The route that led
+        // here is a condition, not a different result, so it must not become its
+        // own page: only the contents may decide a page/colour.
+        var chest = new TreasureRoomDetails(30, [new RewardItemDetails(item)], false);
+        var chestVariants = Enumerable.Range(0, 9).Select(index => new RouteVariantForecast(
+            [], RoomType.Treasure, null, null, null, true,
+            Treasure: Forecast<TreasureRoomDetails>.Exact(chest with
+            {
+                ReferenceCondition = "线路" + index + "：前置选法",
+                ReferenceChoicePaths = [new ForecastChoicePath("线路" + index + "：前置选法",
+                [
+                    new ForecastChoiceFact("route", "", "route" + index, "线路" + index, [], Closed: false,
+                        Kind: ForecastChoiceKind.Route)
+                ])]
+            }))).ToArray();
+        var chestNode = new MapNodeForecast(
+            new MapPoint(0, 3) { PointType = MapPointType.Treasure }, 3, 3,
+            null, null, null, null, null, chestVariants, false);
+        Require(RouteMarkerPlanner.Build(chestNode).Groups.Count == 1,
+            "one chest reached by nine routes must stay a single route group");
+        var chestTooltip = MapForecastTooltipBuilder.Build(chestNode)!;
+        Require(chestTooltip.Descriptions.Count == 1,
+            "a chest whose contents do not depend on the route must render as one page");
+        Require(chestTooltip.Descriptions[0].Contains(item.Name)
+                && !chestTooltip.Descriptions[0].Contains("线路0"),
+            "the single chest page must show the contents without naming the routes");
+        var otherChest = RouteMarkerPlanner.Build(chestNode with
+        {
+            RouteVariants =
+            [
+                chestVariants[0],
+                chestVariants[1] with
+                {
+                    Treasure = Forecast<TreasureRoomDetails>.Exact(
+                        chest with { Gold = 31, IsEmpty = false })
+                }
+            ]
+        });
+        Require(otherChest.Groups.Count == 2, "different chest contents must still get different route groups");
     }
 
     private static void ValidateTransformTargets(RunState live)

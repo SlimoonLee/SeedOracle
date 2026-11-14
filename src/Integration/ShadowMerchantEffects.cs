@@ -9,6 +9,7 @@ using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Hooks;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Relics;
+using MegaCrit.Sts2.Core.Multiplayer.Game;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.TestSupport;
 
@@ -27,15 +28,19 @@ internal sealed class RequiredShadowMerchantSelector(string source = "商店") :
 // The native entry calls OneOffSynchronizer.DoLocalMerchantCardRemoval, which
 // selects and mutates the REAL local player regardless of the entry's owner.
 // Route shadow entries around that boundary, including free Parasol removals.
-[HarmonyPatch(typeof(MerchantCardRemovalEntry), nameof(MerchantCardRemovalEntry.OnTryPurchaseWrapper))]
+// v0.113.0 renamed the shared purchase wrapper to OnTryPurchaseUnsynchronized
+// and moved the cancelable flag onto the entry (SetPurchaseUncancelable). Patch
+// the base method but divert only shadow-owned card-removal entries.
+[HarmonyPatch(typeof(MerchantEntry), nameof(MerchantEntry.OnTryPurchaseUnsynchronized))]
 internal static class ShadowMerchantRemovalPatch
 {
     [HarmonyPrefix]
-    private static bool Prefix(MerchantCardRemovalEntry __instance, bool ignoreCost, bool cancelable,
+    private static bool Prefix(MerchantEntry __instance, bool ignoreCost,
         ref Task<bool> __result)
     {
-        if (!ShadowIsolation.IsShadowPlayer(__instance._player)) return true;
-        __result = SelectAndRemoveAsync(__instance, ignoreCost, cancelable);
+        if (__instance is not MerchantCardRemovalEntry entry
+            || !ShadowIsolation.IsShadowPlayer(entry._player)) return true;
+        __result = SelectAndRemoveAsync(entry, ignoreCost, entry._isCancelable);
         return false;
     }
 
@@ -77,6 +82,22 @@ internal static class ShadowMerchantRemovalPatch
     }
 }
 
+// v0.113.0 keeps inventories on the live MerchantSynchronizer and indexes them
+// by slot. A shadow copy of the run has no entry there, so any native code that
+// asks the synchronizer for its inventory (Blitz "two more choices" does) would
+// read — and mutate — the live shop. Answer from the shadow registration.
+[HarmonyPatch(typeof(MerchantSynchronizer), nameof(MerchantSynchronizer.GetInventoryFor))]
+internal static class ShadowMerchantInventoryLookupPatch
+{
+    [HarmonyPrefix]
+    private static bool Prefix(Player player, ref MerchantInventory __result)
+    {
+        if (ShadowIsolation.FindMerchantInventory(player) is not { } inventory) return true;
+        __result = inventory;
+        return false;
+    }
+}
+
 // LordsParasol starts an unawaited task, changes live map/deck input, and calls
 // the real merchant synchronizer. Await its model purchases on the clone, with
 // explicit selections and no scene or network operations. Missing selections
@@ -96,22 +117,25 @@ internal static class ShadowLordsParasolPatch
 
     private static async Task PurchaseAsync(Player player, MerchantRoom room)
     {
-        // Match native multiplayer ownership: each client purchases only its
-        // local inventory, even though all players' hooks are enumerated.
-        var inventory = room.GetLocalInventory();
-        if (!ReferenceEquals(inventory.Player, player)) return;
+        // v0.113.0: inventories live on the MerchantSynchronizer; shadow runs
+        // register theirs through ShadowIsolation instead of MerchantRoom.
+        var inventory = ShadowIsolation.FindMerchantInventory(player);
+        if (inventory is null || !ReferenceEquals(inventory.Player, player)) return;
         var selector = ShadowIsolation.Selector ?? new RequiredShadowMerchantSelector("领主阳伞");
         using var isolation = ShadowIsolation.Enter(player, automateRewards: true);
         using var selections = ShadowIsolation.UseSelector(selector);
         using var discovery = ShadowIsolation.GenerateMerchantInventory();
         using var purchase = ShadowIsolation.ExecuteMerchantPurchase();
         foreach (var entry in inventory.CharacterCardEntries.Concat(inventory.ColorlessCardEntries))
-            if (entry.IsStocked) await entry.OnTryPurchaseWrapper(inventory, ignoreCost: true);
+            if (entry.IsStocked) await entry.OnTryPurchaseUnsynchronized(inventory, ignoreCost: true);
         foreach (var entry in inventory.RelicEntries)
-            await entry.OnTryPurchaseWrapper(inventory, ignoreCost: true);
+            await entry.OnTryPurchaseUnsynchronized(inventory, ignoreCost: true);
         foreach (var entry in inventory.PotionEntries)
-            await entry.OnTryPurchaseWrapper(inventory, ignoreCost: true);
+            await entry.OnTryPurchaseUnsynchronized(inventory, ignoreCost: true);
         if (inventory.CardRemovalEntry is { } removal)
-            await removal.OnTryPurchaseWrapper(inventory, ignoreCost: true, cancelable: false);
+        {
+            removal.SetPurchaseUncancelable();
+            await removal.OnTryPurchaseUnsynchronized(inventory, ignoreCost: true);
+        }
     }
 }

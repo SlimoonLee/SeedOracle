@@ -58,6 +58,10 @@ internal sealed partial class PreCombatForecastPanelControl
     private string? _simulationResultStateToken;
     private double _workerStatusRefreshElapsed;
     private bool _workerLifecycleOperation;
+    private CombatSolverProgressMonitor? _activeMonitor;
+    private double _progressRefreshElapsed;
+    private CombatSolverProgressMonitor? _simulationMonitor;
+    private string _simulationProgressPrefix = string.Empty;
 
     private WorkerRetentionPolicy SelectedWorkerRetentionPolicy =>
         Enum.IsDefined(typeof(WorkerRetentionPolicy), (int)_workerRetentionSelect.GetSelectedId())
@@ -122,6 +126,21 @@ internal sealed partial class PreCombatForecastPanelControl
         _workerStatusRefreshElapsed += delta;
         if (_workerStatusRefreshElapsed >= 0.75d)
             RefreshWorkerStatus(force: true);
+        _progressRefreshElapsed += delta;
+        if (_progressRefreshElapsed < 0.5d)
+            return;
+        _progressRefreshElapsed = 0d;
+        if (IsRunning && _activeMonitor is { } monitor)
+        {
+            if (_activeTargetIndex >= 0 && _activeTargetIndex < _rows.Count)
+                _rows[_activeTargetIndex].SetProgress(monitor.Snapshot());
+        }
+        if (IsSimulationRunning && _simulationMonitor is { } simulation)
+        {
+            SetSimulationSummary(
+                $"{_simulationProgressPrefix} · {simulation.Snapshot().Describe(true)}",
+                StsColors.gold);
+        }
     }
 
     private void BuildWorkerToolbar(VBoxContainer parent)
@@ -487,16 +506,22 @@ internal sealed partial class PreCombatForecastPanelControl
                     return;
                 }
                 var sample = samples[index];
+                var budget = options.SearchBudgetMilliseconds;
+                var timeout = CombatSolverTimeoutPolicy.Choose(budget);
+                _simulationProgressPrefix =
+                    $"正在运行 {index + 1}/{samples.Count}：{sample.PoolLabel} · {LocalizedEncounterTitle(sample.Encounter)}";
+                _simulationMonitor = new CombatSolverProgressMonitor(timeout);
                 SetSimulationSummary(
-                    $"正在运行 {index + 1}/{samples.Count}：{sample.PoolLabel} · {LocalizedEncounterTitle(sample.Encounter)}",
+                    $"{_simulationProgressPrefix} · 启动求解进程",
                     StsColors.gold);
                 CombatSolverForecastResult result = await Entry.CombatSolver.SimulateAsync(
                     run,
                     sample.Encounter,
                     sample.Encounter.RoomType,
                     sample.Seed,
-                    options,
+                    options with { OverallTimeoutMilliseconds = timeout },
                     cancellationToken);
+                _simulationMonitor = null;
                 if (generation != _batchGeneration || !GodotObject.IsInstanceValid(this))
                     return;
 
@@ -543,6 +568,7 @@ internal sealed partial class PreCombatForecastPanelControl
         }
         finally
         {
+            _simulationMonitor = null;
             if (!KeepWorkerAlive)
                 await CloseWorkerAsync(manual: false);
             if (generation == _batchGeneration && GodotObject.IsInstanceValid(this))

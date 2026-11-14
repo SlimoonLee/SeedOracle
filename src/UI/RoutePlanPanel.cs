@@ -2085,7 +2085,10 @@ internal sealed partial class RoutePlanPanelControl : PanelContainer
         }
         else if (variant.RoomType == RoomType.Shop && variant.Merchant is { HasValue: true } merchant)
         {
-            if (choice is RoutePlanChoice.Merchant merchantChoice)
+            if (choice is RoutePlanChoice.Merchant merchantChoice
+                // Blitz goods are free and have no removal slot, so a plan slot
+                // index would only subtract a price that does not exist.
+                && merchant.Value!.BlitzEntries.Count == 0)
             {
                 foreach (var pick in merchantChoice.Picks)
                     gold -= CostOf(merchant.Value!, pick);

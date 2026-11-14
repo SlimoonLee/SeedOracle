@@ -66,7 +66,7 @@ internal static class OrdinaryCardChoiceEquivalence
     {
         if (!HasNativePools(state)) return false;
         return state.Run.IterateHookListeners(null).All(model =>
-            ReferenceEquals(model, state.Run.MultiplayerScalingModel)
+            model is MegaCrit.Sts2.Core.Models.MultiplayerScalingModel
             || (merchant ? MerchantModels.GetOrAdd(model.GetType(), type => type.GetMethods(BindingFlags.Public | BindingFlags.Instance)
                     .Where(method => MerchantHooks.Contains(method.Name))
                     .All(method => method.DeclaringType == typeof(AbstractModel))) : IsInertModel(model)));

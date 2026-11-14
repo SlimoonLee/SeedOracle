@@ -1,5 +1,6 @@
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Extensions;
+using MegaCrit.Sts2.Core.Map;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Runs;
@@ -103,7 +104,8 @@ internal sealed partial class RandomForeseerAdapter
 
     public Forecast<TreasureRoomDetails> PredictTreasureRoom(
         Player player,
-        IReadOnlyList<RoomType> resolvedRooms)
+        IReadOnlyList<RoomType> resolvedRooms,
+        IReadOnlyList<MapPoint>? resolvedPoints = null)
     {
         if (resolvedRooms.Count == 0 || resolvedRooms[^1] != RoomType.Treasure)
             throw new ArgumentException("The resolved route must end in a treasure room.", nameof(resolvedRooms));
@@ -113,8 +115,9 @@ internal sealed partial class RandomForeseerAdapter
             var planning = new PlanningPredictionService();
             var state = planning.CreateState((RunState)player.RunState, player);
             using var isolation = ShadowIsolation.Enter(state.Player);
-            planning.AdvanceRoomsBeforeTarget(state, resolvedRooms);
-            var details = planning.GenerateTreasure(state, isPriorRoom: false);
+            planning.AdvanceRoomsBeforeTarget(state, resolvedRooms, resolvedPoints);
+            var details = planning.GenerateTreasure(state, isPriorRoom: false,
+                resolvedPoints is { Count: > 0 } points ? points[^1] : null);
             return resolvedRooms.Count == 1 && player.RunState.Players.Count == 1
                 ? Forecast<TreasureRoomDetails>.CurrentWorldline(
                     details,

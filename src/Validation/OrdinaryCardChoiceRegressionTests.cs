@@ -88,7 +88,10 @@ internal static class OrdinaryCardChoiceRegressionTests
                     $"ordinary selection changed Brain Leech/shop: {first}/{second}/{option}/{target}");
             checkedCases++;
         }
-        Require(expected[0] != expected[1], "Brain Leech options must retain their real stock difference");
+        // v0.113.0: shop stock/price rolls moved from Rewards to Shops, so
+        // Brain Leech's option/card choices no longer change downstream stock.
+        Require(expected[0] == expected[1],
+            "v0.113.0: Brain Leech options must not change downstream shop stock");
 
         var start = planning.Restore(input!);
         var baseline = planning.GenerateMerchant(planning.Restore(input!));
