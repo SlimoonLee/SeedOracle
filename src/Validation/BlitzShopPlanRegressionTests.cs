@@ -549,6 +549,16 @@ internal static class BlitzShopPlanRegressionTests
         Require(panel.Visible && panel.Expanded && Labels(panel).Count == beforeFold,
             "unfolding did not restore the body");
 
+        // The hover must answer from the panorama table (instant, no clone
+        // purchases) whenever the shelf matches the panorama's fingerprint —
+        // the per-hover probe is a full run round-trip and crashed the game
+        // during a hover burst.
+        var hoverSlot = panorama.Goods.First(good => good.Slot != 0 && good.Outcomes.Count > 0).Slot;
+        Require(panel.TryDescribeRowFrom(inventory, hoverSlot, out var hoverText)
+                && hoverText.Contains(OutcomeText(
+                    panorama.GoodAt(hoverSlot)!.Direct!.Yield)),
+            "the table hover lookup did not serve the priced row");
+
         // The item tip's rich text must carry the theme font override the
         // game's MegaRichTextLabel._Ready asserts — without it every hover
         // threw from the native bridge and the repeated throws took the

@@ -178,6 +178,20 @@ internal static class BlitzShopYield
 
     internal static string Describe(MerchantInventory inventory, int index)
     {
+        // The panorama table answers instantly and without clone purchases —
+        // its rows are verbatim-identical to the probe by the all-type parity
+        // fixture. The probe (a full run round-trip per hover, with hook
+        // mirrors running inside a shadow purchase) stays only as the fallback
+        // for shop entry, pending recomputes and closed windows: repeated
+        // probes are the prime suspect for the second-shop native crash.
+        if (BlitzShopPlanPanel.TryDescribeRow(inventory, index, out var rowText))
+            return rowText;
+        // While the panorama is still being priced, DO NOT probe: shop-entry
+        // hover bursts would fire one full run round-trip per hover — the
+        // native crash pattern. The table lands within a second.
+        if (BlitzShopPlanPanel.PanoramaPending)
+            return Chinese ? "→ 预测生成中……" : "-> pricing…";
+
         var cache = Caches.GetValue(inventory, _ => new Cache());
         // Any purchase spends a pick and moves the streams the remaining goods
         // read, so the whole shelf is re-probed after one.

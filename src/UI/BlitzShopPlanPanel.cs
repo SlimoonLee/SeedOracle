@@ -61,6 +61,62 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
     /// <summary>The panorama currently on screen, for the purchase audit.</summary>
     internal BlitzShopPanorama? CurrentPanorama => _panorama;
 
+    /// <summary>
+    /// The fingerprint the current panorama was priced against, or null while
+    /// no panorama is ready. Hover lookups compare it against the live shelf
+    /// to decide between an instant table read and a probe.
+    /// </summary>
+    internal string? CurrentFingerprint => _fingerprint;
+
+    /// <summary>
+    /// Whether an enumeration is building or stepping right now. While true
+    /// the hover must NOT fall back to probes: shop-entry bursts of hovers
+    /// would otherwise fire one full run round-trip per hover.
+    /// </summary>
+    internal bool IsPricing => _buildPending || _stepping;
+
+    /// <summary>
+    /// The hover answer from this panorama for a good bought after exactly the
+    /// Used slots. False when the shelf moved past the fingerprint (pending
+    /// recompute), the row is missing, or the good needs the player's pick.
+    /// </summary>
+    internal bool TryDescribeRowFrom(MerchantInventory inventory, int index, out string text)
+    {
+        text = string.Empty;
+        if (_panorama is not { } panorama
+            || !ReferenceEquals(_inventory, inventory)
+            || CurrentFingerprint != FingerprintOf(inventory))
+            return false;
+
+        var entries = inventory.BlitzEntries;
+        var prefix = Enumerable.Range(0, entries.Count)
+            .Where(slot => slot != index && entries[slot].Status == BlitzMerchantEntry.BlitzEntryStatus.Used)
+            .ToArray();
+        var good = panorama.GoodAt(index);
+        var row = good?.ForPrefix(prefix);
+        if (row is null || !row.Yield.Resolved)
+            return false;
+
+        var chinese = Chinese;
+        text = BlitzYieldText.Render(row.Yield, chinese);
+        var directText = OutcomeText(row.Yield, chinese);
+        var alternatives = good!.Outcomes
+            .Where(outcome => outcome.Yield.Resolved && outcome.Yield.Purchased
+                && outcome.PrefixSlots.Count > 0
+                && OutcomeText(outcome.Yield, chinese) != directText)
+            .GroupBy(outcome => OutcomeText(outcome.Yield, chinese))
+            .Take(3);
+        foreach (var group in alternatives)
+        {
+            var example = string.Join(chinese ? "＋" : "+",
+                group.First().PrefixSlots.Select(Glyph));
+            text += "\n→ " + (chinese
+                ? $"先买 {example} 后：{group.Key}"
+                : $"after {example}: {group.Key}");
+        }
+        return text.Length > 0;
+    }
+
     public BlitzShopPlanPanelControl()
     {
         Name = NodeName;
@@ -374,6 +430,7 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
     internal void RenderForTest(BlitzShopPanorama panorama)
     {
         _panorama = panorama;
+        if (_inventory is not null) _fingerprint = FingerprintOf(_inventory);
         RefreshContent();
     }
 
@@ -961,7 +1018,7 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
         return label;
     }
 
-    private static string Glyph(int slot) => slot >= 0 && slot < Glyphs.Length ? Glyphs[slot] : slot.ToString();
+    internal static string Glyph(int slot) => slot >= 0 && slot < Glyphs.Length ? Glyphs[slot] : slot.ToString();
 }
 
 /// <summary>Short, stable labels for the twenty good types, shared by both pages.</summary>
@@ -1101,6 +1158,27 @@ internal static class BlitzShopPlanPanel
         if (_currentNode is null && _currentPanel is null) return;
         RefreshSafely(null);
     }
+
+    /// <summary>
+    /// The hover answer from the panorama table: instant, with no clone
+    /// purchases. Valid only while the shelf matches the fingerprint the
+    /// panorama was priced against; the caller falls back to the probe
+    /// otherwise (shop entry, pending recompute, folded window). The probe is
+    /// a full run round-trip per hover and the prime suspect for the second
+    /// shop's native crash.
+    /// </summary>
+    internal static bool TryDescribeRow(MerchantInventory inventory, int index, out string text)
+    {
+        text = string.Empty;
+        if (!IsUsable(_currentPanel) || !ReferenceEquals(_currentPanel!.BoundInventory, inventory))
+            return false;
+        return _currentPanel.TryDescribeRowFrom(inventory, index, out text);
+    }
+
+    /// <summary>Whether the window's enumeration is still in flight; while it
+    /// is, hovers wait for the table instead of probing.</summary>
+    internal static bool PanoramaPending =>
+        IsUsable(_currentPanel) && _currentPanel!.IsPricing;
 
     /// <summary>
     /// The yield the window is currently promising for a good bought after
@@ -1296,7 +1374,7 @@ internal static class BlitzShopItemTip
                 cost.CustomMinimumSize = new Vector2(26f, 26f);
                 var costBox = new StyleBoxFlat { BgColor = new Color(0.082f, 0.094f, 0.149f) };
                 costBox.SetCornerRadiusAll(13);
-                cost.AddThemeStyleboxOverride(ThemeConstants.Label.Font, costBox);
+                cost.AddThemeStyleboxOverride("normal", costBox);
                 row.AddChild(cost);
                 var name = new Label
                 {
