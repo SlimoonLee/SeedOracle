@@ -224,7 +224,7 @@ internal static class BlitzMerchantProbe
             .Where(screen => screen.Count > 0)
             .ToArray();
 
-    private static Dictionary<(string Id, bool Upgraded), int> CountDeck(Player player)
+    internal static Dictionary<(string Id, bool Upgraded), int> CountDeck(Player player)
     {
         var counts = new Dictionary<(string, bool), int>();
         foreach (var card in player.Deck.Cards)
@@ -240,7 +240,7 @@ internal static class BlitzMerchantProbe
     /// <c>CardCmd.Upgrade</c> may swap the instance, so the two cases are told
     /// apart by counting (id, upgraded) instead of comparing references.
     /// </summary>
-    private static (IReadOnlyList<ForecastItemDetails> Gained, IReadOnlyList<ForecastItemDetails> Upgraded) DiffDeck(
+    internal static (IReadOnlyList<ForecastItemDetails> Gained, IReadOnlyList<ForecastItemDetails> Upgraded) DiffDeck(
         Player player,
         Dictionary<(string Id, bool Upgraded), int> before,
         Dictionary<(string Id, bool Upgraded), int> after)

@@ -131,17 +131,28 @@ internal static class BlitzShopYield
         return false;
     }
 
-    private static MerchantInventory? Resolve(Player player, BlitzMerchantEntry entry)
+    private static MerchantInventory? Resolve(Player player, BlitzMerchantEntry entry) =>
+        InventoryOf(entry) is { } bound && ReferenceEquals(bound.Player, player) ? bound : Fallback(player);
+
+    /// <summary>The shelf a good was put on screen from; the audit uses this
+    /// to find a purchased entry's slot without touching hover state.</summary>
+    internal static MerchantInventory? InventoryOf(BlitzMerchantEntry entry)
     {
         if (Bindings.TryGetValue(entry, out var binding)
-            && binding.Inventory is { } bound
-            && ReferenceEquals(bound.Player, player))
+            && binding.Inventory is { } bound)
         {
             return bound;
         }
+        return Fallback(entry.Player);
+    }
+
+    private static MerchantInventory? Fallback(Player? player)
+    {
         // The shop panel itself reads its inventory from here, so it is the same
         // object the slots were filled from.
-        return RunManager.Instance?.MerchantSynchronizer?.GetInventoryFor(player);
+        return player is null
+            ? null
+            : RunManager.Instance?.MerchantSynchronizer?.GetInventoryFor(player);
     }
 
     private static int IndexOf(MerchantInventory inventory, BlitzMerchantEntry entry)

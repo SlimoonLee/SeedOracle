@@ -5,6 +5,9 @@ using MegaCrit.Sts2.Core.Context;
 using MegaCrit.Sts2.Core.Entities.Merchant;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Nodes.Screens.Shops;
+using MegaCrit.Sts2.Core.Commands;
+using MegaCrit.Sts2.Core.Entities.Cards;
+using MegaCrit.Sts2.Core.Models.Cards;
 using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.addons.mega_text;
 using SeedOracle.Forecasting;
@@ -45,7 +48,7 @@ internal static class BlitzShopPlanRegressionTests
         VerifyDedupe(planning, state);
         VerifyRewardTransform(planning, state);
         VerifyWishSolver(inventory);
-        VerifyPanel(inventory, panorama);
+        VerifyPanel(state, inventory, panorama);
     }
 
     /// <summary>
@@ -383,20 +386,63 @@ internal static class BlitzShopPlanRegressionTests
     /// lifecycle, both pages must render the panorama's answers, and folding
     /// must leave a visible title bar rather than an unfindable window.
     /// </summary>
-    private static void VerifyPanel(MerchantInventory inventory, BlitzShopPanorama panorama)
+    private static void VerifyPanel(
+        PlanningPredictionService.State state,
+        MerchantInventory inventory,
+        BlitzShopPanorama panorama)
     {
         foreach (var method in new[]
                  {
                      AccessTools.Method(typeof(NMerchantInventory), nameof(NMerchantInventory.Open)),
-                     AccessTools.Method(typeof(NMerchantInventory), nameof(NMerchantInventory.Close))
+                     AccessTools.Method(typeof(NMerchantInventory), nameof(NMerchantInventory.Close)),
+                     AccessTools.Method(typeof(MegaCrit.Sts2.Core.Hooks.Hook),
+                         nameof(MegaCrit.Sts2.Core.Hooks.Hook.AfterCardChangedPiles))
                  })
         {
             var patches = Harmony.GetPatchInfo(method);
             Require(patches is not null && patches.Postfixes.Any(patch =>
                     patch.PatchMethod.DeclaringType?.Name is "NMerchantInventoryOpenBlitzPlanPatch"
-                        or "NMerchantInventoryCloseBlitzPlanPatch"),
+                        or "NMerchantInventoryCloseBlitzPlanPatch"
+                        or "HookAfterCardChangedPilesBlitzPlanPatch"),
                 $"the shop window patch is not attached to {method.Name}");
         }
+
+        // The purchase audit: patches on the live purchase path, and its
+        // multiset verdict logic — the tool that turns a "预测不准" report
+        // into a [BlitzAudit] line in godot.log.
+        foreach (var method in new[]
+                 {
+                     AccessTools.Method(typeof(MegaCrit.Sts2.Core.Entities.Merchant.MerchantEntry),
+                         nameof(MegaCrit.Sts2.Core.Entities.Merchant.MerchantEntry.OnTryPurchaseUnsynchronized)),
+                     AccessTools.Method(typeof(MegaCrit.Sts2.Core.Entities.Merchant.MerchantEntry),
+                         nameof(MegaCrit.Sts2.Core.Entities.Merchant.MerchantEntry.InvokePurchaseCompleted))
+                 })
+        {
+            var patches = Harmony.GetPatchInfo(method);
+            Require(patches is not null && patches.Prefixes.Concat(patches.Postfixes).Any(patch =>
+                    patch.PatchMethod.DeclaringType?.DeclaringType?.Name == "BlitzShopAudit"),
+                $"the purchase audit patch is not attached to {method.Name}");
+        }
+        var (auditOk, auditDetail) = BlitzShopAudit.CompareMultiset(
+            [("A", false), ("B", true)], [("B", true), ("A", false)]);
+        Require(auditOk, "the audit flagged an identical multiset: " + auditDetail);
+        var (auditCatch, auditCatchDetail) = BlitzShopAudit.CompareMultiset(
+            [("A", false)], [("B", false)]);
+        Require(!auditCatch && auditCatchDetail.Contains("B"),
+            "the audit missed an unexpected card: " + auditCatchDetail);
+
+        // The fingerprint must move when the deck moves: that is what makes
+        // the window reprice deck-reading rows after a reward-screen pick.
+        var before = BlitzShopPlanPanelControl.FingerprintOf(inventory);
+        using (var isolation = ShadowIsolation.Enter(inventory.Player, automateRewards: true))
+        {
+            var extra = state.Run.CreateCard<Guilty>(inventory.Player);
+            Require(MegaCrit.Sts2.Core.Commands.CardPileCmd.Add(extra, PileType.Deck)
+                    .GetAwaiter().GetResult().success,
+                "the fingerprint fixture could not add a card to the shadow deck");
+        }
+        Require(BlitzShopPlanPanelControl.FingerprintOf(inventory) != before,
+            "the window fingerprint ignores deck changes, so reward picks stay stale");
 
         var panel = new BlitzShopPlanPanelControl();
         panel.Bind(inventory);

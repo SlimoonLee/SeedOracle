@@ -3,6 +3,7 @@ using HarmonyLib;
 using MegaCrit.Sts2.Core.Commands;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Merchant;
+using MegaCrit.Sts2.Core.Hooks;
 using MegaCrit.Sts2.Core.Helpers;
 using MegaCrit.Sts2.Core.Localization;
 using MegaCrit.Sts2.Core.Localization.Fonts;
@@ -50,12 +51,15 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
     private bool _recomputeArmed;
     private bool _plannerMode = true;
     private bool _expanded = true;
-    /// <summary>Slot → variant text the player asked for. Survives recomputes;
-    /// entries whose text no longer exists on the shelf drop out with a note.</summary>
-    private readonly Dictionary<int, string> _wishes = [];
+    /// <summary>Slot → the item the player asked for. Survives recomputes;
+    /// entries whose item no longer exists on the shelf drop out with a note.</summary>
+    private readonly Dictionary<int, BlitzWishKey> _wishes = [];
 
     /// <summary>The shelf this window is bound to, for label lookups.</summary>
     internal MerchantInventory? BoundInventory => _inventory;
+
+    /// <summary>The panorama currently on screen, for the purchase audit.</summary>
+    internal BlitzShopPanorama? CurrentPanorama => _panorama;
 
     public BlitzShopPlanPanelControl()
     {
@@ -134,6 +138,14 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
         BlitzShopItemTip.BindParent(this);
         VisibilityChanged += BlitzShopItemTip.Hide;
     }
+
+    /// <summary>
+    /// A wish: the chip the player asked for, plus — for transform results —
+    /// the sources that produce it. The result of a transform depends on the
+    /// source's pool, so "变成 X" is only guaranteed through a listed source;
+    /// the solver then has to order the shop so that source exists to pick.
+    /// </summary>
+    internal sealed record BlitzWishKey(string ChipKey, IReadOnlyList<string> TransformSources);
 
     /// <summary>Whether the body is currently unfolded.</summary>
     internal bool Expanded => _expanded;
@@ -254,10 +266,20 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
         Callable.From(Pump).CallDeferred();
     }
 
-    internal static string FingerprintOf(MerchantInventory inventory) =>
-        inventory.BlitzChoicesRemaining + "|"
-        + string.Join("|", inventory.BlitzEntries.Select(entry =>
-            entry.MerchantEntryType + ":" + entry.IsStocked));
+    internal static string FingerprintOf(MerchantInventory inventory)
+    {
+        // The deck digest is what catches reward-screen picks: taking a card
+        // changes no merchant entry and no pick counter, but every
+        // deck-reading row (transforms, random upgrades, enchant pickables)
+        // prices against it.
+        var deck = inventory.Player.Deck.Cards;
+        return inventory.BlitzChoicesRemaining + "|"
+            + string.Join("|", inventory.BlitzEntries.Select(entry =>
+                entry.MerchantEntryType + ":" + entry.IsStocked))
+            + "|deck:" + deck.Count + ":"
+            + string.Join(",", deck.Select(card =>
+                card.Id.Entry + (card.IsUpgraded ? "+" : "")));
+    }
 
     /// <summary>
     /// Shelf events arrive in bursts while reward screens from a purchase are
@@ -366,7 +388,7 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
     {
         if (_panorama?.GoodAt(slot) is not { } good) return;
         var chip = ChipsOf(good).FirstOrDefault();
-        if (chip is not null) ToggleWish(slot, chip.Key);
+        if (chip is not null) ToggleWish(slot, chip);
     }
 
     /// <summary>
@@ -380,7 +402,7 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
         {
             var chip = ChipsOf(good).FirstOrDefault();
             if (chip is null) continue;
-            ToggleWish(good.Slot, chip.Key);
+            ToggleWish(good.Slot, chip);
             return good.Slot;
         }
         return -1;
@@ -560,11 +582,18 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
     /// relic or curse a good can hand over under some earlier-purchase set.
     /// The chip, not a "3-pick" sentence, is what the player targets — hover
     /// shows the item's own card, exactly like the Crystal Ball predictor's
-    /// cells.
+    /// cells. A transform result chip carries the sources that produce it:
+    /// the result depends on the source's pool (character / curse / colorless
+    /// read different pools at the same draw), so a wish must keep them.
     /// </summary>
-    private sealed record Chip(string Key, ForecastItemDetails Detail)
+    private sealed record Chip(string Key, ForecastItemDetails Detail,
+        IReadOnlyList<string> TransformSources)
     {
         public string Label => Detail.Name + (Detail.IsUpgraded && !Detail.Name.EndsWith('+') ? "+" : "");
+
+        public static Chip Of(ForecastItemDetails detail, IEnumerable<string>? transformSources = null) =>
+            new(detail.Kind + "|" + detail.Name + "|" + detail.IsUpgraded, detail,
+                (transformSources ?? []).ToList());
     }
 
     /// <summary>
@@ -573,27 +602,55 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
     /// results a transform can turn a picked card into — the union across all
     /// predecessor sets.
     /// </summary>
-    private static List<Chip> ChipsOf(BlitzPlanGood good) => good.Outcomes
-        .SelectMany(outcome => outcome.Yield.CardScreens.SelectMany(screen => screen)
-            .Concat(outcome.Yield.GainedCards)
-            .Concat(outcome.Yield.UpgradedCards)
-            .Concat(outcome.Yield.Potions)
-            .Concat(outcome.Yield.Relics)
-            .Concat(outcome.Yield.TransformChoices.Select(choice => choice.Result)))
-        .GroupBy(item => item.Kind + "|" + item.Name + "|" + item.IsUpgraded)
-        .Select(group => new Chip(group.Key, group.First()))
-        .ToList();
-
-    private static bool ContainsItem(BlitzYieldForecast yield, Chip chip) => chip.Detail.Kind switch
+    private static List<Chip> ChipsOf(BlitzPlanGood good)
     {
-        ForecastItemKind.Potion => yield.Potions.Any(item => SameItem(item, chip.Detail)),
-        ForecastItemKind.Relic => yield.Relics.Any(item => SameItem(item, chip.Detail)),
-        _ => yield.CardScreens.SelectMany(screen => screen)
-            .Concat(yield.GainedCards)
-            .Concat(yield.UpgradedCards)
-            .Concat(yield.TransformChoices.Select(choice => choice.Result))
-            .Any(item => SameItem(item, chip.Detail))
-    };
+        var chips = new Dictionary<string, (Chip Chip, List<string> Sources)>();
+        void Add(ForecastItemDetails item, string? transformSource = null)
+        {
+            var probe = Chip.Of(item);
+            if (!chips.TryGetValue(probe.Key, out var entry))
+            {
+                entry = (probe, []);
+                chips[probe.Key] = entry;
+            }
+            if (transformSource is not null && !entry.Sources.Contains(transformSource))
+                entry.Sources.Add(transformSource);
+        }
+        foreach (var outcome in good.Outcomes)
+        {
+            foreach (var screen in outcome.Yield.CardScreens)
+                foreach (var item in screen) Add(item);
+            foreach (var item in outcome.Yield.GainedCards) Add(item);
+            foreach (var item in outcome.Yield.UpgradedCards) Add(item);
+            foreach (var item in outcome.Yield.Potions) Add(item);
+            foreach (var item in outcome.Yield.Relics) Add(item);
+            foreach (var choice in outcome.Yield.TransformChoices)
+                Add(choice.Result, SourceLabel(choice));
+        }
+        return chips.Values.Select(entry => entry.Chip with
+        {
+            TransformSources = entry.Sources
+        }).ToList();
+    }
+
+    /// <summary>The source label as the paths display writes it.</summary>
+    private static string SourceLabel(BlitzCardChoiceOutcome choice) =>
+        choice.Source.Name + (choice.Source.IsUpgraded && !choice.Source.Name.EndsWith('+') ? "+" : "");
+
+    private static bool ContainsItem(BlitzYieldForecast yield, Chip chip) =>
+        chip.TransformSources.Count > 0
+            ? yield.TransformChoices.Any(choice =>
+                SameItem(choice.Result, chip.Detail)
+                && chip.TransformSources.Contains(SourceLabel(choice)))
+            : chip.Detail.Kind switch
+            {
+                ForecastItemKind.Potion => yield.Potions.Any(item => SameItem(item, chip.Detail)),
+                ForecastItemKind.Relic => yield.Relics.Any(item => SameItem(item, chip.Detail)),
+                _ => yield.CardScreens.SelectMany(screen => screen)
+                    .Concat(yield.GainedCards)
+                    .Concat(yield.UpgradedCards)
+                    .Any(item => SameItem(item, chip.Detail))
+            };
 
     private static bool SameItem(ForecastItemDetails left, ForecastItemDetails right) =>
         left.Kind == right.Kind && left.Name == right.Name && left.IsUpgraded == right.IsUpgraded;
@@ -709,7 +766,7 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
     /// </summary>
     private Button MakeChip(Chip chip, int slot, bool clickable)
     {
-        var selected = _wishes.TryGetValue(slot, out var wished) && wished == chip.Key;
+        var selected = _wishes.TryGetValue(slot, out var wished) && wished.ChipKey == chip.Key;
         var button = PreCombatPanelStyles.CreateButton((selected ? "★ " : "") + chip.Label, 0f);
         button.ToggleMode = clickable;
         button.ButtonPressed = selected;
@@ -731,7 +788,7 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
         {
             var slotCopy = slot;
             var chipCopy = chip;
-            button.Pressed += () => ToggleWish(slotCopy, chipCopy.Key);
+            button.Pressed += () => ToggleWish(slotCopy, chipCopy);
         }
         return button;
     }
@@ -747,10 +804,12 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
         _ => StsColors.cream
     };
 
-    private void ToggleWish(int slot, string wishKey)
+    private void ToggleWish(int slot, Chip chip)
     {
-        if (_wishes.TryGetValue(slot, out var current) && current == wishKey) _wishes.Remove(slot);
-        else _wishes[slot] = wishKey;
+        if (_wishes.TryGetValue(slot, out var current) && current.ChipKey == chip.Key)
+            _wishes.Remove(slot);
+        else
+            _wishes[slot] = new BlitzWishKey(chip.Key, chip.TransformSources);
         RefreshContent();
     }
 
@@ -769,11 +828,11 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
         }
 
         var wishes = new List<BlitzShopPlanService.BlitzWish>();
-        foreach (var (slot, key) in _wishes)
+        foreach (var (slot, wish) in _wishes)
         {
             var good = panorama.GoodAt(slot);
             if (good is null) continue;
-            var chip = ChipsOf(good).FirstOrDefault(candidate => candidate.Key == key);
+            var chip = ChipsOf(good).FirstOrDefault(candidate => candidate.Key == wish.ChipKey);
             if (chip is null) continue;
             var allowed = good.Outcomes
                 .Where(outcome => ContainsItem(outcome.Yield, chip))
@@ -825,10 +884,22 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
                     ? "在 " + DescribePrefix(prefix, chinese) + " 后"
                     : "after " + DescribePrefix(prefix, chinese);
             var mark = _wishes.ContainsKey(step.Slot) ? "  ✓" : chinese ? "　（垫位）" : "  (filler)";
+            // A wished transform result only comes from certain source cards
+            // (the pool differs per source); the plan must name the one to pick.
+            var pick = _wishes.TryGetValue(step.Slot, out var wished)
+                       && step.Outcome.Yield.TransformChoices.Count > 0
+                ? step.Outcome.Yield.TransformChoices
+                    .Where(choice => wished.TransformSources.Contains(SourceLabel(choice)))
+                    .Select(SourceLabel)
+                    .FirstOrDefault()
+                : null;
+            var pickNote = pick is null
+                ? ""
+                : chinese ? $"（选 {pick} 去变化）" : $" (pick {pick} to transform)";
             var stepRow = new HBoxContainer();
             stepRow.AddThemeConstantOverride(ThemeConstants.BoxContainer.Separation, 6);
             _list.AddChild(stepRow);
-            stepRow.AddChild(BodyLabel($"{index + 1}. {Glyph(step.Slot)} {where}{mark}"));
+            stepRow.AddChild(BodyLabel($"{index + 1}. {Glyph(step.Slot)} {where}{pickNote}{mark}"));
             var flow = new HFlowContainer
             {
                 SizeFlagsVertical = SizeFlags.ShrinkCenter
@@ -851,7 +922,7 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
         .Concat(yield.Potions)
         .Concat(yield.Relics)
         .GroupBy(item => item.Kind + "|" + item.Name + "|" + item.IsUpgraded)
-        .Select(group => new Chip(group.Key, group.First()))
+        .Select(group => Chip.Of(group.First()))
         .ToList();
 
     // ---- Shared bits ----
@@ -1029,6 +1100,35 @@ internal static class BlitzShopPlanPanel
     {
         if (_currentNode is null && _currentPanel is null) return;
         RefreshSafely(null);
+    }
+
+    /// <summary>
+    /// The yield the window is currently promising for a good bought after
+    /// exactly this predecessor set — the purchase audit's reference. Null
+    /// when no window or no such row is on screen.
+    /// </summary>
+    internal static BlitzYieldForecast? CurrentRow(int slot, IReadOnlyCollection<int> prefix)
+    {
+        if (!IsUsable(_currentPanel) || _currentPanel!.CurrentPanorama is not { } panorama)
+            return null;
+        return panorama.GoodAt(slot)?.ForPrefix(prefix)?.Yield;
+    }
+
+    /// <summary>
+    /// Whether a shop window is on screen right now — the cheap gate that
+    /// keeps the global card-changed hook from posting during combats.
+    /// </summary>
+    internal static bool HasOpenWindow => IsUsable(_currentPanel) && _currentPanel!.Visible;
+
+    /// <summary>
+    /// Called from the game's card-changed hook on every pile move anywhere;
+    /// only an open shop window cares, and the fingerprint check inside makes
+    /// the refresh free when the deck the window prices against did not move.
+    /// </summary>
+    internal static void OnDeckMaybeChanged()
+    {
+        if (!HasOpenWindow) return;
+        SeedOracleDispatcher.Post(RefreshCurrentSafely);
     }
 
     /// <summary>
@@ -1325,4 +1425,14 @@ internal static class NMerchantInventoryCloseBlitzPlanPatch
 {
     [HarmonyPostfix]
     private static void Postfix() => BlitzShopPlanPanel.HideSafely();
+}
+
+// Reward-screen picks never touch a merchant entry: without this hook the
+// window would keep pricing deck-reading rows against the deck as it stood
+// at shop entry, drifting further with every card the player takes.
+[HarmonyPatch(typeof(Hook), nameof(Hook.AfterCardChangedPiles))]
+internal static class HookAfterCardChangedPilesBlitzPlanPatch
+{
+    [HarmonyPostfix]
+    private static void Postfix() => BlitzShopPlanPanel.OnDeckMaybeChanged();
 }
