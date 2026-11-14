@@ -220,7 +220,7 @@ internal sealed partial class RandomForeseerAdapter : IRandomForeseerAdapter
         var inventory = new MerchantInventory(player);
         var characterCards = PredictCharacterCards(context, inventory, player, shops);
         var colorlessCards = PredictColorlessCards(context, inventory, player, shops);
-        var relics = PredictRelics(player, rewards, shops, relicGrabBag, sharedRelicGrabBag);
+        var relics = PredictRelics(player, shops, relicGrabBag, sharedRelicGrabBag);
         var potions = PredictPotions(player, shops);
         var removalCost = PredictRemovalCost(player);
         return new MerchantInventoryForecast(
@@ -323,15 +323,17 @@ internal sealed partial class RandomForeseerAdapter : IRandomForeseerAdapter
 
     private IReadOnlyList<MerchantItemForecast> PredictRelics(
         Player player,
-        Rng rewards,
         Rng shops,
         MegaCrit.Sts2.Core.Runs.RelicGrabBag relicGrabBag,
         MegaCrit.Sts2.Core.Runs.RelicGrabBag sharedRelicGrabBag)
     {
+        // The game rolls both shop-relic rarities from PlayerRng.Shops
+        // (MerchantInventory.GetDefaultRelicEntries) — the Rewards stream here
+        // predicted the wrong relics.
         RelicRarity[] rarities =
         [
-            RelicFactory.RollRarity(rewards),
-            RelicFactory.RollRarity(rewards),
+            RelicFactory.RollRarity(shops),
+            RelicFactory.RollRarity(shops),
             RelicRarity.Shop
         ];
         var priceProbe = new ForecastMerchantEntry(player);
