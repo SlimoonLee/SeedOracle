@@ -7,6 +7,7 @@ using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Nodes.Screens.Shops;
 using MegaCrit.Sts2.Core.Commands;
 using MegaCrit.Sts2.Core.Entities.Cards;
+using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Cards;
 using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.addons.mega_text;
@@ -47,6 +48,7 @@ internal static class BlitzShopPlanRegressionTests
         VerifySequenceLookup(planning, state, inventory, panorama);
         VerifyDedupe(planning, state);
         VerifyRewardTransform(planning, state);
+        VerifyAllTypesParity(planning, live, state);
         VerifyWishSolver(inventory);
         VerifyPanel(state, inventory, panorama);
     }
@@ -327,6 +329,65 @@ internal static class BlitzShopPlanRegressionTests
             $"blitz-plan-rewardtransform PASS: offered={offered.Count} covered={covered} "
             + $"curse='{curse}'→'{curseChoice.Result.Name}' "
             + $"table={transformRow.Yield.TransformChoices.Count} pickable={transformRow.Yield.PickableCards}");
+    }
+
+    /// <summary>
+    /// Direct generation vs the game's real purchase path for EVERY entry
+    /// type — the shelf-random parity gate can go a whole smoke without
+    /// seeing a type (UpgradedRareCard's Uniform odds bug shipped exactly so).
+    /// One synthetic shelf holding all twenty types, every direct row bought
+    /// for real on a clone and compared verbatim.
+    /// </summary>
+    private static void VerifyAllTypesParity(
+        PlanningPredictionService planning,
+        RunState live,
+        PlanningPredictionService.State state)
+    {
+        var types = Enum.GetValues<BlitzMerchantEntryType>().ToList();
+        var entries = types.Select(type => BlitzMerchantEntry.Generate(state.Player, type)).ToList();
+        var inventory = new MerchantInventory(state.Player, [], [], [], [], null, entries);
+        inventory.Setup();
+        using var registration = ShadowIsolation.UseMerchantInventories([inventory]);
+
+        var preview = new BlitzShopPreview(planning, state.Run, state.Player);
+        preview.MeasureDeltas(inventory);
+
+        // Deck divergence diagnosis: the window prices deck-reading rows
+        // against the preview's clone, the probe against its own — if the two
+        // clones disagree, one of the state paths is unfaithful.
+        string Digest(IEnumerable<CardModel> cards) => string.Join(",",
+            cards.Select(card => card.Id.Entry + (card.IsUpgraded ? "+" : "")
+                + (card.IsUpgradable ? "" : "!")));
+        Smoke.SmokeReport.Add($"blitz-parity | deck source={Digest(state.Player.Deck.Cards)}");
+        Smoke.SmokeReport.Add($"blitz-parity | deck preview={Digest(preview.DeckSnapshot)}");
+        var probeDeckDigest = Digest(planning.Restore(planning.Capture(state)).Player.Deck.Cards);
+        Smoke.SmokeReport.Add($"blitz-parity | deck probe={probeDeckDigest}");
+        Smoke.SmokeReport.Add($"blitz-parity | deck live={Digest(live.Players[0].Deck.Cards)}");
+
+        var failures = new List<string>();
+        foreach (var slot in Enumerable.Range(0, entries.Count))
+        {
+            var mine = preview.Preview(inventory, slot, []);
+            var probeClone = planning.Restore(planning.Capture(state));
+            var shopsBefore = probeClone.Player.PlayerRng.Shops.ToSerializable().counter;
+            var rewardsBefore = probeClone.Player.PlayerRng.Rewards.ToSerializable().counter;
+            var probe = BlitzMerchantProbe.PredictInPlace(probeClone, entries[slot]);
+            var shopsDrift = probeClone.Player.PlayerRng.Shops.ToSerializable().counter - shopsBefore;
+            var rewardsDrift = probeClone.Player.PlayerRng.Rewards.ToSerializable().counter - rewardsBefore;
+            var myDelta = preview.Delta(entries[slot].MerchantEntryType);
+            var mineText = OutcomeText(mine);
+            var probeText = OutcomeText(probe);
+            var streamNote = myDelta.Shops == shopsDrift && myDelta.Rewards == rewardsDrift
+                ? "stream=OK"
+                : $"stream=MISMATCH mine=({myDelta.Shops},{myDelta.Rewards}) probe=({shopsDrift},{rewardsDrift})";
+            Smoke.SmokeReport.Add(
+                $"blitz-parity | {entries[slot].MerchantEntryType} {(mineText == probeText ? "OK" : "DIFF")} {streamNote}");
+            if (mineText != probeText)
+                failures.Add($"{entries[slot].MerchantEntryType}: mine='{One(mineText)}' probe='{One(probeText)}' {streamNote}");
+        }
+        Require(failures.Count == 0,
+            "direct generation diverges from the real purchase path: " + string.Join("; ", failures));
+        Smoke.SmokeReport.Add($"blitz-parity-alltypes PASS: types={types.Count}");
     }
 
     /// <summary>

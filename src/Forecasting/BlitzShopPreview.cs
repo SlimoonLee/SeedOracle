@@ -45,6 +45,9 @@ internal sealed class BlitzShopPreview
     private readonly SerializableRelicGrabBag _sharedBag;
     private readonly SerializableRelicGrabBag _playerBag;
     private readonly List<CardModel> _deck;
+
+    /// <summary>The deck the preview prices against, for parity diagnostics.</summary>
+    internal IReadOnlyList<CardModel> DeckSnapshot => _deck;
     private readonly int _currentHp;
     private readonly int _maxHp;
 
@@ -226,14 +229,12 @@ internal sealed class BlitzShopPreview
                 ScreenCards(Screen(CardOptions(Pool()), shops));
                 break;
             case BlitzMerchantEntryType.UpgradedCardReward:
-                // The entry flags off upgrade rolls and upgrades the screen
-                // itself once generated, so the stream sees one pass of cards.
+                // The entry offers ONE screen (a single CardReward) with
+                // upgrade rolls suppressed, then upgrades the cards in place.
                 var plainOptions = CardOptions(Pool()).WithFlags(CardCreationFlags.NoUpgrades);
-                foreach (var screen in new[] { Screen(plainOptions, shops), Screen(plainOptions, shops) })
-                {
-                    foreach (var card in screen) CardCmd.Upgrade(card);
-                    ScreenCards(screen);
-                }
+                var upgradedOnce = Screen(plainOptions, shops);
+                foreach (var card in upgradedOnce) CardCmd.Upgrade(card);
+                ScreenCards(upgradedOnce);
                 break;
             case BlitzMerchantEntryType.RareCardReward:
                 ScreenCards(Screen(RareOptions(Pool()), shops));
@@ -245,8 +246,13 @@ internal sealed class BlitzShopPreview
                 ScreenCards(upgradedScreen);
                 break;
             case BlitzMerchantEntryType.UpgradedRareCard:
+                // The entry uses Uniform odds (no rarity roll — one draw for
+                // the card itself) on the SHOPS stream; Blitz odds here would
+                // add a rarity draw, and a missing override would silently
+                // read the Rewards stream instead — both drifted every later
+                // good's position.
                 var single = CardFactory.CreateForReward(_player, 1,
-                        RareOptions(Pool()).WithFlags(CardCreationFlags.NoUpgradeRoll))
+                        UniformRareOptions(Pool()).WithRngOverride(shops))
                     .Select(result => result.Card).ToList();
                 foreach (var card in single) CardCmd.Upgrade(card);
                 foreach (var card in single) Gain(card);
@@ -300,12 +306,19 @@ internal sealed class BlitzShopPreview
                     MaxHpDelta = 6, HealedHp = _maxHp + 6 - _currentHp
                 }, screenModels, gainedModels);
             case BlitzMerchantEntryType.RandomUpgrades:
-                // StableShuffle mutates its list, so hand it a copy of the
-                // deck the replay built.
-                var shuffled = new List<CardModel>(deck);
+                // The game filters the deck to upgradable cards FIRST, then
+                // shuffles that list — shuffling the whole deck (curses
+                // included) lands the same draw on different cards. The game
+                // upgrades the two picks in place; the prediction shows the
+                // upgraded names WITHOUT mutating the preview clone's deck.
+                var shuffled = deck.Where(card => card.IsUpgradable).ToList();
                 shuffled.StableShuffle(shops);
-                upgraded.AddRange(shuffled.Where(card => card.IsUpgradable).Take(2)
-                    .Select(ForecastItemDetails.Card));
+                foreach (var pick in shuffled.Take(2))
+                {
+                    var previewCard = _state.Run.CloneCard(pick);
+                    CardCmd.Upgrade(previewCard);
+                    upgraded.Add(ForecastItemDetails.Card(previewCard));
+                }
                 break;
             default:
                 return PickNeeding(entry, deck, shops, transformCandidates, transformSkip);
@@ -350,7 +363,9 @@ internal sealed class BlitzShopPreview
                 pickable = deck.Count(card => card.IsUpgradable);
                 break;
             case BlitzMerchantEntryType.CardRemoval:
-                pickable = deck.Count;
+                // Unremovable cards (Eternal, e.g. AscendersBane) are excluded
+                // by the game's own removal selection.
+                pickable = deck.Count(card => card.IsRemovable);
                 break;
             case BlitzMerchantEntryType.CardEnchant:
                 pickable = deck.Count(card => EnchantmentOf(entry) is { } enchant
@@ -358,8 +373,11 @@ internal sealed class BlitzShopPreview
                 break;
             case BlitzMerchantEntryType.Glam:
                 pickable = deck.Count(card => ModelDb.Enchantment<Glam>().CanEnchant(card));
+                // The curse lands only after a completed pick, so the display
+                // yield stays clean for the declined-probe comparison — but
+                // the replay (gainedModels) still draws it: a completed Glam
+                // predecessor moves the stream by exactly this curse.
                 var curse = RollCurse(shops);
-                gained.Add(ForecastItemDetails.Card(curse));
                 gainedModels.Add(curse);
                 break;
             default:
@@ -398,6 +416,14 @@ internal sealed class BlitzShopPreview
     private static CardCreationOptions RareOptions(CardPoolModel pool) => new(
         [pool], CardCreationSource.Other, CardRarityOddsType.Blitz,
         card => card.Rarity == CardRarity.Rare);
+
+    /// <summary>UpgradedRareCard's exact options: Uniform odds over the rare
+    /// filter, no upgrade roll — the game's own construction, one draw total.</summary>
+    private static CardCreationOptions UniformRareOptions(CardPoolModel pool) =>
+        new CardCreationOptions(
+            new List<CardPoolModel> { pool }, CardCreationSource.Other,
+            CardRarityOddsType.Uniform, card => card.Rarity == CardRarity.Rare)
+        .WithFlags(CardCreationFlags.NoUpgradeRoll);
 
     private static CardCreationOptions UniformOptions(CardPoolModel pool, CardRarity rarity) =>
         CardCreationOptions.ForNonCombatWithUniformOdds([pool], card => card.Rarity == rarity)
