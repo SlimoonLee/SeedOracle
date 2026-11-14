@@ -6,6 +6,7 @@ using MegaCrit.Sts2.Core.Entities.Merchant;
 using MegaCrit.Sts2.Core.Hooks;
 using MegaCrit.Sts2.Core.Helpers;
 using MegaCrit.Sts2.Core.Localization;
+using MegaCrit.Sts2.Core.Nodes;
 using MegaCrit.Sts2.Core.Localization.Fonts;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Nodes.CommonUi;
@@ -74,6 +75,44 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
     /// would otherwise fire one full run round-trip per hover.
     /// </summary>
     internal bool IsPricing => _buildPending || _stepping;
+
+    /// <summary>
+    /// Temporary hit diagnosis: while the window is visible, report which
+    /// control the viewport considers hovered and where the three header
+    /// tabs actually are. A mismatch between the drawn button and this rect
+    /// is exactly the reported "只有下方一点点可点" symptom.
+    /// </summary>
+    public override void _Process(double delta)
+    {
+        try
+        {
+            if (!Visible) return;
+            var now = Time.GetTicksMsec();
+            if (now - _lastHoverLog < 1500) return;
+            var mouse = GetViewport().GetMousePosition();
+            var local = GetGlobalTransform().AffineInverse() * mouse;
+            if (local.X < 0 || local.Y < 0 || local.X > Size.X || local.Y > Size.Y) return;
+            _lastHoverLog = now;
+            var hovered = GetViewport().GuiGetHoveredControl();
+            var hoveredInfo = hovered is null
+                ? "none"
+                : hovered.GetType().Name + " @" + hovered.GetGlobalRect().Position + " size=" + hovered.Size
+                  + " path=" + hovered.GetPath();
+            Entry.Logger.Info($"[BlitzHoverDiag] viewport={GetViewport().GetVisibleRect().Size} "
+                + $"panel={DescribeRect(this)} tabs=("
+                + DescribeRect(_plannerTab) + " " + DescribeRect(_panoramaTab) + " "
+                + DescribeRect(_collapse) + ") hovered=" + hoveredInfo);
+        }
+        catch (Exception)
+        {
+            // Diagnostics never interfere with the window.
+        }
+    }
+
+    private static string DescribeRect(Control control) =>
+        control.GetType().Name + "@" + control.GetGlobalRect().Position + "+" + control.Size;
+
+    private double _lastHoverLog;
 
     /// <summary>
     /// The hover answer from this panorama for a good bought after exactly the
@@ -261,8 +300,8 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
         button.AnchorBottom = 0f;
         button.OffsetLeft = left;
         button.OffsetRight = right;
-        button.OffsetTop = 10f;
-        button.OffsetBottom = 52f;
+        button.OffsetTop = 8f;
+        button.OffsetBottom = 48f;
         button.ToggleMode = true;
         return button;
     }
@@ -1150,12 +1189,21 @@ internal static class BlitzShopPlanPanel
                 return;
             }
 
-            var panel = node.GetNodeOrNull<BlitzShopPlanPanelControl>(BlitzShopPlanPanelControl.NodeName);
+            // The window lives under NRun's GlobalUi, added last: Godot picks
+            // GUI input by tree order (ZIndex only changes drawing), and
+            // GlobalUi comes after the room branch — so the window's buttons
+            // outrank the game's top bar for clicks as well as visually. Under
+            // the room's NMerchantInventory the top bar silently ate the upper
+            // part of every header button.
+            var host = NRun.Instance?.GlobalUi
+                       ?? throw new InvalidOperationException(
+                           "Seed Oracle could not locate the run's global UI host.");
+            var panel = host.GetNodeOrNull<BlitzShopPlanPanelControl>(BlitzShopPlanPanelControl.NodeName);
             if (!IsUsable(panel)) panel = null;
             if (panel is null)
             {
                 panel = new BlitzShopPlanPanelControl();
-                node.AddChild(panel);
+                host.AddChild(panel);
             }
 
             _currentPanel = panel;
