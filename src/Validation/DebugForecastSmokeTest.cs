@@ -61,6 +61,7 @@ internal static class DebugForecastSmokeTest
         RoutePerformanceRegressionTests.Run(run);
         PredictionAccuracyRegressionTests.Run(run);
         TreasureModeRegressionTests.Run(run);
+        BlitzMapForecastRegressionTests.Run(run);
         BlitzShopPlanRegressionTests.Run(run);
         RewardChoiceRegressionTests.Run(run);
         CausalChoiceRegressionTests.Run(run);

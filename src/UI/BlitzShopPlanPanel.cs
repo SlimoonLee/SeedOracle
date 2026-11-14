@@ -76,43 +76,6 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
     /// </summary>
     internal bool IsPricing => _buildPending || _stepping;
 
-    /// <summary>
-    /// Temporary hit diagnosis: while the window is visible, report which
-    /// control the viewport considers hovered and where the three header
-    /// tabs actually are. A mismatch between the drawn button and this rect
-    /// is exactly the reported "只有下方一点点可点" symptom.
-    /// </summary>
-    public override void _Process(double delta)
-    {
-        try
-        {
-            if (!Visible) return;
-            var now = Time.GetTicksMsec();
-            if (now - _lastHoverLog < 1500) return;
-            var mouse = GetViewport().GetMousePosition();
-            var local = GetGlobalTransform().AffineInverse() * mouse;
-            if (local.X < 0 || local.Y < 0 || local.X > Size.X || local.Y > Size.Y) return;
-            _lastHoverLog = now;
-            var hovered = GetViewport().GuiGetHoveredControl();
-            var hoveredInfo = hovered is null
-                ? "none"
-                : hovered.GetType().Name + " @" + hovered.GetGlobalRect().Position + " size=" + hovered.Size
-                  + " path=" + hovered.GetPath();
-            Entry.Logger.Info($"[BlitzHoverDiag] viewport={GetViewport().GetVisibleRect().Size} "
-                + $"panel={DescribeRect(this)} tabs=("
-                + DescribeRect(_plannerTab) + " " + DescribeRect(_panoramaTab) + " "
-                + DescribeRect(_collapse) + ") hovered=" + hoveredInfo);
-        }
-        catch (Exception)
-        {
-            // Diagnostics never interfere with the window.
-        }
-    }
-
-    private static string DescribeRect(Control control) =>
-        control.GetType().Name + "@" + control.GetGlobalRect().Position + "+" + control.Size;
-
-    private double _lastHoverLog;
 
     /// <summary>
     /// The hover answer from this panorama for a good bought after exactly the
