@@ -21,20 +21,10 @@ namespace SeedOracle.UI;
 /// </summary>
 internal static class BlitzShopYield
 {
-    private static readonly ConditionalWeakTable<MerchantInventory, Cache> Caches = new();
-
     // Which inventory a good was put on screen from. Recording it while the slot
     // binds means the hover talks about the shelf the player is looking at, even
     // if the run's inventory lookup changes shape between versions.
     private static readonly ConditionalWeakTable<BlitzMerchantEntry, Binding> Bindings = new();
-
-    private static readonly HashSet<string> Reported = new(StringComparer.Ordinal);
-
-    private sealed class Cache
-    {
-        internal int Choices = -1;
-        internal readonly Dictionary<int, string> Texts = new();
-    }
 
     private sealed class Binding
     {
@@ -176,6 +166,8 @@ internal static class BlitzShopYield
         Entry.Logger.Info($"[BlitzHover] no prediction for {entry.MerchantEntryType}: {reason}");
     }
 
+    private static readonly HashSet<string> Reported = new(StringComparer.Ordinal);
+
     internal static string Describe(MerchantInventory inventory, int index)
     {
         // The panorama table answers instantly and without clone purchases —
@@ -186,90 +178,16 @@ internal static class BlitzShopYield
         // probes are the prime suspect for the second-shop native crash.
         if (BlitzShopPlanPanel.TryDescribeRow(inventory, index, out var rowText))
             return rowText;
-        // While the panorama is still being priced, DO NOT probe: shop-entry
-        // hover bursts would fire one full run round-trip per hover — the
-        // native crash pattern. The table lands within a second.
+        // While the panorama is being priced (shop entry, post-purchase
+        // recompute), DO NOT probe: shop-entry hover bursts fire one full run
+        // round-trip per hover — the native crash pattern. The table lands
+        // within a second.
         if (BlitzShopPlanPanel.PanoramaPending)
             return Chinese ? "→ 预测生成中……" : "-> pricing…";
-
-        var cache = Caches.GetValue(inventory, _ => new Cache());
-        // Any purchase spends a pick and moves the streams the remaining goods
-        // read, so the whole shelf is re-probed after one.
-        if (cache.Choices != inventory.BlitzChoicesRemaining)
-        {
-            cache.Texts.Clear();
-            cache.Choices = inventory.BlitzChoicesRemaining;
-        }
-        if (cache.Texts.TryGetValue(index, out var cached)) return cached;
-
-        var service = new PlanningPredictionService();
-        var snapshot = service.Capture(service.CreateState(
-            (RunState)inventory.Player.RunState, inventory.Player));
-        var entry = inventory.BlitzEntries[index];
-
-        var here = BlitzMerchantProbe.PredictInPlace(service.Restore(snapshot), entry);
-        var text = BlitzYieldText.Render(here, Chinese);
-        var after = Afterwards(service, snapshot, inventory, index, text);
-        if (after.Count > 0) text = text + "\n" + string.Join("\n", after);
-
-        cache.Texts[index] = text;
-        return text;
-    }
-
-    /// <summary>
-    /// Every purchase advances <c>Shops</c>, so what a good gives changes the
-    /// moment something else is taken first. Rather than guess which order the
-    /// player will use, this answers the first step of all of them: buy that
-    /// good, then this one, and report the ones that landed elsewhere.
-    /// </summary>
-    private static IReadOnlyList<string> Afterwards(
-        PlanningPredictionService service,
-        PlanningPredictionService.StateSnapshot snapshot,
-        MerchantInventory inventory,
-        int index,
-        string here)
-    {
-        var entry = inventory.BlitzEntries[index];
-        var groups = new List<Alternative>();
-        for (var slot = 0; slot < inventory.BlitzEntries.Count; slot++)
-        {
-            if (slot == index) continue;
-            var first = inventory.BlitzEntries[slot];
-            if (!first.IsStocked) continue;
-
-            var then = BlitzMerchantProbe.PredictAfter(service.Restore(snapshot), first, entry);
-            // A good that needs a deck pick of its own cannot be priced as a
-            // predecessor without inventing that pick.
-            if (!then.Resolved) continue;
-
-            var text = BlitzYieldText.Render(then, Chinese);
-            var group = groups.FirstOrDefault(candidate => candidate.Text == text);
-            if (group is null) groups.Add(new Alternative(text, first.Title.GetFormattedText()));
-            else group.Names.Add(first.Title.GetFormattedText());
-        }
-
-        var changed = groups.Where(group => group.Text != here).ToList();
-        if (changed.Count == 0)
-        {
-            return groups.Count == 0
-                ? []
-                : [Chinese
-                    ? "→ 先买哪一件都不会改变这一项"
-                    : "-> the order does not change this one"];
-        }
-
-        return changed.Select(group =>
-            "→ " + (Chinese ? "先买 " : "after ")
-            + string.Join(Chinese ? "、" : ", ", group.Names.Distinct().Take(2))
-            + (group.Names.Distinct().Count() > 2 ? (Chinese ? " 等" : "") : "")
-            + (Chinese ? " 后：" : ": ")
-            + Compact(group.Text)).ToArray();
-    }
-
-    private sealed class Alternative(string text, string name)
-    {
-        internal string Text { get; } = text;
-        internal List<string> Names { get; } = [name];
+        // A current panorama without this exact row means the combination was
+        // outside the priced budget (e.g. hovering a disabled good). Honest
+        // answer, no probing.
+        return Chinese ? "→ 该组合暂无预测" : "-> no forecast for this combination";
     }
 
     /// <summary>

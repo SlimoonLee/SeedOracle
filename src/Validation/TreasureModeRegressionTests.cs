@@ -275,6 +275,13 @@ internal static class TreasureModeRegressionTests
 
         var lines = new List<string>();
         var watch = System.Diagnostics.Stopwatch.StartNew();
+        // The hover answers from the panorama table; register the window for
+        // this fixture the way RefreshSafely does in-game.
+        var panorama = BlitzShopPlanService.Compute(planning, state.Run, state.Player, inventory);
+        var panel = new UI.BlitzShopPlanPanelControl();
+        panel.Bind(inventory);
+        panel.RenderForTest(panorama);
+        UI.BlitzShopPlanPanel.UseForTest(panel);
         for (var index = 0; index < inventory.BlitzEntries.Count; index++)
         {
             var first = UI.BlitzShopYield.Describe(inventory, index);
@@ -297,8 +304,9 @@ internal static class TreasureModeRegressionTests
             Require(tip.Description.Length > first.Length,
                 "the in-shop hover dropped the game's own description");
         }
-        // Every hover also prices each "what if something else went first"
-        // branch, so the cost has to stay inside a hover, not a load screen.
+        UI.BlitzShopPlanPanel.ClearForTest(panel);
+        // Every hover prices each "what if something else went first" branch
+        // from the panorama table, so the cost has to stay inside a hover.
         var elapsed = watch.ElapsedMilliseconds;
         Require(elapsed < 6000, $"pricing the whole shelf took {elapsed} ms");
         Require(lines.Any(line => line.Contains("先买") || line.Contains("不会改变")),

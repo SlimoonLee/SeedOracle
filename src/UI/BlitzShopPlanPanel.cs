@@ -407,12 +407,16 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
             }
             catch (Exception error)
             {
+                // Leave the pricing state clean: a stuck "pricing" flag would
+                // keep every hover on the placeholder forever. The next shelf
+                // event re-arms a recompute normally.
+                _stepping = false;
                 _status.Text = Chinese ? "预测不可用" : "forecast unavailable";
                 Entry.Logger.Info("[BlitzPlan] compute failed: " + error.GetBaseException().Message);
             }
             _buildPending = false;
             _buildService = null;
-            _stepping = true;
+            if (!_stepping) return;
         }
 
         var enumeration = _enumeration;
@@ -1247,6 +1251,15 @@ internal static class BlitzShopPlanPanel
         if (!IsUsable(_currentPanel) || !ReferenceEquals(_currentPanel!.BoundInventory, inventory))
             return false;
         return _currentPanel.TryDescribeRowFrom(inventory, index, out text);
+    }
+
+    /// <summary>Test hook: registers a fixture panel so table-hover lookups
+    /// resolve. Clears when the fixture is done.</summary>
+    internal static void UseForTest(BlitzShopPlanPanelControl panel) => _currentPanel = panel;
+
+    internal static void ClearForTest(BlitzShopPlanPanelControl panel)
+    {
+        if (ReferenceEquals(_currentPanel, panel)) _currentPanel = null;
     }
 
     /// <summary>Whether the window's enumeration is still in flight; while it
