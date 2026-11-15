@@ -11,6 +11,18 @@ internal interface IRandomForeseerAdapter
 {
     IntegrationStatus Status { get; }
 
+    /// <summary>
+    /// Whether RF's internal-signature legacy path (initial/ordinal merchant)
+    /// is usable. RF loaders that fall back to an old inner variant degrade
+    /// this to false; the smoke gate then skips the legacy assertions.
+    /// </summary>
+    bool SupportsLegacyInternalSignatures => false;
+
+    /// <summary>Whether the RF event-content bridge is usable for map-hover
+    /// event contents.</summary>
+    bool SupportsEventContentBridge => false;
+
+
     Forecast<MerchantInventoryForecast> PredictInitialMerchant(Player player);
 
     Forecast<MerchantInventoryForecast> PredictMerchant(Player player, int futureVisitOrdinal);

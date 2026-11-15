@@ -34,16 +34,34 @@ public static class Entry
         SeedOracleData.Register();
         SeedOracleSettingsUi.Register();
 
-        var randomForeseer = new RandomForeseerAdapter();
-        var combatSolver = new CombatSolverAdapter();
-        RandomForeseer = randomForeseer;
-        CombatSolver = combatSolver;
-        MapForecasts = new MapForecastService(randomForeseer);
-
+        // The smoke runner must start regardless of adapter health: the gate
+        // has to produce a report even when Random Foreseer is broken.
         if (Smoke.SmokeRunner.IsRequested)
             Smoke.SmokeRunner.Begin();
 
-        Logger.Info($"[Integration] {randomForeseer.Status.Describe()}");
+        // Random Foreseer's loader can fail on its own (0.15.1 crashes on game
+        // 0.113.0 and reports a fallback version) — adapter construction must
+        // not take the rest of Seed Oracle down: the unavailable stub degrades
+        // every RF-delegated forecast while our own predictions (encounter,
+        // upcoming ancients/bosses, blitz window, audits) keep working.
+        try
+        {
+            var randomForeseer = new RandomForeseerAdapter();
+            RandomForeseer = randomForeseer;
+
+            Logger.Info($"[Integration] {randomForeseer.Status.Describe()}");
+        }
+        catch (Exception exception)
+        {
+            var root = exception.GetBaseException();
+            Logger.Info($"[Integration] adapter construction failed: {root}");
+            RandomForeseer = new RandomForeseerUnavailableAdapter();
+        }
+
+        var combatSolver = new CombatSolverAdapter();
+        CombatSolver = combatSolver;
+        MapForecasts = new MapForecastService(RandomForeseer);
+
         Logger.Info($"[Integration] {combatSolver.Status.Describe()}");
         if (!combatSolver.SupportsPreCombatForecast)
         {
