@@ -85,9 +85,11 @@ internal static class BlitzShopAudit
         var prefix = Purchased.ToArray();
         if (!Purchased.Contains(slot)) Purchased.Add(slot);
 
+        var deckVerdict = BlitzShopPlanPanel.PanoramaPending
+            ? "recomputing"
+            : "no-row";
         var preview = BlitzShopPlanPanel.CurrentRow(slot, prefix);
-        var deckVerdict = "no-row";
-        if (preview is not null && _deckBefore is not null)
+        if (!BlitzShopPlanPanel.PanoramaPending && preview is not null && _deckBefore is not null)
         {
             deckVerdict = preview.Purchased
                 ? preview.NeedsCardPick && preview.TransformChoices.Count > 0

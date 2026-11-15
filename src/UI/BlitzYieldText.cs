@@ -38,7 +38,10 @@ internal static class BlitzYieldText
             lines.Add("→ " + heading + string.Join(" / ", screen.Select(item => item.Name)));
         }
         Line(chinese ? "升级：" : "upgraded: ",
-            yield.UpgradedCards.Select(item => item.Name).ToArray());
+            yield.UpgradedCards
+                .OrderBy(item => item.Name, StringComparer.Ordinal)
+                .Select(item => item.Name)
+                .ToArray());
 
         var growth = new List<string>();
         if (yield.MaxHpDelta != 0)

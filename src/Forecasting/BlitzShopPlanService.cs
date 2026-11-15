@@ -9,8 +9,9 @@ namespace SeedOracle.Forecasting;
 /// a set, not a sequence: every purchase moves the streams by an amount that
 /// depends only on its entry type, so the position a good reads from is the sum
 /// over the set — order-invariant (docs/validation/blitz-shop-multi-purchase-2026-11-14.md).
-/// The one exception, the deck shuffle of the random-upgrades good, is surfaced
-/// as a note rather than folded into the model.
+/// Random-upgrade rows also carry conditional branches when a predecessor can
+/// change the deck. Every branch reuses the same Shops position and only varies
+/// the final eligible-card set.
 /// </summary>
 internal sealed record BlitzPrefixOutcome(IReadOnlyList<int> PrefixSlots, BlitzYieldForecast Yield)
 {

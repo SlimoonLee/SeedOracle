@@ -76,6 +76,9 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
     /// </summary>
     internal bool IsPricing => _buildPending || _stepping;
 
+    internal bool NeedsPricing => _panorama is null
+        || (_inventory is { } inventory && FingerprintOf(inventory) != _fingerprint);
+
 
     /// <summary>
     /// The hover answer from this panorama for a good bought after exactly the
@@ -229,23 +232,29 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
 
     private void ApplyExpansion(bool expanded, bool remember)
     {
-        if (_expanded == expanded && _body.Visible == expanded) return;
-        _expanded = expanded;
-        _body.Visible = expanded;
-        if (expanded)
+        var unchanged = _expanded == expanded && _body.Visible == expanded;
+        if (!unchanged)
         {
-            SetAnchor(Side.Bottom, 1f);
-            OffsetBottom = -36f;
-        }
-        else
-        {
-            SetAnchor(Side.Bottom, 0f);
-            OffsetBottom = OffsetTop + 64f;
+            _expanded = expanded;
+            _body.Visible = expanded;
+            if (expanded)
+            {
+                SetAnchor(Side.Bottom, 1f);
+                OffsetBottom = -36f;
+            }
+            else
+            {
+                SetAnchor(Side.Bottom, 0f);
+                OffsetBottom = OffsetTop + 64f;
+            }
         }
         if (remember) BlitzShopPlanPanel.RememberExpanded(expanded);
         // Unfolding a window that was folded before its first enumeration
         // still owes the player their data.
-        if (expanded && _panorama is null && !_buildPending && !_stepping) RequestCompute();
+        if (expanded && !_buildPending && !_stepping
+            && (_panorama is null
+                || (_inventory is { } inventory && FingerprintOf(inventory) != _fingerprint)))
+            RequestCompute();
     }
 
     /// <summary>A header tab with the item chips' construction: text-sized
@@ -268,6 +277,16 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
     {
         if (ReferenceEquals(_inventory, inventory)) return;
         Unbind();
+        // A single panel instance is reused across merchant screens. Its old
+        // panorama may have the same shelf fingerprint as the next shop, so
+        // inventory identity must invalidate the cached table before the next
+        // expansion can decide whether work is needed.
+        _panorama = null;
+        _fingerprint = null;
+        _enumeration = null;
+        _buildService = null;
+        _buildPending = false;
+        _stepping = false;
         _inventory = inventory;
         foreach (var entry in inventory.BlitzEntries)
         {
@@ -404,6 +423,7 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
                     (RunState)inventory.Player.RunState, inventory.Player);
                 preview.MeasureDeltas(inventory);
                 _enumeration = new BlitzShopPlanService.BlitzShopEnumeration(preview, inventory);
+                _stepping = true;
             }
             catch (Exception error)
             {
@@ -482,6 +502,26 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
             return good.Slot;
         }
         return -1;
+    }
+
+    internal int WishFirstRandomUpgradeChipForTest()
+    {
+        if (_panorama is null) return -1;
+        foreach (var good in _panorama.Goods)
+        {
+            var chip = ChipsOf(good).FirstOrDefault(candidate =>
+                candidate.RandomUpgradePaths.Count > 0);
+            if (chip is null) continue;
+            ToggleWish(good.Slot, chip);
+            return good.Slot;
+        }
+        return -1;
+    }
+
+    internal void ClearWishesForTest()
+    {
+        _wishes.Clear();
+        RefreshContent();
     }
 
     /// <summary>Rebuilds the visible page from the latest panorama and order.</summary>
@@ -568,6 +608,7 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
             var direct = good.Direct!;
             var directText = OutcomeText(direct.Yield, chinese);
             column.AddChild(BodyLabel((chinese ? "直接买：" : "buy outright: ") + directText));
+            AddRandomUpgradeVariants(column, direct.Yield, chinese);
 
             // The remaining prefixes, grouped by what they actually hand over:
             // identical results share one line, dead combinations are named as
@@ -588,15 +629,44 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
             foreach (var group in changed)
             {
                 if (shown >= MaxAlternativeLines) break;
+                var row = group.FirstOrDefault(candidate =>
+                    candidate.Yield.RandomUpgradeVariants.Count > 0) ?? group.First();
+                var outcome = row.Yield;
                 column.AddChild(BodyLabel(PrefixLabel(group.Select(o => o.PrefixSlots).ToList(), chinese)
-                    + OutcomeText(group.First().Yield, chinese)));
+                    + OutcomeText(outcome, chinese)));
+                AddRandomUpgradeVariants(column, outcome, chinese);
                 shown++;
             }
             if (changed.Count > shown)
                 column.AddChild(BodyLabel(chinese
                     ? $"……另有 {changed.Count - shown} 种不同结果，用“规划”页组合查看"
                     : $"...{changed.Count - shown} more distinct results; combine them in the planner"));
-            if (changed.Count == 0 && unresolved is null)
+
+            // A deck-changing predecessor can alter only the random-upgrade
+            // branch while leaving the compact base text identical to the
+            // outright row. Keep that prefix visible so the player sees which
+            // card choice must be made before buying the upgrader.
+            var variantGroups = groups
+                .Where(group => group.Key != unresolvedKey && !changed.Contains(group))
+                .Select(group => new
+                {
+                    Group = group,
+                    Outcome = group.FirstOrDefault(candidate =>
+                        candidate.Yield.RandomUpgradeVariants.Count > 0)
+                })
+                .Where(item => item.Outcome is not null)
+                .Take(MaxAlternativeLines)
+                .ToList();
+            foreach (var item in variantGroups)
+            {
+                var outcome = item.Outcome!.Yield;
+                column.AddChild(BodyLabel(
+                    PrefixLabel(item.Group.Select(o => o.PrefixSlots).ToList(), chinese)
+                    + OutcomeText(outcome, chinese)));
+                AddRandomUpgradeVariants(column, outcome, chinese);
+            }
+
+            if (changed.Count == 0 && variantGroups.Count == 0 && unresolved is null)
                 column.AddChild(BodyLabel(chinese
                     ? "先买哪几件都不会改变这一项"
                     : "no earlier purchase changes this one"));
@@ -608,6 +678,94 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
                     + " cannot complete, so no answer"));
         }
     }
+
+    private void AddRandomUpgradeVariants(
+        VBoxContainer column,
+        BlitzYieldForecast yield,
+        bool chinese)
+    {
+        if (yield.RandomUpgradeVariants.Count == 0) return;
+
+        var groups = yield.RandomUpgradeVariants
+            .GroupBy(variant => string.Join("|", variant.UpgradedCards
+                .OrderBy(card => card.Name, StringComparer.Ordinal)
+                .Select(DisplayCardName)))
+            .Take(MaxAlternativeLines)
+            .ToList();
+        foreach (var group in groups)
+        {
+            var choices = group.Take(3)
+                .Select(variant => FormatRandomUpgradeChoices(variant.Choices, chinese))
+                .ToList();
+            if (group.Count() > choices.Count)
+                choices.Add(chinese ? $"等 {group.Count()} 种选法" : $"{group.Count()} choices");
+            var result = string.Join(chinese ? "、" : ", ",
+                group.First().UpgradedCards
+                    .OrderBy(card => card.Name, StringComparer.Ordinal)
+                    .Select(DisplayCardName));
+            column.AddChild(BodyLabel(
+                (chinese ? "前置选项后自动升级：" : "after prior deck choices, upgrades: ")
+                + result + (chinese ? "（" : " (")
+                + string.Join(chinese ? "；" : "; ", choices)
+                + (chinese ? "）" : ")")));
+        }
+    }
+
+    private static string FormatRandomUpgradeChoices(
+        IReadOnlyList<BlitzRandomUpgradeChoice> choices,
+        bool chinese)
+    {
+        var buckets = new List<(int SourceSlot, List<BlitzRandomUpgradeChoice> Choices)>();
+        foreach (var choice in choices)
+        {
+            if (buckets.Count == 0 || buckets[^1].SourceSlot != choice.SourceSlot)
+                buckets.Add((choice.SourceSlot, []));
+            buckets[^1].Choices.Add(choice);
+        }
+
+        return string.Join(chinese ? "；" : "; ", buckets.Select(bucket =>
+        {
+            var actions = bucket.Choices.Select(choice =>
+            {
+                var action = FormatRandomUpgradeAction(choice, chinese);
+                return bucket.Choices.Count > 1 && choice.ScreenIndex >= 0
+                    ? (chinese ? $"第{choice.ScreenIndex + 1}组：" : $"screen {choice.ScreenIndex + 1}: ") + action
+                    : action;
+            });
+            return Glyph(bucket.SourceSlot)
+                + (chinese ? "（" : " (")
+                + string.Join(chinese ? "；" : "; ", actions)
+                + (chinese ? "）" : ")");
+        }));
+    }
+
+    private static string FormatRandomUpgradeAction(
+        BlitzRandomUpgradeChoice choice,
+        bool chinese)
+    {
+        if (choice.Card is null)
+            return chinese ? "跳过" : "skip";
+
+        var card = DisplayCardName(choice.Card);
+        if (choice.Kind == BlitzRandomUpgradeChoiceKind.Reward)
+            return chinese ? "选 " + card : "pick " + card;
+
+        var action = choice.Kind switch
+        {
+            BlitzRandomUpgradeChoiceKind.Remove => chinese ? "删" : "remove",
+            BlitzRandomUpgradeChoiceKind.Transform => chinese ? "变" : "transform",
+            BlitzRandomUpgradeChoiceKind.Upgrade => chinese ? "升" : "upgrade",
+            BlitzRandomUpgradeChoiceKind.Enchant => chinese ? "附" : "enchant",
+            _ => chinese ? "处理" : "apply"
+        };
+        return action + " " + card
+            + (choice.Result is null
+                ? ""
+                : (chinese ? "→" : " -> ") + DisplayCardName(choice.Result));
+    }
+
+    private static string DisplayCardName(ForecastItemDetails card) =>
+        card.IsUpgraded && !card.Name.EndsWith('+') ? card.Name + "+" : card.Name;
 
     /// <summary>"先买 X 后：" — one line for one group of prefixes sharing a result.</summary>
     private string PrefixLabel(IReadOnlyList<IReadOnlyList<int>> prefixes, bool chinese)
@@ -663,14 +821,19 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
     /// read different pools at the same draw), so a wish must keep them.
     /// </summary>
     private sealed record Chip(string Key, ForecastItemDetails Detail,
-        IReadOnlyList<string> TransformSources)
+        IReadOnlyList<string> TransformSources,
+        IReadOnlyList<RandomUpgradePath> RandomUpgradePaths)
     {
         public string Label => Detail.Name + (Detail.IsUpgraded && !Detail.Name.EndsWith('+') ? "+" : "");
 
         public static Chip Of(ForecastItemDetails detail, IEnumerable<string>? transformSources = null) =>
             new(detail.Kind + "|" + detail.Name + "|" + detail.IsUpgraded, detail,
-                (transformSources ?? []).ToList());
+                (transformSources ?? []).ToList(), []);
     }
+
+    private sealed record RandomUpgradePath(
+        IReadOnlyList<int> PrefixSlots,
+        BlitzRandomUpgradeVariant Variant);
 
     /// <summary>
     /// Every item any order of this visit can hand over through this good,
@@ -680,17 +843,22 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
     /// </summary>
     private static List<Chip> ChipsOf(BlitzPlanGood good)
     {
-        var chips = new Dictionary<string, (Chip Chip, List<string> Sources)>();
-        void Add(ForecastItemDetails item, string? transformSource = null)
+        var chips = new Dictionary<string, (Chip Chip, List<string> Sources, List<RandomUpgradePath> Paths)>();
+        void Add(
+            ForecastItemDetails item,
+            string? transformSource = null,
+            RandomUpgradePath? randomUpgradePath = null)
         {
             var probe = Chip.Of(item);
             if (!chips.TryGetValue(probe.Key, out var entry))
             {
-                entry = (probe, []);
+                entry = (probe, [], []);
                 chips[probe.Key] = entry;
             }
             if (transformSource is not null && !entry.Sources.Contains(transformSource))
                 entry.Sources.Add(transformSource);
+            if (randomUpgradePath is not null)
+                entry.Paths.Add(randomUpgradePath);
         }
         foreach (var outcome in good.Outcomes)
         {
@@ -702,10 +870,15 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
             foreach (var item in outcome.Yield.Relics) Add(item);
             foreach (var choice in outcome.Yield.TransformChoices)
                 Add(choice.Result, SourceLabel(choice));
+            foreach (var variant in outcome.Yield.RandomUpgradeVariants)
+                foreach (var item in variant.UpgradedCards)
+                    Add(item, randomUpgradePath: new RandomUpgradePath(
+                        outcome.PrefixSlots, variant));
         }
         return chips.Values.Select(entry => entry.Chip with
         {
-            TransformSources = entry.Sources
+            TransformSources = entry.Sources,
+            RandomUpgradePaths = entry.Paths
         }).ToList();
     }
 
@@ -714,7 +887,7 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
         choice.Source.Name + (choice.Source.IsUpgraded && !choice.Source.Name.EndsWith('+') ? "+" : "");
 
     private static bool ContainsItem(BlitzYieldForecast yield, Chip chip) =>
-        chip.TransformSources.Count > 0
+        (chip.TransformSources.Count > 0
             ? yield.TransformChoices.Any(choice =>
                 SameItem(choice.Result, chip.Detail)
                 && chip.TransformSources.Contains(SourceLabel(choice)))
@@ -726,7 +899,9 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
                     .Concat(yield.GainedCards)
                     .Concat(yield.UpgradedCards)
                     .Any(item => SameItem(item, chip.Detail))
-            };
+            })
+        || yield.RandomUpgradeVariants.Any(variant =>
+            variant.UpgradedCards.Any(item => SameItem(item, chip.Detail)));
 
     private static bool SameItem(ForecastItemDetails left, ForecastItemDetails right) =>
         left.Kind == right.Kind && left.Name == right.Name && left.IsUpgraded == right.IsUpgraded;
@@ -843,7 +1018,10 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
     private Button MakeChip(Chip chip, int slot, bool clickable)
     {
         var selected = _wishes.TryGetValue(slot, out var wished) && wished.ChipKey == chip.Key;
-        var button = PreCombatPanelStyles.CreateButton((selected ? "★ " : "") + chip.Label, 0f);
+        var label = chip.Label;
+        if (chip.RandomUpgradePaths.Count > 0)
+            label += Chinese ? "（分支）" : " (branch)";
+        var button = PreCombatPanelStyles.CreateButton((selected ? "★ " : "") + label, 0f);
         button.ToggleMode = clickable;
         button.ButtonPressed = selected;
         // Rarity colour over the shared button styles.
@@ -963,10 +1141,11 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
                 .OrderBy(prefix => prefix.Count)
                 .ThenBy(prefix => string.Join(",", prefix))
                 .ToList();
+            var hasRandomUpgradePaths = targetChip?.RandomUpgradePaths.Count > 0;
             var shownSolutions = 0;
             foreach (var set in sets)
             {
-                if (shownSolutions >= MaxAlternativeLines) break;
+                if (!hasRandomUpgradePaths && shownSolutions >= MaxAlternativeLines) break;
                 var shops = set.Sum(slot => panorama.StreamDeltas[slot].Shops);
                 var where = set.Count == 0
                     ? chinese ? "直接买" : "buy outright"
@@ -988,6 +1167,9 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
             _list.AddChild(BodyLabel(chinese
                 ? "（集合内任意顺序均可：同一集合过同样多的随机数，不同顺序只改变垫位货物自身的内容）"
                 : "(any order inside a set works: same stream advance; order only changes what the fillers give)"));
+
+            if (targetChip?.RandomUpgradePaths.Count > 0)
+                RenderRandomUpgradeWishPaths(targetChip, sets, chinese);
         }
 
         // The Crystal-Ball plan line: a header with the click count, then the
@@ -1040,11 +1222,45 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
             : $"{solution.ChoicesLeft} picks left"));
     }
 
+    private void RenderRandomUpgradeWishPaths(
+        Chip target,
+        IReadOnlyList<IReadOnlyList<int>> allowedPrefixes,
+        bool chinese)
+    {
+        static bool SamePrefix(IReadOnlyList<int> left, IReadOnlyList<int> right) =>
+            left.Count == right.Count && !left.Except(right).Any();
+
+        var paths = target.RandomUpgradePaths
+            .Where(path => allowedPrefixes.Any(prefix => SamePrefix(prefix, path.PrefixSlots)))
+            .OrderBy(path => path.PrefixSlots.Count)
+            .ThenBy(path => string.Join(",", path.PrefixSlots))
+            .ThenBy(path => string.Join("|", path.Variant.Choices.Select(choice =>
+                FormatRandomUpgradeAction(choice, chinese))))
+            .ToList();
+        if (paths.Count == 0) return;
+
+        _list.AddChild(BodyLabel(chinese
+            ? $"达到 {target.Label} 的所有选牌路径："
+            : $"all card-choice paths that produce {target.Label}:"));
+        foreach (var path in paths)
+        {
+            var prefix = path.PrefixSlots.Count == 0
+                ? chinese ? "直接买" : "buy outright"
+                : chinese
+                    ? "先买 " + DescribePrefix(path.PrefixSlots, chinese) + " 后再买"
+                    : "buy " + DescribePrefix(path.PrefixSlots, chinese) + " first, then";
+            var choices = FormatRandomUpgradeChoices(path.Variant.Choices, chinese);
+            _list.AddChild(BodyLabel(
+                "· " + prefix + (chinese ? "，" : ", ") + choices));
+        }
+    }
+
     /// <summary>The items one step hands over, as hoverable chips.</summary>
     private static List<Chip> ChipsOfYield(BlitzYieldForecast yield) => yield.CardScreens
         .SelectMany(screen => screen)
         .Concat(yield.GainedCards)
         .Concat(yield.UpgradedCards)
+        .Concat(yield.RandomUpgradeVariants.SelectMany(variant => variant.UpgradedCards))
         .Concat(yield.Potions)
         .Concat(yield.Relics)
         .GroupBy(item => item.Kind + "|" + item.Name + "|" + item.IsUpgraded)
@@ -1065,8 +1281,8 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
                     ? "· 需要选牌的前序货物按“自动选第一张候选”补全：选哪张不改变随机数推进，只改变你自己的结果"
                     : "· Deck-pick predecessors are completed with the first candidate: the pick's identity moves no stream",
                 "RandomUpgradesOrder" => chinese
-                    ? "· “自动升级”会洗整副牌库：若前面买过卡牌奖励并实际领牌，它的两张升级可能与此不同"
-                    : "· Random upgrades shuffle the deck: taking earlier card rewards can change its two upgrades",
+                    ? "· “自动升级”先筛选牌库中仍可升级的牌，再洗牌取两张；前置拿牌、删牌、变牌、升级或附魔会改变候选集合。蛋类遗物在奖励生成或卡牌加入牌库/变牌替换时可能直接强化卡牌，因此分支按实际最终牌状态计算；选牌完成后窗口会重算"
+                    : "· Random upgrades first filter cards that are still upgradable, then shuffle and take two. Earlier picks, removals, transforms, upgrades or enchants change that candidate set. Egg relics can upgrade cards during reward generation or when a card enters the deck after a pick or transform, so branches use the final card state; the window reprices after the choice",
                 "RewardTransform" => chinese
                     ? "· 变化表含前序卡牌奖励的候选牌：先从奖励里拿它，再送去变化即可得到所列结果"
                     : "· The transform table includes cards earlier rewards offered: take one from the reward, then transform it",
@@ -1265,7 +1481,8 @@ internal static class BlitzShopPlanPanel
     /// <summary>Whether the window's enumeration is still in flight; while it
     /// is, hovers wait for the table instead of probing.</summary>
     internal static bool PanoramaPending =>
-        IsUsable(_currentPanel) && _currentPanel!.IsPricing;
+        IsUsable(_currentPanel)
+        && (_currentPanel!.IsPricing || _currentPanel.NeedsPricing);
 
     /// <summary>
     /// The yield the window is currently promising for a good bought after

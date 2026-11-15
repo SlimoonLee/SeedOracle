@@ -235,6 +235,13 @@ internal sealed record BlitzYieldForecast
     /// <summary>Deck cards the purchase upgrades without asking.</summary>
     public IReadOnlyList<ForecastItemDetails> UpgradedCards { get; init; } = [];
 
+    /// <summary>
+    /// Conditional outcomes for an automatic-upgrade good when earlier choices
+    /// can change the deck. The native Shops stream is shared by every branch,
+    /// while the eligible-card set depends on the final card state.
+    /// </summary>
+    public IReadOnlyList<BlitzRandomUpgradeVariant> RandomUpgradeVariants { get; init; } = [];
+
     public int MaxHpDelta { get; init; }
     public int HealedHp { get; init; }
 
@@ -278,6 +285,26 @@ internal sealed record BlitzCardChoiceOutcome(ForecastItemDetails Source, Foreca
     /// <summary>For reward/curse sources, the shelf slot that provides them.</summary>
     public IReadOnlyList<int> ViaSlots { get; init; } = [];
 }
+
+internal enum BlitzRandomUpgradeChoiceKind
+{
+    Reward,
+    Remove,
+    Transform,
+    Upgrade,
+    Enchant
+}
+
+internal sealed record BlitzRandomUpgradeChoice(
+    int SourceSlot,
+    int ScreenIndex,
+    ForecastItemDetails? Card,
+    ForecastItemDetails? Result = null,
+    BlitzRandomUpgradeChoiceKind Kind = BlitzRandomUpgradeChoiceKind.Reward);
+
+internal sealed record BlitzRandomUpgradeVariant(
+    IReadOnlyList<BlitzRandomUpgradeChoice> Choices,
+    IReadOnlyList<ForecastItemDetails> UpgradedCards);
 
 
 internal sealed record MerchantChoiceBranch(string Condition, MerchantInventoryForecast Inventory)

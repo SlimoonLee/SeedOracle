@@ -503,8 +503,8 @@ internal static class DebugForecastSmokeTest
         var player = LocalContext.GetMe(run)
                      ?? throw new InvalidOperationException("Seed Oracle self-test could not obtain the local player.");
         // The legacy RF internal-signature path degrades when RF's loader
-        // reports a fallback version (0.15.1 on game 0.113.0) - the native
-        // generator checks in TreasureMode/BlitzMapForecast cover the actual
+        // reports a fallback variant - the native generator checks in
+        // TreasureMode/BlitzMapForecast cover the actual
         // predictions in that state.
         var legacyMerchantAvailable = Entry.RandomForeseer.SupportsLegacyInternalSignatures;
         Smoke.SmokeReport.Add($"merchant-legacy available={legacyMerchantAvailable}");
@@ -518,8 +518,8 @@ internal static class DebugForecastSmokeTest
             || merchant.Value.Relics.Count != 3
             || merchant.Value.Potions.Count != 3)
         {
-            // A degraded RF (0.15.1 loader reports a fallback version whose
-            // internals lack the legacy signatures) makes this legacy path
+            // A degraded RF loader whose internals lack the legacy signatures
+            // makes this legacy path
             // Unsupported - the native-generator checks elsewhere in the gate
             // cover the actual predictions in that state.
             if (legacyMerchantAvailable)

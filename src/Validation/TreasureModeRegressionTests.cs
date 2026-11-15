@@ -7,7 +7,9 @@ using MegaCrit.Sts2.Core.Entities.Merchant;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.HoverTips;
 using MegaCrit.Sts2.Core.Map;
+using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Cards;
+using MegaCrit.Sts2.Core.Models.Relics;
 using MegaCrit.Sts2.Core.Nodes.Screens.Shops;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Runs;
@@ -367,11 +369,50 @@ internal static class TreasureModeRegressionTests
         Require(lines.All(line => !line.Contains("结果随选择改变")),
             "the Blitz transform tooltip still says the result is unknown");
 
+        VerifyEggTransformAddHook(planning, live, player);
+
         Smoke.SmokeReport.Add(
             $"blitz-transform PASS: cards={declined.TransformChoices.Count} "
             + $"results={distinct} picked={promised} lines={lines.Count}");
         foreach (var line in lines)
             Smoke.SmokeReport.Add("blitz-transform | " + line);
+    }
+
+    private static void VerifyEggTransformAddHook(
+        PlanningPredictionService planning,
+        RunState live,
+        Player player)
+    {
+        var cases = new[]
+        {
+            typeof(MoltenEgg),
+            typeof(ToxicEgg),
+            typeof(FrozenEgg)
+        };
+        foreach (var relicType in cases)
+        {
+            var snapshot = planning.Capture(planning.CreateState(live, player));
+            snapshot.Run.GameMode = GameMode.Blitz;
+            var state = planning.Restore(snapshot);
+            var relic = ModelDb.AllRelics.First(candidate => candidate.GetType() == relicType);
+            planning.AddRelic(state, relic.Id);
+            using var isolation = ShadowIsolation.Enter(state.Player, automateRewards: true);
+            var entry = BlitzMerchantEntry.Generate(state.Player, BlitzMerchantEntryType.CardTransform);
+            var predicted = BlitzMerchantProbe.Predict(planning, state, entry);
+            Require(predicted.TransformChoices.Count > 0,
+                $"{relicType.Name} transform fixture had no candidates");
+            var bought = BlitzMerchantProbe.Predict(planning, state, entry, deckPick: 0);
+            var landed = bought.GainedCards.FirstOrDefault();
+            var promised = predicted.TransformChoices[0].Result;
+            Require(landed is not null
+                    && landed.Name == promised.Name
+                    && landed.IsUpgraded == promised.IsUpgraded,
+                $"{relicType.Name} changed the transformed card after the forecast: "
+                + $"promised={promised.Name}{(promised.IsUpgraded ? "+" : "")} "
+                + $"landed={landed?.Name ?? "<none>"}{(landed?.IsUpgraded == true ? "+" : "")}");
+        }
+
+        Smoke.SmokeReport.Add("blitz-transform-eggs PASS: add-hook parity=3");
     }
 
     /// <summary>

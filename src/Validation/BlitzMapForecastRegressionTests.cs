@@ -40,7 +40,7 @@ internal static class BlitzMapForecastRegressionTests
             .FirstOrDefault(rewardsVariant => rewardsVariant is { HasValue: true })
             ?.Value;
         // The reward drop details are delegated to Random Foreseer; when RF's
-        // own init is broken (0.15.1 on game 0.113.0, ambiguous SetAlignment
+        // own init is broken (for example, an incompatible SetAlignment
         // patch) they degrade to Unsupported while our encounter and route
         // summary stay up.
         var rfHealthy = rewards is not null;

@@ -227,8 +227,8 @@ internal static class PredictionAccuracyRegressionTests
             : Entry.RandomForeseer;
         var transformPlayer = LocalContext.GetMe(live) ?? live.Players[0];
         var forecast = transformForeseer.PredictEventContents(transformPlayer, [RoomType.Event], ModelDb.Event<AromaOfChaos>());
-        // When Random Foreseer's own init is broken (0.15.1 on game 0.113.0),
-        // the degraded adapter reports Unsupported — the accuracy CONTRACT can
+        // When Random Foreseer's own init is broken, the degraded adapter
+        // reports Unsupported — the accuracy CONTRACT can
         // only be verified against a working RF. The smoke report records the
         // degradation so a gate run on a broken RF is distinguishable from a
         // real regression.

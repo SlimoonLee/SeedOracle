@@ -514,8 +514,9 @@ internal static class SmokeRunner
                 LiveFingerprint.Capture(RunManager.Instance.DebugOnlyGetState() ?? throw new InvalidOperationException("live run ended")));
             if (liveDifference is not null || failures > 0)
             {
-                // A degraded Random Foreseer (broken loader reporting a fallback
-                // version) starves the combat simulation of its startup
+                // A degraded Random Foreseer (for example, a loader whose
+                // selected variant failed its host-game patches) starves the
+                // combat simulation of its startup
                 // snapshot - report the skip instead of failing the audit; the
                 // gate's remaining checks still verify the rest of the mod.
                 if (Entry.RandomForeseer is RandomForeseerUnavailableAdapter

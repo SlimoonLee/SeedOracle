@@ -5,6 +5,7 @@ using MegaCrit.Sts2.Core.Entities.Merchant;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Extensions;
 using MegaCrit.Sts2.Core.Factories;
+using MegaCrit.Sts2.Core.Hooks;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Blitz;
 using MegaCrit.Sts2.Core.Models.CardPools;
@@ -110,6 +111,13 @@ internal sealed class BlitzShopPreview
                 .Select(card => (Card: card, Origin: "deck", Via: Array.Empty<int>()))
                 .ToList();
             var transformSkip = 0;
+            var deckBranches = inventory.BlitzEntries[slot].MerchantEntryType
+                == BlitzMerchantEntryType.RandomUpgrades
+                ? new List<DeckBranchState>
+                {
+                    new(CloneDeck(_deck), [])
+                }
+                : null;
             foreach (var before in prefix.OrderBy(other => other))
             {
                 var entry = inventory.BlitzEntries[before];
@@ -117,7 +125,11 @@ internal sealed class BlitzShopPreview
                 // Generating the predecessor at its own offset IS its replay:
                 // same draws, same curse into the deck, same relic pulls.
                 var replay = Generate(entry,
-                    At(_shops, offset), At(_rewards, offset), deck);
+                    At(_shops, offset), At(_rewards, offset), deck,
+                    rewardSourceSlot: before);
+                if (deckBranches is not null)
+                    deckBranches = AdvanceDeckBranches(
+                        deckBranches, entry, replay, before, transformSkip);
                 foreach (var gained in replay.GainedModels)
                 {
                     // Pool-canonical cards (curses) reject even an Owner read
@@ -129,8 +141,11 @@ internal sealed class BlitzShopPreview
                         candidates.Add((owned, "curse", [before]));
                 }
                 foreach (var offered in replay.ScreenModels)
-                    if (offered.IsTransformable)
-                        candidates.Add((offered, "reward", [before]));
+                {
+                    var effective = CardAddedToDeck(offered);
+                    if (effective.IsTransformable)
+                        candidates.Add((effective, "reward", [before]));
+                }
                 // Each completed transform draws the transformation stream
                 // once, so a later transform reads one position further.
                 if (entry.MerchantEntryType == BlitzMerchantEntryType.CardTransform)
@@ -140,7 +155,7 @@ internal sealed class BlitzShopPreview
             var shops = At(_shops, OffsetOf(inventory, prefix, TargetRank));
             var rewards = At(_rewards, RewardsOffsetOf(inventory, prefix, TargetRank));
             return Generate(inventory.BlitzEntries[slot], shops, rewards, deck,
-                candidates, transformSkip).Yield;
+                candidates, transformSkip, priorDeckBranches: deckBranches).Yield;
         }
         catch (Exception error)
         {
@@ -189,10 +204,22 @@ internal sealed class BlitzShopPreview
     /// models behind it — screen cards are candidates a later transform could
     /// act on, gained models are what joins the deck (curses, granted cards).
     /// </summary>
+    private sealed record RewardScreen(
+        int SourceSlot,
+        int ScreenIndex,
+        IReadOnlyList<CardModel> Cards);
+
+    private sealed record DeckBranchState(
+        List<CardModel> Deck,
+        List<BlitzRandomUpgradeChoice> Choices);
+
     private sealed record Generation(
         BlitzYieldForecast Yield,
         List<CardModel> ScreenModels,
-        List<CardModel> GainedModels);
+        List<CardModel> GainedModels)
+    {
+        internal IReadOnlyList<RewardScreen> RewardScreens { get; init; } = [];
+    }
 
     private Generation Generate(
         BlitzMerchantEntry entry,
@@ -200,20 +227,27 @@ internal sealed class BlitzShopPreview
         Rng rewards,
         IReadOnlyList<CardModel> deck,
         IReadOnlyList<(CardModel Card, string Origin, int[] Via)>? transformCandidates = null,
-        int transformSkip = 0)
+        int transformSkip = 0,
+        int rewardSourceSlot = -1,
+        IReadOnlyList<DeckBranchState>? priorDeckBranches = null)
     {
         var screens = new List<IReadOnlyList<ForecastItemDetails>>();
         var screenModels = new List<CardModel>();
+        var rewardScreens = new List<RewardScreen>();
         var gained = new List<ForecastItemDetails>();
         var gainedModels = new List<CardModel>();
         var upgraded = new List<ForecastItemDetails>();
         var relics = new List<ForecastItemDetails>();
         var potions = new List<ForecastItemDetails>();
+        var randomUpgradeVariants = new List<BlitzRandomUpgradeVariant>();
 
         void ScreenCards(List<CardModel> models)
         {
             screenModels.AddRange(models);
             screens.Add(Described(models));
+            if (rewardSourceSlot >= 0)
+                rewardScreens.Add(new RewardScreen(
+                    rewardSourceSlot, screens.Count - 1, models.ToArray()));
         }
 
         void Gain(CardModel model)
@@ -311,6 +345,7 @@ internal sealed class BlitzShopPreview
                 // included) lands the same draw on different cards. The game
                 // upgrades the two picks in place; the prediction shows the
                 // upgraded names WITHOUT mutating the preview clone's deck.
+                var shopsBeforeUpgrade = shops.ToSerializable();
                 var shuffled = deck.Where(card => card.IsUpgradable).ToList();
                 shuffled.StableShuffle(shops);
                 foreach (var pick in shuffled.Take(2))
@@ -319,6 +354,9 @@ internal sealed class BlitzShopPreview
                     CardCmd.Upgrade(previewCard);
                     upgraded.Add(ForecastItemDetails.Card(previewCard));
                 }
+                if (priorDeckBranches is { Count: > 0 })
+                    randomUpgradeVariants.AddRange(
+                        BuildRandomUpgradeVariants(priorDeckBranches, shopsBeforeUpgrade));
                 break;
             default:
                 return PickNeeding(entry, deck, shops, transformCandidates, transformSkip);
@@ -331,9 +369,234 @@ internal sealed class BlitzShopPreview
             CardScreens = screens,
             GainedCards = gained,
             UpgradedCards = upgraded,
+            RandomUpgradeVariants = randomUpgradeVariants,
             Relics = relics,
             Potions = potions
-        }, screenModels, gainedModels);
+        }, screenModels, gainedModels)
+        {
+            RewardScreens = rewardScreens
+        };
+    }
+
+    private const int MaxRandomUpgradeVariants = 32;
+
+    /// <summary>
+    /// Carry the deck-changing choices of a completed predecessor forward. A
+    /// reward pick, removal, transform, upgrade or enchant changes the deck
+    /// read by a later good, while none of those choices advances Shops.
+    /// </summary>
+    private List<DeckBranchState> AdvanceDeckBranches(
+        IReadOnlyList<DeckBranchState> input,
+        BlitzMerchantEntry entry,
+        Generation replay,
+        int sourceSlot,
+        int transformSkip)
+    {
+        var states = input.Select(state =>
+        {
+            var deck = state.Deck.ToList();
+            foreach (var gained in replay.GainedModels)
+                deck.Add(CloneForBranch(gained));
+            return new DeckBranchState(deck, new List<BlitzRandomUpgradeChoice>(state.Choices));
+        }).ToList();
+
+        foreach (var screen in replay.RewardScreens
+                     .OrderBy(screen => screen.SourceSlot)
+                     .ThenBy(screen => screen.ScreenIndex))
+        {
+            var next = new List<DeckBranchState>();
+            foreach (var state in states)
+            {
+                var skippedChoices = new List<BlitzRandomUpgradeChoice>(state.Choices)
+                {
+                    new(screen.SourceSlot, screen.ScreenIndex, null)
+                };
+                next.Add(new DeckBranchState(state.Deck, skippedChoices));
+
+                foreach (var card in screen.Cards)
+                {
+                    var effective = CardAddedToDeck(card);
+                    var selected = new List<CardModel>(state.Deck) { effective };
+                    var choices = new List<BlitzRandomUpgradeChoice>(state.Choices)
+                    {
+                        new(
+                            screen.SourceSlot,
+                            screen.ScreenIndex,
+                            ForecastItemDetails.Card(effective))
+                    };
+                    next.Add(new DeckBranchState(selected, choices));
+                    if (next.Count >= MaxRandomUpgradeVariants) break;
+                }
+
+                if (next.Count >= MaxRandomUpgradeVariants) break;
+            }
+
+            states = next.Take(MaxRandomUpgradeVariants).ToList();
+        }
+
+        return entry.MerchantEntryType switch
+        {
+            BlitzMerchantEntryType.CardRemoval => ExpandCardRemoval(states, sourceSlot),
+            BlitzMerchantEntryType.CardTransform => ExpandCardTransform(states, sourceSlot, transformSkip),
+            BlitzMerchantEntryType.CardUpgrade => ExpandCardUpgrade(states, sourceSlot),
+            BlitzMerchantEntryType.CardEnchant => ExpandCardEnchant(states, sourceSlot, entry),
+            _ => states
+        };
+    }
+
+    private List<DeckBranchState> ExpandCardRemoval(
+        IReadOnlyList<DeckBranchState> states,
+        int sourceSlot)
+    {
+        var next = new List<DeckBranchState>();
+        foreach (var state in states)
+        {
+            foreach (var card in state.Deck.Where(card => card.IsRemovable).ToList())
+            {
+                var deck = state.Deck.ToList();
+                deck.RemoveAt(deck.FindIndex(candidate => ReferenceEquals(candidate, card)));
+                var choices = new List<BlitzRandomUpgradeChoice>(state.Choices)
+                {
+                    new(sourceSlot, -1, ForecastItemDetails.Card(card),
+                        Kind: BlitzRandomUpgradeChoiceKind.Remove)
+                };
+                next.Add(new DeckBranchState(deck, choices));
+                if (next.Count >= MaxRandomUpgradeVariants) return next;
+            }
+        }
+        return next;
+    }
+
+    private List<DeckBranchState> ExpandCardTransform(
+        IReadOnlyList<DeckBranchState> states,
+        int sourceSlot,
+        int transformSkip)
+    {
+        var next = new List<DeckBranchState>();
+        foreach (var state in states)
+        {
+            foreach (var card in state.Deck.Where(card => card.IsTransformable).ToList())
+            {
+                CardModel result;
+                try
+                {
+                    var transformRng = At(_transformations, transformSkip);
+                    result = CardAddedToDeck(CardFactory.CreateRandomCardForTransform(
+                        card, isInCombat: false,
+                        new Rng(transformRng.ToSerializable())));
+                }
+                catch (Exception)
+                {
+                    continue;
+                }
+
+                var deck = state.Deck.ToList();
+                deck[deck.FindIndex(candidate => ReferenceEquals(candidate, card))] = result;
+                var choices = new List<BlitzRandomUpgradeChoice>(state.Choices)
+                {
+                    new(sourceSlot, -1, ForecastItemDetails.Card(card),
+                        ForecastItemDetails.Card(result), BlitzRandomUpgradeChoiceKind.Transform)
+                };
+                next.Add(new DeckBranchState(deck, choices));
+                if (next.Count >= MaxRandomUpgradeVariants) return next;
+            }
+        }
+        return next;
+    }
+
+    private List<DeckBranchState> ExpandCardUpgrade(
+        IReadOnlyList<DeckBranchState> states,
+        int sourceSlot)
+    {
+        var next = new List<DeckBranchState>();
+        foreach (var state in states)
+        {
+            foreach (var card in state.Deck.Where(card => card.IsUpgradable).ToList())
+            {
+                var upgraded = CloneForBranch(card);
+                CardCmd.Upgrade(upgraded);
+                var deck = state.Deck.ToList();
+                deck[deck.FindIndex(candidate => ReferenceEquals(candidate, card))] = upgraded;
+                var choices = new List<BlitzRandomUpgradeChoice>(state.Choices)
+                {
+                    new(sourceSlot, -1, ForecastItemDetails.Card(card),
+                        ForecastItemDetails.Card(upgraded), BlitzRandomUpgradeChoiceKind.Upgrade)
+                };
+                next.Add(new DeckBranchState(deck, choices));
+                if (next.Count >= MaxRandomUpgradeVariants) return next;
+            }
+        }
+        return next;
+    }
+
+    private List<DeckBranchState> ExpandCardEnchant(
+        IReadOnlyList<DeckBranchState> states,
+        int sourceSlot,
+        BlitzMerchantEntry entry)
+    {
+        var enchantment = EnchantmentOf(entry);
+        if (enchantment is null) return [];
+
+        var next = new List<DeckBranchState>();
+        foreach (var state in states)
+        {
+            foreach (var card in state.Deck.Where(card => enchantment.Value.Item1.CanEnchant(card)).ToList())
+            {
+                var enchanted = CloneForBranch(card);
+                CardCmd.Enchant(enchantment.Value.Item1.ToMutable(), enchanted, enchantment.Value.Item2);
+                var deck = state.Deck.ToList();
+                deck[deck.FindIndex(candidate => ReferenceEquals(candidate, card))] = enchanted;
+                var choices = new List<BlitzRandomUpgradeChoice>(state.Choices)
+                {
+                    new(sourceSlot, -1, ForecastItemDetails.Card(card),
+                        ForecastItemDetails.Card(enchanted), BlitzRandomUpgradeChoiceKind.Enchant)
+                };
+                next.Add(new DeckBranchState(deck, choices));
+                if (next.Count >= MaxRandomUpgradeVariants) return next;
+            }
+        }
+        return next;
+    }
+
+    private IReadOnlyList<BlitzRandomUpgradeVariant> BuildRandomUpgradeVariants(
+        IReadOnlyList<DeckBranchState> states,
+        SerializableRng shopsBefore)
+    {
+        var variants = new List<BlitzRandomUpgradeVariant>(states.Count);
+        foreach (var state in states)
+        {
+            var branchRng = new Rng(shopsBefore);
+            var shuffled = state.Deck.Where(card => card.IsUpgradable).ToList();
+            shuffled.StableShuffle(branchRng);
+            var branchUpgrades = shuffled.Take(2)
+                .Select(card =>
+                {
+                    var previewCard = _state.Run.CloneCard(card);
+                    CardCmd.Upgrade(previewCard);
+                    return ForecastItemDetails.Card(previewCard);
+                })
+                .ToList();
+            variants.Add(new BlitzRandomUpgradeVariant(state.Choices, branchUpgrades));
+        }
+
+        return variants;
+    }
+
+    private List<CardModel> CloneDeck(IEnumerable<CardModel> cards) =>
+        cards.Select(CloneForBranch).ToList();
+
+    private CardModel CloneForBranch(CardModel card) =>
+        card.IsMutable ? _state.Run.CloneCard(card) : _state.Run.CreateCard(card, _player);
+
+    /// <summary>
+    /// CardPileCmd.Add and CardCmd.Transform both run the deck-add hooks after
+    /// the generated card is chosen. This covers the three Egg relics and
+    /// other add-time relics such as Fresnel Lens without consuming a stream.
+    /// </summary>
+    private CardModel CardAddedToDeck(CardModel card)
+    {
+        var owned = CloneForBranch(card);
+        return Hook.ModifyCardBeingAddedToDeck(_state.Run, owned, out _);
     }
 
     private Generation PickNeeding(
@@ -468,7 +731,7 @@ internal sealed class BlitzShopPreview
     /// <summary>The last transform draw that failed and why, for diagnostics.</summary>
     internal static string? LastTransformError { get; private set; }
 
-    private static IReadOnlyList<BlitzCardChoiceOutcome> TransformTable(
+    private IReadOnlyList<BlitzCardChoiceOutcome> TransformTable(
         IEnumerable<(CardModel Card, string Origin, int[] Via)> candidates, Rng transformStream)
     {
         var outcomes = new List<BlitzCardChoiceOutcome>();
@@ -476,8 +739,9 @@ internal sealed class BlitzShopPreview
         {
             try
             {
-                var result = CardFactory.CreateRandomCardForTransform(
-                    candidate.Card, isInCombat: false, new Rng(transformStream.ToSerializable()));
+                var result = CardAddedToDeck(CardFactory.CreateRandomCardForTransform(
+                    candidate.Card, isInCombat: false, new Rng(transformStream.ToSerializable())));
+
                 outcomes.Add(new BlitzCardChoiceOutcome(
                     ForecastItemDetails.Card(candidate.Card), ForecastItemDetails.Card(result))
                 {

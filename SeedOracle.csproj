@@ -21,6 +21,14 @@
     <RitsuLibCompileDir Condition="'$(RitsuLibCompileDir)' == ''">$(RitsuLibDir)</RitsuLibCompileDir>
     <RitsuLibSharedDir Condition="'$(RitsuLibSharedDir)' == '' and Exists('$(RitsuLibRoot)\shared')">$(RitsuLibRoot)\shared</RitsuLibSharedDir>
     <RandomForeseerDir Condition="'$(RandomForeseerDir)' == ''">$(Sts2Dir)\mods\RandomForeseer</RandomForeseerDir>
+    <!-- The Workshop package root contains a loader and versioned lib/<version>
+         directories. Accept either that root or a selected lib directory, and
+         recover from a stale local.props version by falling back to the root
+         loader for the reflection-only compile reference. -->
+    <RandomForeseerRoot Condition="'$(RandomForeseerRoot)' == '' and Exists('$(RandomForeseerDir)\RandomForeseer.json')">$(RandomForeseerDir)</RandomForeseerRoot>
+    <RandomForeseerRoot Condition="'$(RandomForeseerRoot)' == '' and Exists('$(RandomForeseerDir)\..\..\RandomForeseer.json')">$(RandomForeseerDir)\..\..</RandomForeseerRoot>
+    <RandomForeseerReferencePath Condition="'$(RandomForeseerReferencePath)' == '' and Exists('$(RandomForeseerDir)\RandomForeseer.dll')">$(RandomForeseerDir)\RandomForeseer.dll</RandomForeseerReferencePath>
+    <RandomForeseerReferencePath Condition="'$(RandomForeseerReferencePath)' == '' and Exists('$(RandomForeseerRoot)\RandomForeseer.dll')">$(RandomForeseerRoot)\RandomForeseer.dll</RandomForeseerReferencePath>
     <CombatSolverDir Condition="'$(CombatSolverDir)' == ''">$(Sts2Dir)\mods\CombatSolver</CombatSolverDir>
     <ModOutputDir Condition="'$(ModOutputDir)' == ''">$(Sts2Dir)\mods\SeedOracle</ModOutputDir>
     <CopyModOnBuild Condition="'$(CopyModOnBuild)' == ''">true</CopyModOnBuild>
@@ -41,7 +49,7 @@
     <Reference Include="STS2-RitsuLib.Shared" HintPath="$(RitsuLibSharedDir)\STS2-RitsuLib.Shared.dll" Private="false" Condition="Exists('$(RitsuLibSharedDir)\STS2-RitsuLib.Shared.dll')" />
     <Reference Include="STS2-RitsuLib.Ui" HintPath="$(RitsuLibSharedDir)\STS2-RitsuLib.Ui.dll" Private="false" Condition="Exists('$(RitsuLibSharedDir)\STS2-RitsuLib.Ui.dll')" />
     <Reference Include="STS2-RitsuLib.Settings" HintPath="$(RitsuLibSharedDir)\STS2-RitsuLib.Settings.dll" Private="false" Condition="Exists('$(RitsuLibSharedDir)\STS2-RitsuLib.Settings.dll')" />
-    <Reference Include="RandomForeseer" HintPath="$(RandomForeseerDir)\RandomForeseer.dll" Private="false" />
+    <Reference Include="RandomForeseer" HintPath="$(RandomForeseerReferencePath)" Private="false" Condition="Exists('$(RandomForeseerReferencePath)')" />
     <Reference Include="CombatSolver" HintPath="$(CombatSolverDir)\CombatSolver.dll" Private="false" />
   </ItemGroup>
 
@@ -58,7 +66,7 @@
     <Error Condition="!Exists('$(RitsuLibCompileDir)\STS2-RitsuLib.dll')" Text="Could not find the RitsuLib compile-time assembly under '$(RitsuLibCompileDir)'. Set RitsuLibDir to the RitsuLib root or an API-specific compat directory." />
     <Error Condition="'$(RitsuLibRoot)' != '' and !Exists('$(RitsuLibCompileDir)\STS2-RitsuLib.Runtime.dll')" Text="RitsuLib root was detected, but the $(RitsuLibReferenceTarget) compat runtime is missing under '$(RitsuLibCompileDir)'." />
     <Error Condition="'$(RitsuLibRoot)' != '' and !Exists('$(RitsuLibSharedDir)\STS2-RitsuLib.Shared.dll')" Text="RitsuLib 0.6+ shared assemblies are missing under '$(RitsuLibSharedDir)'. Use a complete RitsuLib installation." />
-    <Error Condition="!Exists('$(RandomForeseerDir)\RandomForeseer.dll')" Text="Could not find Random Foreseer under '$(RandomForeseerDir)'." />
+    <Error Condition="'$(RandomForeseerReferencePath)' == ''" Text="Could not find Random Foreseer under '$(RandomForeseerDir)' or its Workshop root." />
     <Error Condition="!Exists('$(CombatSolverDir)\CombatSolver.dll')" Text="Could not find Combat Solver under '$(CombatSolverDir)'." />
   </Target>
 

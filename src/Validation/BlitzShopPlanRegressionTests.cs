@@ -48,6 +48,7 @@ internal static class BlitzShopPlanRegressionTests
         VerifySequenceLookup(planning, state, inventory, panorama);
         VerifyDedupe(planning, state);
         VerifyRewardTransform(planning, state);
+        VerifyRandomUpgradeDeckBranches(planning, state);
         VerifyAllTypesParity(planning, live, state);
         VerifyWishSolver(inventory);
         VerifyPanel(state, inventory, panorama);
@@ -331,6 +332,45 @@ internal static class BlitzShopPlanRegressionTests
             + $"table={transformRow.Yield.TransformChoices.Count} pickable={transformRow.Yield.PickableCards}");
     }
 
+    private static void VerifyRandomUpgradeDeckBranches(
+        PlanningPredictionService planning,
+        PlanningPredictionService.State state)
+    {
+        using var isolation = ShadowIsolation.Enter(state.Player, automateRewards: true);
+        var entries = new List<BlitzMerchantEntry>
+        {
+            BlitzMerchantEntry.Generate(state.Player, BlitzMerchantEntryType.CardRewards),
+            BlitzMerchantEntry.Generate(state.Player, BlitzMerchantEntryType.CardRemoval),
+            BlitzMerchantEntry.Generate(state.Player, BlitzMerchantEntryType.CardTransform),
+            BlitzMerchantEntry.Generate(state.Player, BlitzMerchantEntryType.RandomUpgrades)
+        };
+        var inventory = new MerchantInventory(state.Player, [], [], [], [], null, entries);
+        inventory.Setup();
+        using var registration = ShadowIsolation.UseMerchantInventories([inventory]);
+
+        var preview = new BlitzShopPreview(planning, state.Run, state.Player);
+        preview.MeasureDeltas(inventory);
+        var panorama = BlitzShopPlanService.Compute(preview, inventory);
+        var random = panorama.GoodAt(3);
+        var reward = random?.ForPrefix([0]);
+        var removal = random?.ForPrefix([1]);
+        var transform = random?.ForPrefix([2]);
+        Require(reward?.Yield.RandomUpgradeVariants.Count > 1,
+            "a card reward before RandomUpgrades produced no choice branches");
+        Require(removal?.Yield.RandomUpgradeVariants.Any(variant =>
+                variant.Choices.Any(choice => choice.Kind == BlitzRandomUpgradeChoiceKind.Remove)) == true,
+            "a card removal before RandomUpgrades did not change the deck branches");
+        Require(transform?.Yield.RandomUpgradeVariants.Any(variant =>
+                variant.Choices.Any(choice => choice.Kind == BlitzRandomUpgradeChoiceKind.Transform
+                    && choice.Result is not null)) == true,
+            "a card transform before RandomUpgrades did not carry its replacement card");
+
+        Smoke.SmokeReport.Add(
+            $"blitz-random-deck-branches PASS: reward={reward!.Yield.RandomUpgradeVariants.Count} "
+            + $"remove={removal!.Yield.RandomUpgradeVariants.Count} "
+            + $"transform={transform!.Yield.RandomUpgradeVariants.Count}");
+    }
+
     /// <summary>
     /// Direct generation vs the game's real purchase path for EVERY entry
     /// type — the shelf-random parity gate can go a whole smoke without
@@ -522,6 +562,11 @@ internal static class BlitzShopPlanRegressionTests
             "the panorama page did not render the outright answers");
         Require(panoramaLines.Any(line => line.Contains("①") || line.Contains("②")),
             "the panorama page did not render any good headings");
+        if (panorama.Goods.Any(good => good.Outcomes.Any(outcome =>
+                outcome.Yield.RandomUpgradeVariants.Count > 0)))
+            Require(panoramaLines.Any(line => line.Contains("前置选项后自动升级")
+                    || line.Contains("after prior deck choices")),
+                "random-upgrade deck branches were computed but hidden by an identical base result");
 
         panel.SwitchToPlannerForTest();
         var plannerLines = Labels(panel);
@@ -541,6 +586,16 @@ internal static class BlitzShopPlanRegressionTests
         Require(solvedLines.Any(line => line.Contains("✓")),
             "the solved plan did not mark the wished step");
         panel.WishForTest(wishedSlot);
+
+        var randomWishSlot = panel.WishFirstRandomUpgradeChipForTest();
+        if (randomWishSlot >= 0)
+        {
+            var randomWishLines = Labels(panel);
+            Require(randomWishLines.Any(line => line.Contains("所有选牌路径")
+                    || line.Contains("all card-choice paths")),
+                "a random-upgrade target did not list the card-choice paths that produce it");
+            panel.ClearWishesForTest();
+        }
 
         // Folding must leave a visible title bar, not an unfindable window. The
         // manager shows the panel; the fold only touches its own body.
@@ -596,6 +651,20 @@ internal static class BlitzShopPlanRegressionTests
                 }
             }
         }
+
+        // The manager reuses one panel instance between shops. A folded panel
+        // must discard the previous shop's panorama when a new inventory is
+        // bound, otherwise unfolding the next shop sees a stale table and
+        // decides that no recompute is needed.
+        var foldedPanel = new BlitzShopPlanPanelControl();
+        foldedPanel.Bind(inventory);
+        foldedPanel.RenderForTest(panorama);
+        foldedPanel.Visible = true;
+        foldedPanel.ToggleExpansion();
+        var nextInventory = MerchantInventory.CreateForBlitzMerchant(state.Player);
+        foldedPanel.Bind(nextInventory);
+        Require(!foldedPanel.Expanded && foldedPanel.CurrentPanorama is null,
+            "binding a new shop retained the folded panel's previous panorama");
 
         Smoke.SmokeReport.Add(
             $"blitz-plan-panel PASS: panorama_lines={panoramaLines.Count} planner_lines={plannerLines.Count} "

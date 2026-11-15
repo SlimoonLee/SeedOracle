@@ -39,25 +39,51 @@ internal static class RandomForeseerTypes
     private static Assembly? _assembly;
 
     /// <summary>
-    /// Resolves Random Foreseer's runtime assembly by NAME scan — never via a
-    /// type token. A compile-time type reference (typeof) embeds a token that
-    /// the CLR resolves at method entry, and when RF's loader has picked an
-    /// inner variant lacking that type, the throw happens before any try/catch
-    /// can run.
+    /// Resolves Random Foreseer's implementation assembly without relying on a
+    /// compile-time type token. The Workshop package also loads a separate
+    /// loader assembly whose name contains RandomForeseer, so a first-match
+    /// assembly scan can select the loader and make every bridge look absent.
+    /// Prefer the implementation entry point used by each supported RF family.
     /// </summary>
     internal static Assembly Assembly =>
         _assembly ??= ResolveAssembly();
 
     private static Assembly ResolveAssembly()
     {
-        foreach (var candidate in AppDomain.CurrentDomain.GetAssemblies())
+        var candidates = AppDomain.CurrentDomain.GetAssemblies()
+            .Where(candidate =>
+            {
+                var name = candidate.GetName().Name;
+                return name is not null
+                       && name.Contains("RandomForeseer", StringComparison.Ordinal);
+            })
+            .ToArray();
+
+        foreach (var candidate in candidates)
         {
-            var name = candidate.GetName().Name;
-            if (name is not null && name.Contains("RandomForeseer", StringComparison.Ordinal))
+            if (HasType(candidate, "RandomForeseer.Entry")
+                || HasType(candidate, "RandomForeseer.RandomForeseerCode.Entry"))
                 return candidate;
         }
+
+        // Keep a useful error if RF failed before loading its implementation.
+        // The caller turns this into the unavailable adapter, while the loader
+        // assembly remains distinguishable in the log and does not get probed
+        // as if it exposed RF's internal prediction types.
         throw new InvalidOperationException(
             "Random Foreseer's runtime assembly could not be located.");
+    }
+
+    private static bool HasType(Assembly assembly, string fullName)
+    {
+        try
+        {
+            return assembly.GetType(fullName, throwOnError: false) is not null;
+        }
+        catch (ReflectionTypeLoadException)
+        {
+            return false;
+        }
     }
 
     internal static Type? Find(string relativeName)
@@ -71,8 +97,8 @@ internal static class RandomForeseerTypes
 
 /// <summary>
 /// The degraded adapter used when Random Foreseer's runtime assembly cannot be
-/// resolved (e.g. its 0.15.1 loader picked an inner variant our compile-time
-/// reference does not describe). Every prediction reports Unsupported so the
+/// resolved (e.g. the loader picked an inner variant lacking the expected
+/// implementation types). Every prediction reports Unsupported so the
 /// rest of Seed Oracle keeps working.
 /// </summary>
 internal sealed class RandomForeseerUnavailableAdapter : IRandomForeseerAdapter
@@ -136,8 +162,8 @@ internal sealed partial class RandomForeseerAdapter : IRandomForeseerAdapter
 
     /// <summary>
     /// Whether RF's internal-signature legacy path (initial merchant, ordinal
-    /// merchant) is usable. RF 0.15.1 on game 0.113.0 reports a fallback
-    /// version whose internals differ, degrading this to false.
+    /// merchant) is usable. A loader that reports a fallback variant or exposes
+    /// changed internal signatures degrades this to false.
     /// </summary>
     internal bool SupportsLegacyInternalSignatures => SupportsInitialMerchant;
 

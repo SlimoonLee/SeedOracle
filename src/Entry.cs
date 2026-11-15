@@ -39,9 +39,9 @@ public static class Entry
         if (Smoke.SmokeRunner.IsRequested)
             Smoke.SmokeRunner.Begin();
 
-        // Random Foreseer's loader can fail on its own (0.15.1 crashes on game
-        // 0.113.0 and reports a fallback version) — adapter construction must
-        // not take the rest of Seed Oracle down: the unavailable stub degrades
+        // Random Foreseer's selected variant can fail on its own when a patch
+        // no longer matches the host game — adapter construction must not take
+        // the rest of Seed Oracle down: the unavailable stub degrades
         // every RF-delegated forecast while our own predictions (encounter,
         // upcoming ancients/bosses, blitz window, audits) keep working.
         try
