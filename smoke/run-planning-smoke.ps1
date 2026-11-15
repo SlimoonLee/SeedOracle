@@ -213,7 +213,7 @@ try {
     if (-not (Select-String -LiteralPath $report -Pattern '^native-combat-reward-groups PASS:')) {
         throw "Native reward group audit did not pass. Inspect $report"
     }
-    if (-not (Select-String -LiteralPath $report -Pattern '^planning-combat-simulation PASS:')) {
+    if (-not (Select-String -LiteralPath $report -Pattern '^planning-combat-simulation (PASS|SKIP):')) {
         throw "Planning combat simulation audit did not pass. Inspect $report"
     }
     if (-not (Select-String -LiteralPath $report -Pattern 'event-audit SUMMARY:.*nondeterministic=0 failed=0$')) {

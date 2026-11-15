@@ -8,9 +8,11 @@ using MegaCrit.Sts2.Core.Entities.Potions;
 using MegaCrit.Sts2.Core.Entities.Relics;
 using MegaCrit.Sts2.Core.Factories;
 using MegaCrit.Sts2.Core.HoverTips;
+using MegaCrit.Sts2.Core.Map;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.CardPools;
 using MegaCrit.Sts2.Core.Random;
+using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Saves;
 using SeedOracle.Api;
 using SeedOracle.Forecasting;
@@ -34,7 +36,29 @@ internal static class RandomForeseerTypes
         "RandomForeseer.RandomForeseerCode."
     ];
 
-    internal static System.Reflection.Assembly Assembly => typeof(global::RandomForeseer.Entry).Assembly;
+    private static Assembly? _assembly;
+
+    /// <summary>
+    /// Resolves Random Foreseer's runtime assembly by NAME scan — never via a
+    /// type token. A compile-time type reference (typeof) embeds a token that
+    /// the CLR resolves at method entry, and when RF's loader has picked an
+    /// inner variant lacking that type, the throw happens before any try/catch
+    /// can run.
+    /// </summary>
+    internal static Assembly Assembly =>
+        _assembly ??= ResolveAssembly();
+
+    private static Assembly ResolveAssembly()
+    {
+        foreach (var candidate in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            var name = candidate.GetName().Name;
+            if (name is not null && name.Contains("RandomForeseer", StringComparison.Ordinal))
+                return candidate;
+        }
+        throw new InvalidOperationException(
+            "Random Foreseer's runtime assembly could not be located.");
+    }
 
     internal static Type? Find(string relativeName)
     {
@@ -43,6 +67,49 @@ internal static class RandomForeseerTypes
                 return type;
         return null;
     }
+}
+
+/// <summary>
+/// The degraded adapter used when Random Foreseer's runtime assembly cannot be
+/// resolved (e.g. its 0.15.1 loader picked an inner variant our compile-time
+/// reference does not describe). Every prediction reports Unsupported so the
+/// rest of Seed Oracle keeps working.
+/// </summary>
+internal sealed class RandomForeseerUnavailableAdapter : IRandomForeseerAdapter
+{
+    private static readonly IntegrationStatus StatusField = new(
+        "RandomForeseer",
+        "unavailable",
+        false,
+        new Dictionary<string, bool>());
+
+    public IntegrationStatus Status => StatusField;
+
+    public Forecast<MerchantInventoryForecast> PredictInitialMerchant(Player player) =>
+        Forecast<MerchantInventoryForecast>.Unsupported(
+            "Random Foreseer is unavailable.", PredictionDependency.None);
+
+    public Forecast<MerchantInventoryForecast> PredictMerchant(Player player, int futureVisitOrdinal) =>
+        PredictInitialMerchant(player);
+
+    public Forecast<MerchantInventoryForecast> PredictMerchantRoom(
+        Player player, IReadOnlyList<RoomType> resolvedRooms) =>
+        PredictInitialMerchant(player);
+
+    public Forecast<CombatRewardDetails> PredictCombatRewards(
+        Player player, IReadOnlyList<RoomType> resolvedRooms, EncounterModel encounter) =>
+        Forecast<CombatRewardDetails>.Unsupported(
+            "Random Foreseer is unavailable.", PredictionDependency.None);
+
+    public Forecast<TreasureRoomDetails> PredictTreasureRoom(
+        Player player, IReadOnlyList<RoomType> resolvedRooms, IReadOnlyList<MapPoint>? resolvedPoints = null) =>
+        Forecast<TreasureRoomDetails>.Unsupported(
+            "Random Foreseer is unavailable.", PredictionDependency.None);
+
+    public Forecast<EventContentDetails>? PredictEventContents(
+        Player player, IReadOnlyList<RoomType> resolvedRooms, EventModel eventModel) =>
+        Forecast<EventContentDetails>.Unsupported(
+            "Random Foreseer is unavailable.", PredictionDependency.None);
 }
 
 internal sealed partial class RandomForeseerAdapter : IRandomForeseerAdapter
@@ -67,7 +134,14 @@ internal sealed partial class RandomForeseerAdapter : IRandomForeseerAdapter
 
     public IntegrationStatus Status { get; }
 
-    private bool SupportsInitialMerchant =>
+    /// <summary>
+    /// Whether RF's internal-signature legacy path (initial merchant, ordinal
+    /// merchant) is usable. RF 0.15.1 on game 0.113.0 reports a fallback
+    /// version whose internals differ, degrading this to false.
+    /// </summary>
+    internal bool SupportsLegacyInternalSignatures => SupportsInitialMerchant;
+
+    internal bool SupportsInitialMerchant =>
         _contextConstructor is not null
         && _contextRngProperty is not null
         && _contextRelicGrabBagProperty is not null
@@ -78,6 +152,11 @@ internal sealed partial class RandomForeseerAdapter : IRandomForeseerAdapter
         && _creationResultProperty is not null
         && _isOnSaleProperty is not null
         && _rawCostField is not null;
+
+    /// <summary>Whether the RF event-content bridge (per-event option
+    /// predictors) is usable for map-hover event contents.</summary>
+    internal bool SupportsEventContentBridge =>
+        _contextConstructor is not null && EventPredictionBridge.Value.IsAvailable;
 
     private bool SupportsRouteRewards =>
         SupportsInitialMerchant
