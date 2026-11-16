@@ -49,6 +49,7 @@ internal static class BlitzShopPlanRegressionTests
         VerifyDedupe(planning, state);
         VerifyRewardTransform(planning, state);
         VerifyRandomUpgradeDeckBranches(planning, state);
+        BlitzReplayRegressionTests.VerifyMixedRewardStreams(planning, state);
         VerifyAllTypesParity(planning, live, state);
         VerifyWishSolver(inventory);
         VerifyPanel(state, inventory, panorama);
@@ -105,7 +106,7 @@ internal static class BlitzShopPlanRegressionTests
                 Require(BlitzMerchantProbe.PredictInPlace(walk, inventory.BlitzEntries[other], deckPick: 0).Purchased,
                     $"predecessor {other} could not be completed for the parity walk");
                 var walked = BlitzMerchantProbe.PredictInPlace(walk, inventory.BlitzEntries[good.Slot]);
-                Require(OutcomeText(row.Yield) == OutcomeText(walked),
+                Require(MatchesNative(row.Yield, walked),
                     $"good {good.Slot} after {other} disagrees with the clone walk: "
                     + $"'{OutcomeText(row.Yield)}' vs '{OutcomeText(walked)}'");
             }
@@ -192,7 +193,7 @@ internal static class BlitzShopPlanRegressionTests
                         .Purchased,
                     $"predecessor {order[before]} could not be completed during the sequence walk");
             var walked = BlitzMerchantProbe.PredictInPlace(probe, inventory.BlitzEntries[order[index]]);
-            Require(OutcomeText(walked) == OutcomeText(sequence.Steps[index].Outcome.Yield),
+            Require(MatchesNative(sequence.Steps[index].Outcome.Yield, walked),
                 $"step {index + 1} disagrees with the clone walk: "
                 + $"'{OutcomeText(walked)}' vs '{OutcomeText(sequence.Steps[index].Outcome.Yield)}'");
         }
@@ -483,6 +484,25 @@ internal static class BlitzShopPlanRegressionTests
         Require(outOfPicks.Reason == "OutOfPicks",
             $"a budget failure was reported as {outOfPicks.Reason}");
 
+        var firstCard = ForecastItemDetails.Card(inventory.Player.Deck.Cards[0]);
+        var secondCard = ForecastItemDetails.Card(inventory.Player.Deck.Cards.First(card =>
+            card.Id != firstCard.Id));
+        var chooseFirst = new BlitzRandomUpgradeChoice(1, 0, firstCard);
+        var chooseSecond = new BlitzRandomUpgradeChoice(1, 0, secondCard);
+        var conditional = new BlitzShopPlanService.BlitzWish(0, [[1]])
+        {
+            ChoicePaths = [new([1], [chooseFirst])]
+        };
+        var incompatible = new BlitzShopPlanService.BlitzWish(1, [[]])
+        {
+            ChoicePaths = [new([], [chooseSecond])]
+        };
+        Require(!BlitzShopPlanService.Solve(table, [conditional, incompatible]).Solved,
+            "the solver accepted conflicting picks from the same reward screen");
+        var compatible = BlitzShopPlanService.Solve(table, [conditional]);
+        Require(compatible.Solved && compatible.Choices.Contains(chooseFirst),
+            "the solver dropped the card selection required by its path");
+
         Smoke.SmokeReport.Add(
             $"blitz-plan-wish PASS: solved={solved.Steps.Count}steps filler=1 "
             + $"conflict={conflict.Reason} budget={outOfPicks.Reason}");
@@ -591,8 +611,8 @@ internal static class BlitzShopPlanRegressionTests
         if (randomWishSlot >= 0)
         {
             var randomWishLines = Labels(panel);
-            Require(randomWishLines.Any(line => line.Contains("所有选牌路径")
-                    || line.Contains("all card-choice paths")),
+            Require(randomWishLines.Any(line => line.Contains("已计算选牌路径")
+                    || line.Contains("computed card-choice paths")),
                 "a random-upgrade target did not list the card-choice paths that produce it");
             panel.ClearWishesForTest();
         }
@@ -619,6 +639,16 @@ internal static class BlitzShopPlanRegressionTests
                 && hoverText.Contains(OutcomeText(
                     panorama.GoodAt(hoverSlot)!.Direct!.Yield)),
             "the table hover lookup did not serve the priced row");
+
+        var originalRng = inventory.Player.PlayerRng.ToSerializable();
+        inventory.Player.PlayerRng.Shops.NextUnsignedLong();
+        Require(!panel.TryDescribeRowFrom(inventory, hoverSlot, out _),
+            "a changed RNG stream still served the old panorama");
+        panel.RefreshContent();
+        Require(!Labels(panel).Any(line => line.Contains("直接买：") || line.Contains("buy outright:")),
+            "the stale panorama kept advertising purchase outcomes during recomputation");
+        inventory.Player.PlayerRng.LoadFromSerializable(originalRng);
+        panel.RefreshContent();
 
         // The item tip's rich text must carry the theme font override the
         // game's MegaRichTextLabel._Ready asserts — without it every hover
@@ -712,6 +742,16 @@ internal static class BlitzShopPlanRegressionTests
 
     private static string OutcomeText(BlitzYieldForecast yield) =>
         UI.BlitzShopPlanPanelControl.OutcomeText(yield, true);
+
+    private static bool MatchesNative(BlitzYieldForecast forecast, BlitzYieldForecast native)
+    {
+        if (forecast.RandomUpgradeVariants.Count == 0)
+            return OutcomeText(forecast) == OutcomeText(native);
+        return forecast.RandomUpgradeVariants.Any(variant =>
+            BlitzShopAudit.CompareMultiset(
+                variant.UpgradedCards.Select(card => (card.Name, card.IsUpgraded)),
+                native.UpgradedCards.Select(card => (card.Name, card.IsUpgraded))).Ok);
+    }
 
     private static bool ContainsTwoMoreChoices(MerchantInventory inventory, IReadOnlyList<int> slots) =>
         slots.Any(slot => inventory.BlitzEntries[slot].MerchantEntryType == BlitzMerchantEntryType.TwoMoreChoices);

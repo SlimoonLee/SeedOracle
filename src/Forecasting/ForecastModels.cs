@@ -241,6 +241,7 @@ internal sealed record BlitzYieldForecast
     /// while the eligible-card set depends on the final card state.
     /// </summary>
     public IReadOnlyList<BlitzRandomUpgradeVariant> RandomUpgradeVariants { get; init; } = [];
+    public bool RandomUpgradePathsTruncated { get; init; }
 
     public int MaxHpDelta { get; init; }
     public int HealedHp { get; init; }

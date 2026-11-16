@@ -42,6 +42,14 @@ internal static class BlitzYieldText
                 .OrderBy(item => item.Name, StringComparer.Ordinal)
                 .Select(item => item.Name)
                 .ToArray());
+        if (yield.RandomUpgradeVariants.Any(variant => variant.Choices.Count > 0))
+            lines.Add(chinese
+                ? "→ 升级结果取决于前置选牌，请按求购路径操作"
+                : "-> upgrades depend on the preceding card choices shown in the wish path");
+        if (yield.RandomUpgradePathsTruncated)
+            lines.Add(chinese
+                ? "→ 路径较多，当前仅显示已计算的部分"
+                : "-> more paths exist beyond the current search limit");
 
         var growth = new List<string>();
         if (yield.MaxHpDelta != 0)

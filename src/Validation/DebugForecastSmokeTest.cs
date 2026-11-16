@@ -39,6 +39,8 @@ internal static class DebugForecastSmokeTest
         if (__instance._runState is not RunState run)
             throw new InvalidOperationException("Seed Oracle self-test could not obtain the live RunState.");
 
+        BlitzReplayRegressionTests.RunSavedRun();
+
         var overflowBounds = new Godot.Rect2(-240f, 850f, 1440f, 360f);
         var clampOffset = MapHoverTipPresentation.CalculateViewportClampOffset(
             overflowBounds,

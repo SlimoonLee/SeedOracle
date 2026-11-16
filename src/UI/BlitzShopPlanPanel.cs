@@ -45,6 +45,7 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
     private MerchantInventory? _inventory;
     private BlitzShopPanorama? _panorama;
     private string? _fingerprint;
+    private string? _buildFingerprint;
     private BlitzShopPlanService.BlitzShopEnumeration? _enumeration;
     private PlanningPredictionService? _buildService;
     private bool _buildPending;
@@ -93,12 +94,10 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
             || CurrentFingerprint != FingerprintOf(inventory))
             return false;
 
-        var entries = inventory.BlitzEntries;
-        var prefix = Enumerable.Range(0, entries.Count)
-            .Where(slot => slot != index && entries[slot].Status == BlitzMerchantEntry.BlitzEntryStatus.Used)
-            .ToArray();
         var good = panorama.GoodAt(index);
-        var row = good?.ForPrefix(prefix);
+        // A completed panorama starts at the current live stream and deck.
+        // Purchases already reflected in that snapshot must not be replayed.
+        var row = good?.Direct;
         if (row is null || !row.Yield.Resolved)
             return false;
 
@@ -113,7 +112,7 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
             .Take(3);
         foreach (var group in alternatives)
         {
-            var example = string.Join(chinese ? "＋" : "+",
+            var example = string.Join(" → ",
                 group.First().PrefixSlots.Select(Glyph));
             text += "\n→ " + (chinese
                 ? $"先买 {example} 后：{group.Key}"
@@ -283,6 +282,7 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
         // expansion can decide whether work is needed.
         _panorama = null;
         _fingerprint = null;
+        _buildFingerprint = null;
         _enumeration = null;
         _buildService = null;
         _buildPending = false;
@@ -333,23 +333,25 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
     /// slices, so opening a shop never pays them synchronously. Everything
     /// stays on the main thread: a completed shadow purchase can reach the
     /// game's own UI side effects, and a background task froze the game.
-    /// The previous panorama stays on screen until the replacement lands.
+    /// A changed snapshot clears the displayed claims until its replacement lands.
     /// </summary>
     internal void RequestCompute()
     {
         if (_inventory is not { } inventory) return;
         var fingerprint = FingerprintOf(inventory);
+        if ((_buildPending || _stepping) && _buildFingerprint == fingerprint) return;
         if (_panorama is not null && fingerprint == _fingerprint)
         {
             RefreshContent();
             return;
         }
 
-        _fingerprint = fingerprint;
+        _buildFingerprint = fingerprint;
         _enumeration = null;
         _buildService = new PlanningPredictionService();
         _buildPending = true;
         _stepping = false;
+        RefreshContent();
         _status.Text = _panorama is null
             ? Chinese ? "枚举各购买组合中……" : "enumerating purchase combinations…"
             : Chinese ? "购买已登记，重算中……" : "purchase registered, recomputing…";
@@ -358,17 +360,16 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
 
     internal static string FingerprintOf(MerchantInventory inventory)
     {
-        // The deck digest is what catches reward-screen picks: taking a card
-        // changes no merchant entry and no pick counter, but every
-        // deck-reading row (transforms, random upgrades, enchant pickables)
-        // prices against it.
-        var deck = inventory.Player.Deck.Cards;
+        // Include every player stream, relic state and complete card state.
+        // A reward pick or reroll can change these without changing the shelf.
+        var player = inventory.Player;
         return inventory.BlitzChoicesRemaining + "|"
             + string.Join("|", inventory.BlitzEntries.Select(entry =>
                 entry.MerchantEntryType + ":" + entry.IsStocked))
-            + "|deck:" + deck.Count + ":"
-            + string.Join(",", deck.Select(card =>
-                card.Id.Entry + (card.IsUpgraded ? "+" : "")));
+            + "|player:" + System.Text.Json.JsonSerializer.Serialize(
+                player.ToSerializable(),
+                MegaCrit.Sts2.Core.Saves.JsonSerializationUtility.GetTypeInfo<
+                    MegaCrit.Sts2.Core.Saves.Runs.SerializablePlayer>());
     }
 
     /// <summary>
@@ -453,9 +454,17 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
         // A newer request replaced the work while this chain was stepping: its
         // own chain owns the shelf, this one just stops.
         if (!ReferenceEquals(_enumeration, enumeration)) return;
+        if (_inventory is { } current && FingerprintOf(current) != _buildFingerprint)
+        {
+            _stepping = false;
+            RequestCompute();
+            return;
+        }
         _enumeration = null;
         _stepping = false;
         _panorama = enumeration.Finish();
+        _fingerprint = _buildFingerprint;
+        _buildFingerprint = null;
         RefreshContent();
     }
 
@@ -544,6 +553,12 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
         _panoramaTab.Text = Chinese ? "全景" : "Panorama";
         _plannerTab.Text = Chinese ? "求购" : "Wishes";
 
+        if (_inventory is { } current && FingerprintOf(current) != _fingerprint)
+        {
+            _status.Text = Chinese ? "当前状态已变化，重新计算中……" : "State changed, recomputing…";
+            return;
+        }
+
         if (_panorama is not { } panorama)
         {
             _panoramaTab.ButtonPressed = false;
@@ -557,8 +572,8 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
         _status.Text = (chinese ? "可带走 " : "take ")
                        + panorama.ChoicesRemaining
                        + (chinese
-                           ? " 件；①–⑥＝货架从左到右；每件内容由“之前买了哪几件”决定，与先后无关"
-                           : " goods; ①–⑥ = shelf order; each good depends on which set went first, not their order");
+                           ? " 件；①–⑥为货架顺序；按箭头购买，并完成每组指定选牌"
+                           : " goods; ①–⑥ = shelf positions; follow each purchase arrow and card choice");
 
         if (_plannerMode)
             RenderWishes(panorama, chinese);
@@ -796,7 +811,7 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
     private string DescribePrefix(IReadOnlyList<int> prefix, bool chinese) =>
         prefix.Count == 0
             ? chinese ? "直接" : "outright"
-            : string.Join(chinese ? "＋" : "+", prefix.Select(Glyph));
+            : string.Join(" → ", prefix.Select(Glyph));
 
     internal static string OutcomeText(BlitzYieldForecast yield, bool chinese)
     {
@@ -905,6 +920,29 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
 
     private static bool SameItem(ForecastItemDetails left, ForecastItemDetails right) =>
         left.Kind == right.Kind && left.Name == right.Name && left.IsUpgraded == right.IsUpgraded;
+
+    private static IEnumerable<BlitzShopPlanService.BlitzWishPath> RewardWishPaths(
+        int slot, BlitzPrefixOutcome outcome, Chip chip)
+    {
+        if (chip.TransformSources.Count > 0)
+        {
+            foreach (var choice in outcome.Yield.TransformChoices.Where(choice =>
+                         SameItem(choice.Result, chip.Detail)
+                         && chip.TransformSources.Contains(SourceLabel(choice))))
+                yield return new BlitzShopPlanService.BlitzWishPath(outcome.PrefixSlots,
+                    [new(slot, -1, choice.Source, choice.Result, BlitzRandomUpgradeChoiceKind.Transform)]);
+            yield break;
+        }
+        var screens = outcome.Yield.CardScreens;
+        for (var screen = 0; screen < screens.Count; screen++)
+            foreach (var item in screens[screen].Where(item => SameItem(item, chip.Detail)))
+                yield return new BlitzShopPlanService.BlitzWishPath(outcome.PrefixSlots,
+                    [new(slot, screen, item)]);
+        if (outcome.Yield.GainedCards.Concat(outcome.Yield.UpgradedCards)
+                .Concat(outcome.Yield.Relics).Concat(outcome.Yield.Potions)
+                .Any(item => SameItem(item, chip.Detail)))
+            yield return new BlitzShopPlanService.BlitzWishPath(outcome.PrefixSlots, []);
+    }
 
     private void RenderWishes(BlitzShopPanorama panorama, bool chinese)
     {
@@ -1091,7 +1129,15 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
             var allowed = good.Outcomes
                 .Where(outcome => ContainsItem(outcome.Yield, chip))
                 .Select(outcome => outcome.PrefixSlots).ToList();
-            if (allowed.Count > 0) wishes.Add(new BlitzShopPlanService.BlitzWish(slot, allowed));
+            if (allowed.Count > 0)
+            {
+                var paths = chip.RandomUpgradePaths.Select(path =>
+                    new BlitzShopPlanService.BlitzWishPath(path.PrefixSlots, path.Variant.Choices)).ToList();
+                if (paths.Count == 0)
+                    paths.AddRange(good.Outcomes.Where(outcome => ContainsItem(outcome.Yield, chip))
+                        .SelectMany(outcome => RewardWishPaths(slot, outcome, chip)));
+                wishes.Add(new BlitzShopPlanService.BlitzWish(slot, allowed) { ChoicePaths = paths });
+            }
         }
 
         if (wishes.Count == 0)
@@ -1122,9 +1168,7 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
             return;
         }
 
-        // All solutions for a single wish: a good's contents depend only on the
-        // SET bought before it (the stream advance), so every allowed set is
-        // one essentially-different solution and any order inside it works.
+        // Preserve the order and card-choice requirements of each path.
         if (wishes.Count == 1)
         {
             var wish = wishes[0];
@@ -1134,7 +1178,7 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
                 ? null
                 : ChipsOf(wishGood!).FirstOrDefault(candidate => candidate.Key == wishKey.ChipKey);
             _list.AddChild(PreCombatPanelStyles.CreateLabel(
-                (chinese ? "所有可行解（目标：" : "all solutions (target: ")
+                (chinese ? "已计算的可行路径（目标：" : "computed paths (target: ")
                 + (targetChip?.Label ?? "?") + (chinese ? "）" : ")"),
                 15, StsColors.gold, bold: true));
             var sets = wish.AllowedPrefixes
@@ -1157,7 +1201,7 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
                     : chinese
                         ? $"（垫位 {set.Count} 次，Shops+{shops}）"
                         : $" ({set.Count} filler, Shops+{shops})";
-                _list.AddChild(BodyLabel($"· {where}{cost}"));
+                _list.AddChild(BodyLabel($"· {where} {Glyph(wish.Slot)}{cost}"));
                 shownSolutions++;
             }
             if (sets.Count > shownSolutions)
@@ -1165,8 +1209,8 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
                     ? $"……另有 {sets.Count - shownSolutions} 种先买组合"
                     : $"...{sets.Count - shownSolutions} more combinations"));
             _list.AddChild(BodyLabel(chinese
-                ? "（集合内任意顺序均可：同一集合过同样多的随机数，不同顺序只改变垫位货物自身的内容）"
-                : "(any order inside a set works: same stream advance; order only changes what the fillers give)"));
+                ? "请按所列顺序购买。前置商品的选牌要求见对应路径。"
+                : "Buy in the listed order and follow the card choices for that path."));
 
             if (targetChip?.RandomUpgradePaths.Count > 0)
                 RenderRandomUpgradeWishPaths(targetChip, sets, chinese);
@@ -1204,6 +1248,9 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
             var pickNote = pick is null
                 ? ""
                 : chinese ? $"（选 {pick} 去变化）" : $" (pick {pick} to transform)";
+            var requiredChoices = solution.Choices.Where(choice => choice.SourceSlot == step.Slot).ToArray();
+            if (requiredChoices.Length > 0)
+                pickNote += " " + FormatRandomUpgradeChoices(requiredChoices, chinese);
             var stepRow = new HBoxContainer();
             stepRow.AddThemeConstantOverride(ThemeConstants.BoxContainer.Separation, 6);
             _list.AddChild(stepRow);
@@ -1228,7 +1275,7 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
         bool chinese)
     {
         static bool SamePrefix(IReadOnlyList<int> left, IReadOnlyList<int> right) =>
-            left.Count == right.Count && !left.Except(right).Any();
+            left.SequenceEqual(right);
 
         var paths = target.RandomUpgradePaths
             .Where(path => allowedPrefixes.Any(prefix => SamePrefix(prefix, path.PrefixSlots)))
@@ -1240,8 +1287,8 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
         if (paths.Count == 0) return;
 
         _list.AddChild(BodyLabel(chinese
-            ? $"达到 {target.Label} 的所有选牌路径："
-            : $"all card-choice paths that produce {target.Label}:"));
+            ? $"达到 {target.Label} 的已计算选牌路径"
+            : $"computed card-choice paths that produce {target.Label}"));
         foreach (var path in paths)
         {
             var prefix = path.PrefixSlots.Count == 0
@@ -1278,8 +1325,8 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
             lines.Add(note switch
             {
                 "DeckPickCompletion" => chinese
-                    ? "· 需要选牌的前序货物按“自动选第一张候选”补全：选哪张不改变随机数推进，只改变你自己的结果"
-                    : "· Deck-pick predecessors are completed with the first candidate: the pick's identity moves no stream",
+                    ? "· 前置选牌会改变后续牌库，请完成路径列出的每组拿牌、跳过及牌库操作"
+                    : "· Earlier card choices change the later deck. Follow every listed reward choice and deck operation",
                 "RandomUpgradesOrder" => chinese
                     ? "· “自动升级”先筛选牌库中仍可升级的牌，再洗牌取两张；前置拿牌、删牌、变牌、升级或附魔会改变候选集合。蛋类遗物在奖励生成或卡牌加入牌库/变牌替换时可能直接强化卡牌，因此分支按实际最终牌状态计算；选牌完成后窗口会重算"
                     : "· Random upgrades first filter cards that are still upgradable, then shuffle and take two. Earlier picks, removals, transforms, upgrades or enchants change that candidate set. Egg relics can upgrade cards during reward generation or when a card enters the deck after a pick or transform, so branches use the final card state; the window reprices after the choice",

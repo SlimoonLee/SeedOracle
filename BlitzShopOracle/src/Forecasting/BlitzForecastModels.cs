@@ -105,6 +105,7 @@ internal sealed record BlitzYieldForecast
     public IReadOnlyList<ForecastItemDetails> GainedCards { get; init; } = [];
     public IReadOnlyList<ForecastItemDetails> UpgradedCards { get; init; } = [];
     public IReadOnlyList<BlitzRandomUpgradeVariant> RandomUpgradeVariants { get; init; } = [];
+    public bool RandomUpgradePathsTruncated { get; init; }
     public int MaxHpDelta { get; init; }
     public int HealedHp { get; init; }
     public int ExtraChoices { get; init; }

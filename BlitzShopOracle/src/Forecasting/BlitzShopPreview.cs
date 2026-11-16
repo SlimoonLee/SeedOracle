@@ -46,6 +46,8 @@ internal sealed class BlitzShopPreview
     private readonly SerializableRelicGrabBag _sharedBag;
     private readonly SerializableRelicGrabBag _playerBag;
     private readonly List<CardModel> _deck;
+    private readonly int _baselineCardCount;
+    private bool _branchesTruncated;
 
     /// <summary>The deck the preview prices against, for parity diagnostics.</summary>
     internal IReadOnlyList<CardModel> DeckSnapshot => _deck;
@@ -69,6 +71,7 @@ internal sealed class BlitzShopPreview
         _sharedBag = _state.Run.SharedRelicGrabBag.ToSerializable();
         _playerBag = _player.RelicGrabBag.ToSerializable();
         _deck = _player.Deck.Cards.ToList();
+        _baselineCardCount = _state.Run._allCards.Count;
         _currentHp = _player.Creature.CurrentHp;
         _maxHp = _player.Creature.MaxHp;
     }
@@ -92,8 +95,7 @@ internal sealed class BlitzShopPreview
         _deltas.TryGetValue(type, out var delta) ? delta : (0, 0);
 
     /// <summary>
-    /// The good's contents when exactly this set of goods was bought before
-    /// it, replayed in shelf order: predecessors drain the shared bag at
+    /// The good's contents after the supplied purchase sequence. Predecessors drain the shared bag at
     /// their rolled rarities, curses they hand over join the deck, and the
     /// good itself generates at the summed stream offset.
     /// </summary>
@@ -102,6 +104,7 @@ internal sealed class BlitzShopPreview
         try
         {
             Reset();
+            _branchesTruncated = false;
             var deck = _deck;
             // Transform candidates tagged with how they become available:
             // already in the library, offered by an earlier buy's reward
@@ -118,14 +121,14 @@ internal sealed class BlitzShopPreview
                     new(CloneDeck(_deck), [])
                 }
                 : null;
-            foreach (var before in prefix.OrderBy(other => other))
+            foreach (var before in prefix)
             {
                 var entry = inventory.BlitzEntries[before];
                 var offset = OffsetOf(inventory, prefix, before);
                 // Generating the predecessor at its own offset IS its replay:
                 // same draws, same curse into the deck, same relic pulls.
                 var replay = Generate(entry,
-                    At(_shops, offset), At(_rewards, offset), deck,
+                    At(_shops, offset), At(_rewards, RewardsOffsetOf(inventory, prefix, before)), deck,
                     rewardSourceSlot: before);
                 if (deckBranches is not null)
                     deckBranches = AdvanceDeckBranches(
@@ -154,8 +157,9 @@ internal sealed class BlitzShopPreview
 
             var shops = At(_shops, OffsetOf(inventory, prefix, TargetRank));
             var rewards = At(_rewards, RewardsOffsetOf(inventory, prefix, TargetRank));
-            return Generate(inventory.BlitzEntries[slot], shops, rewards, deck,
+            var result = Generate(inventory.BlitzEntries[slot], shops, rewards, deck,
                 candidates, transformSkip, priorDeckBranches: deckBranches).Yield;
+            return result with { RandomUpgradePathsTruncated = _branchesTruncated };
         }
         catch (Exception error)
         {
@@ -167,15 +171,15 @@ internal sealed class BlitzShopPreview
     }
 
     /// <summary>
-    /// How far the streams sit when this member of the replay buys. The good
-    /// itself is always last, so its rank is past every shelf slot.
+    /// The stream position immediately before this predecessor in the supplied
+    /// sequence. TargetRank selects the position after the entire prefix.
     /// </summary>
     private int OffsetOf(MerchantInventory inventory, IReadOnlyList<int> prefix, int rank) =>
-        prefix.Where(before => before < rank)
+        prefix.TakeWhile(before => before != rank)
             .Sum(before => Delta(inventory.BlitzEntries[before].MerchantEntryType).Shops);
 
     private int RewardsOffsetOf(MerchantInventory inventory, IReadOnlyList<int> prefix, int rank) =>
-        prefix.Where(before => before < rank)
+        prefix.TakeWhile(before => before != rank)
             .Sum(before => Delta(inventory.BlitzEntries[before].MerchantEntryType).Rewards);
 
     /// <summary>
@@ -193,6 +197,12 @@ internal sealed class BlitzShopPreview
     /// <summary>Bags back to capture state; each row replays from scratch.</summary>
     private void Reset()
     {
+        // Factory previews and branch clones belong to this row. Retaining
+        // them in the run's card registry made large branch searches grow on
+        // every recompute even after their results had been described.
+        if (_state.Run._allCards.Count > _baselineCardCount)
+            _state.Run._allCards.RemoveRange(_baselineCardCount,
+                _state.Run._allCards.Count - _baselineCardCount);
         _state.Run.SharedRelicGrabBag.LoadFromSerializable(_sharedBag);
         _player.RelicGrabBag.LoadFromSerializable(_playerBag);
     }
@@ -355,8 +365,15 @@ internal sealed class BlitzShopPreview
                     upgraded.Add(ForecastItemDetails.Card(previewCard));
                 }
                 if (priorDeckBranches is { Count: > 0 })
+                {
                     randomUpgradeVariants.AddRange(
                         BuildRandomUpgradeVariants(priorDeckBranches, shopsBeforeUpgrade));
+                    // The unmodified deck is only a valid answer when no
+                    // predecessor required a choice. Otherwise the branch
+                    // outcomes are the complete, conditional claims.
+                    if (priorDeckBranches.Any(branch => branch.Choices.Count > 0))
+                        upgraded.Clear();
+                }
                 break;
             default:
                 return PickNeeding(entry, deck, shops, transformCandidates, transformSkip);
@@ -378,7 +395,14 @@ internal sealed class BlitzShopPreview
         };
     }
 
-    private const int MaxRandomUpgradeVariants = 32;
+    private const int MaxRandomUpgradeVariants = 4096;
+
+    private bool BranchLimitReached(int count)
+    {
+        if (count < MaxRandomUpgradeVariants) return false;
+        _branchesTruncated = true;
+        return true;
+    }
 
     /// <summary>
     /// Carry the deck-changing choices of a completed predecessor forward. A
@@ -395,7 +419,8 @@ internal sealed class BlitzShopPreview
         var states = input.Select(state =>
         {
             var deck = state.Deck.ToList();
-            foreach (var gained in replay.GainedModels)
+            foreach (var gained in replay.GainedModels.Where(_ =>
+                         entry.MerchantEntryType != BlitzMerchantEntryType.Glam))
                 deck.Add(CloneForBranch(gained));
             return new DeckBranchState(deck, new List<BlitzRandomUpgradeChoice>(state.Choices));
         }).ToList();
@@ -425,23 +450,30 @@ internal sealed class BlitzShopPreview
                             ForecastItemDetails.Card(effective))
                     };
                     next.Add(new DeckBranchState(selected, choices));
-                    if (next.Count >= MaxRandomUpgradeVariants) break;
+                    if (BranchLimitReached(next.Count)) break;
                 }
 
-                if (next.Count >= MaxRandomUpgradeVariants) break;
+                if (BranchLimitReached(next.Count)) break;
             }
 
             states = next.Take(MaxRandomUpgradeVariants).ToList();
         }
 
-        return entry.MerchantEntryType switch
+        var expanded = entry.MerchantEntryType switch
         {
             BlitzMerchantEntryType.CardRemoval => ExpandCardRemoval(states, sourceSlot),
             BlitzMerchantEntryType.CardTransform => ExpandCardTransform(states, sourceSlot, transformSkip),
             BlitzMerchantEntryType.CardUpgrade => ExpandCardUpgrade(states, sourceSlot),
             BlitzMerchantEntryType.CardEnchant => ExpandCardEnchant(states, sourceSlot, entry),
+            BlitzMerchantEntryType.Glam => ExpandCardEnchant(states, sourceSlot, entry),
             _ => states
         };
+        // Glam chooses from the existing deck before granting its curse.
+        if (entry.MerchantEntryType == BlitzMerchantEntryType.Glam)
+            foreach (var branch in expanded)
+                foreach (var gained in replay.GainedModels)
+                    branch.Deck.Add(CloneForBranch(gained));
+        return expanded;
     }
 
     private List<DeckBranchState> ExpandCardRemoval(
@@ -461,7 +493,7 @@ internal sealed class BlitzShopPreview
                         Kind: BlitzRandomUpgradeChoiceKind.Remove)
                 };
                 next.Add(new DeckBranchState(deck, choices));
-                if (next.Count >= MaxRandomUpgradeVariants) return next;
+                if (BranchLimitReached(next.Count)) return next;
             }
         }
         return next;
@@ -498,7 +530,7 @@ internal sealed class BlitzShopPreview
                         ForecastItemDetails.Card(result), BlitzRandomUpgradeChoiceKind.Transform)
                 };
                 next.Add(new DeckBranchState(deck, choices));
-                if (next.Count >= MaxRandomUpgradeVariants) return next;
+                if (BranchLimitReached(next.Count)) return next;
             }
         }
         return next;
@@ -523,7 +555,7 @@ internal sealed class BlitzShopPreview
                         ForecastItemDetails.Card(upgraded), BlitzRandomUpgradeChoiceKind.Upgrade)
                 };
                 next.Add(new DeckBranchState(deck, choices));
-                if (next.Count >= MaxRandomUpgradeVariants) return next;
+                if (BranchLimitReached(next.Count)) return next;
             }
         }
         return next;
@@ -552,7 +584,7 @@ internal sealed class BlitzShopPreview
                         ForecastItemDetails.Card(enchanted), BlitzRandomUpgradeChoiceKind.Enchant)
                 };
                 next.Add(new DeckBranchState(deck, choices));
-                if (next.Count >= MaxRandomUpgradeVariants) return next;
+                if (BranchLimitReached(next.Count)) return next;
             }
         }
         return next;
@@ -567,6 +599,7 @@ internal sealed class BlitzShopPreview
         {
             var branchRng = new Rng(shopsBefore);
             var shuffled = state.Deck.Where(card => card.IsUpgradable).ToList();
+            if (shuffled.Count == 0) continue;
             shuffled.StableShuffle(branchRng);
             var branchUpgrades = shuffled.Take(2)
                 .Select(card =>
@@ -664,8 +697,15 @@ internal sealed class BlitzShopPreview
     private List<CardModel> Screen(CardCreationOptions options, Rng shops)
     {
         var reward = new CardReward(options.WithRngOverride(shops), 3, _player);
-        reward.Populate();
-        return reward.Cards.ToList();
+        try
+        {
+            reward.Populate();
+            return reward.Cards.ToList();
+        }
+        finally
+        {
+            _player.RelicObtained -= reward.OnRelicObtained;
+        }
     }
 
     private CardPoolModel Pool() => _player.Character.CardPool;
@@ -695,11 +735,15 @@ internal sealed class BlitzShopPreview
     private CardPoolModel PrismaticPool(BlitzMerchantEntry entry) =>
         PrismaticCharacterField?.GetValue(entry) is CharacterModel character ? character.CardPool : Pool();
 
-    private (EnchantmentModel, int)? EnchantmentOf(BlitzMerchantEntry entry) =>
-        entry is BlitzMerchantCardEnchantEntry
-        && EnchantField?.GetValue(entry) is (EnchantmentModel model, int amount)
+    private (EnchantmentModel, int)? EnchantmentOf(BlitzMerchantEntry entry)
+    {
+        if (entry.MerchantEntryType == BlitzMerchantEntryType.Glam)
+            return (ModelDb.Enchantment<Glam>(), 1);
+        return entry is BlitzMerchantCardEnchantEntry
+               && EnchantField?.GetValue(entry) is (EnchantmentModel model, int amount)
             ? (model, amount)
             : null;
+    }
 
     private ForecastItemDetails Curse(Rng shops) => ForecastItemDetails.Card(RollCurse(shops));
 
@@ -761,4 +805,3 @@ internal sealed class BlitzShopPreview
         return outcomes;
     }
 }
-

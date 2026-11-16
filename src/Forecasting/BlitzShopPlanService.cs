@@ -5,13 +5,9 @@ using MegaCrit.Sts2.Core.Runs;
 namespace SeedOracle.Forecasting;
 
 /// <summary>
-/// One shelf good's answer for one set of goods bought before it. The prefix is
-/// a set, not a sequence: every purchase moves the streams by an amount that
-/// depends only on its entry type, so the position a good reads from is the sum
-/// over the set — order-invariant (docs/validation/blitz-shop-multi-purchase-2026-11-14.md).
-/// Random-upgrade rows also carry conditional branches when a predecessor can
-/// change the deck. Every branch reuses the same Shops position and only varies
-/// the final eligible-card set.
+/// One good's answer after an ordered sequence of purchases. Stream offsets
+/// can coincide across orders, while the cards offered and selected by those
+/// purchases can differ. Keep that order through the deck-choice branches.
 /// </summary>
 internal sealed record BlitzPrefixOutcome(IReadOnlyList<int> PrefixSlots, BlitzYieldForecast Yield)
 {
@@ -29,15 +25,15 @@ internal sealed record BlitzPlanGood(int Slot, BlitzMerchantEntry Entry, IReadOn
     public BlitzPrefixOutcome? Direct => Outcomes.Count > 0 ? Outcomes[0] : null;
 
     internal BlitzPrefixOutcome? ForPrefix(IReadOnlyCollection<int> prefix) => Outcomes.FirstOrDefault(outcome =>
-        outcome.PrefixSlots.Count == prefix.Count && !outcome.PrefixSlots.Except(prefix).Any());
+        outcome.PrefixSlots.SequenceEqual(prefix));
 }
 
 /// <summary>How far one shelf good moves the two streams the goods read.</summary>
 internal sealed record BlitzStreamDelta(int Shops, int Rewards);
 
 /// <summary>
-/// The whole shelf at once: every available good priced against every reachable
-/// set of predecessors. The planner window is a pure view over this — clicking
+/// The whole shelf at once, priced against reachable purchase sequences.
+/// The planner window is a pure view over this — clicking
 /// goods in a buy order just looks up each step's prefix row.
 /// </summary>
 internal sealed record BlitzShopPanorama(
@@ -69,9 +65,8 @@ internal sealed record BlitzPlanStep(int Slot, BlitzPrefixOutcome Outcome);
 internal static class BlitzShopPlanService
 {
     /// <summary>
-    /// Enumerates every (good, predecessor-set) answer. Worst shelf: 6 goods ×
-    /// 31 reachable prefix sets, each one RNG-positioned generation with no
-    /// purchase and no run clone — the offsets come from the preview's own
+    /// Enumerates reachable ordered prefixes for each good. Each row uses
+    /// RNG-positioned generation. The offsets come from the preview's own
     /// measured deltas, the contents from the game's factories.
     /// </summary>
     internal static BlitzShopPanorama Compute(
@@ -140,14 +135,9 @@ internal static class BlitzShopPlanService
                 for (var mask = 0; mask < 1 << others.Length; mask++)
                 {
                     var prefix = others.Where((_, bit) => (mask & (1 << bit)) != 0).ToArray();
-                    // One pick is spent on the good itself; "two more choices" is
-                    // the only purchase that adds budget, and it pays out before
-                    // its successors buy. The check is the existence of a valid
-                    // order (take the budget good first), which is all a
-                    // set-level answer can promise.
-                    if (prefix.Length + 1 > _remaining + 2 * (Contains(inventory, prefix) ? 1 : 0))
-                        continue;
-                    rows.Add((slot, prefix));
+                    foreach (var order in Permutations(prefix))
+                        if (FitsBudget(inventory, order, _remaining))
+                            rows.Add((slot, order.ToArray()));
                 }
                 _outcomes[slot] = [];
             }
@@ -198,8 +188,8 @@ internal static class BlitzShopPlanService
         /// the predecessors can change: not the relic goods (they read the
         /// shared bag, whose per-rarity buckets depend on which predecessor
         /// rolled which rarity), not the deck pickers (their answer lists the
-        /// deck), and never while random upgrades are around (their own
-        /// consumption varies with deck size, so no delta is stable).
+        /// deck), and never while random upgrades are around, because those
+        /// outcomes depend on earlier deck choices.
         /// </summary>
         private static bool DedupeSafe(MerchantInventory inventory, int slot)
         {
@@ -212,9 +202,17 @@ internal static class BlitzShopPlanService
                        && entry.MerchantEntryType == BlitzMerchantEntryType.RandomUpgrades);
         }
 
-        private static bool Contains(MerchantInventory inventory, int[] prefix) =>
-            prefix.Any(slot => inventory.BlitzEntries[slot].MerchantEntryType
-                == BlitzMerchantEntryType.TwoMoreChoices);
+        private static bool FitsBudget(MerchantInventory inventory, IReadOnlyList<int> prefix, int choices)
+        {
+            foreach (var slot in prefix)
+            {
+                if (choices <= 0) return false;
+                choices--;
+                if (inventory.BlitzEntries[slot].MerchantEntryType == BlitzMerchantEntryType.TwoMoreChoices)
+                    choices += 2;
+            }
+            return choices > 0;
+        }
 
         internal bool Done => _pending.Count == 0;
 
@@ -238,8 +236,7 @@ internal static class BlitzShopPlanService
             foreach (var (slot, prefix, repPrefix) in _aliases)
             {
                 var rep = _outcomes[slot].FirstOrDefault(outcome =>
-                    outcome.PrefixSlots.Count == repPrefix.Count
-                    && !outcome.PrefixSlots.Except(repPrefix).Any());
+                    outcome.PrefixSlots.SequenceEqual(repPrefix));
                 _outcomes[slot].Add(new BlitzPrefixOutcome(prefix,
                     rep?.Yield ?? BlitzYieldForecast.Empty));
             }
@@ -293,7 +290,14 @@ internal static class BlitzShopPlanService
     /// over exactly that variant. The window derives the sets by matching the
     /// variant's text against the panorama rows.
     /// </summary>
-    internal sealed record BlitzWish(int Slot, IReadOnlyList<IReadOnlyList<int>> AllowedPrefixes);
+    internal sealed record BlitzWish(int Slot, IReadOnlyList<IReadOnlyList<int>> AllowedPrefixes)
+    {
+        internal IReadOnlyList<BlitzWishPath>? ChoicePaths { get; init; }
+    }
+
+    internal sealed record BlitzWishPath(
+        IReadOnlyList<int> PrefixSlots,
+        IReadOnlyList<BlitzRandomUpgradeChoice> Choices);
 
     /// <summary>
     /// A solved buy order for a wish list, or the reason none exists. Because a
@@ -312,6 +316,7 @@ internal static class BlitzShopPlanService
         int TotalSolutionSets)
     {
         public static readonly BlitzWishSolution None = new(false, [], 0, [], null, 0, 0);
+        internal IReadOnlyList<BlitzRandomUpgradeChoice> Choices { get; init; } = [];
     }
 
     /// <summary>
@@ -354,7 +359,7 @@ internal static class BlitzShopPlanService
                 if (buy.Count > maxPurchases) continue;
                 foreach (var order in Permutations(buy))
                 {
-                    var prefix = new HashSet<int>();
+                    var prefix = new List<int>();
                     var ok = true;
                     foreach (var slot in order)
                     {
@@ -370,10 +375,18 @@ internal static class BlitzShopPlanService
                     // playability, TMC timing included.
                     var sequence = Simulate(panorama, order);
                     if (!sequence.Valid) continue;
+                    var choicePaths = wishes.Where(wish => wish.ChoicePaths is not null)
+                        .Select(wish => wish.ChoicePaths!
+                            .Where(path => path.PrefixSlots.SequenceEqual(order.TakeWhile(slot => slot != wish.Slot)))
+                            .ToArray())
+                        .ToArray();
+                    var selectedChoices = CompatibleChoices(choicePaths, 0, []);
+                    if (selectedChoices is null) continue;
                     validOrders++;
                     solutionSets.Add(string.Join(",", fillers));
-                    first ??= new BlitzWishSolution(true, sequence.Steps, sequence.ChoicesLeft,
-                        fillers, null, 0, 0);
+                    first ??= new BlitzWishSolution(true,
+                        ResolveSelectedVariants(sequence.Steps, selectedChoices), sequence.ChoicesLeft,
+                        fillers, null, 0, 0) { Choices = selectedChoices };
                 }
             }
         }
@@ -403,8 +416,54 @@ internal static class BlitzShopPlanService
         return needed.Count > maxPurchases;
     }
 
-    private static bool ContainsPrefix(IReadOnlyList<IReadOnlyList<int>> allowed, HashSet<int> prefix) =>
-        allowed.Any(candidate => candidate.Count == prefix.Count && !candidate.Except(prefix).Any());
+    private static bool ContainsPrefix(IReadOnlyList<IReadOnlyList<int>> allowed, IReadOnlyList<int> prefix) =>
+        allowed.Any(candidate => candidate.SequenceEqual(prefix));
+
+    private static IReadOnlyList<BlitzRandomUpgradeChoice>? CompatibleChoices(
+        IReadOnlyList<BlitzWishPath[]> paths,
+        int index,
+        IReadOnlyList<BlitzRandomUpgradeChoice> selected)
+    {
+        if (index == paths.Count) return selected;
+        foreach (var path in paths[index])
+        {
+            if (path.Choices.Any(choice => selected.Any(existing =>
+                    existing.SourceSlot == choice.SourceSlot && existing.ScreenIndex == choice.ScreenIndex
+                    && !SameChoice(existing, choice)))) continue;
+            var result = CompatibleChoices(paths, index + 1,
+                selected.Concat(path.Choices).Distinct().ToArray());
+            if (result is not null) return result;
+        }
+        return null;
+    }
+
+    private static bool SameChoice(BlitzRandomUpgradeChoice left, BlitzRandomUpgradeChoice right) =>
+        left.Kind == right.Kind
+        && left.Card?.Id?.Entry == right.Card?.Id?.Entry && left.Card?.IsUpgraded == right.Card?.IsUpgraded
+        && left.Card?.StateKey == right.Card?.StateKey
+        && left.Result?.Id?.Entry == right.Result?.Id?.Entry && left.Result?.IsUpgraded == right.Result?.IsUpgraded
+        && left.Result?.StateKey == right.Result?.StateKey;
+
+    private static IReadOnlyList<BlitzPlanStep> ResolveSelectedVariants(
+        IReadOnlyList<BlitzPlanStep> steps,
+        IReadOnlyList<BlitzRandomUpgradeChoice> choices) => steps.Select(step =>
+    {
+        var variant = step.Outcome.Yield.RandomUpgradeVariants.FirstOrDefault(candidate =>
+            candidate.Choices.All(choice => choices.Any(existing =>
+                existing.SourceSlot == choice.SourceSlot && existing.ScreenIndex == choice.ScreenIndex
+                && SameChoice(existing, choice))));
+        return variant is null ? step : step with
+        {
+            Outcome = step.Outcome with
+            {
+                Yield = step.Outcome.Yield with
+                {
+                    UpgradedCards = variant.UpgradedCards,
+                    RandomUpgradeVariants = []
+                }
+            }
+        };
+    }).ToArray();
 
     private static IEnumerable<IReadOnlyList<int>> Combinations(IReadOnlyList<int> items, int count)
     {
@@ -420,7 +479,7 @@ internal static class BlitzShopPlanService
 
     private static IEnumerable<IReadOnlyList<int>> Permutations(IReadOnlyList<int> items)
     {
-        if (items.Count == 1)
+        if (items.Count <= 1)
         {
             yield return items;
             yield break;
@@ -442,7 +501,7 @@ internal static class BlitzShopPlanService
     {
         var steps = new List<BlitzPlanStep>();
         var choices = panorama.ChoicesRemaining;
-        var bought = new HashSet<int>();
+        var bought = new List<int>();
         foreach (var slot in order)
         {
             var good = panorama.GoodAt(slot);

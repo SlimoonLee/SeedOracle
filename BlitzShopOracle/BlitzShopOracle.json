@@ -3,7 +3,7 @@
   "name": "Blitz Shop Oracle / 极速商店先知",
   "author": "slimoon",
   "description": "独立预测极速商店的购买组合、随机升级分支和前置拿牌/删牌/变牌影响。无需 Combat Solver、Random Foreseer 或 RitsuLib。",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "has_pck": false,
   "has_dll": true,
   "affects_gameplay": false,

@@ -18,6 +18,8 @@ namespace SeedOracle.UI;
 internal static class BlitzShopAudit
 {
     private static Dictionary<(string Id, bool Upgraded), int>? _deckBefore;
+    private static BlitzYieldForecast? _expected;
+    private static string? _rngBefore;
     private static MerchantInventory? _visit;
     private static readonly List<int> Purchased = [];
 
@@ -37,6 +39,12 @@ internal static class BlitzShopAudit
                     || run.GameMode != GameMode.Blitz)
                     return;
                 _deckBefore = BlitzMerchantProbe.CountDeck(entry.Player);
+                var inventory = BlitzShopYield.InventoryOf(entry);
+                var slot = inventory is null ? -1 : SlotOf(inventory, entry);
+                _expected = !BlitzShopPlanPanel.PanoramaPending && slot >= 0
+                    ? BlitzShopPlanPanel.CurrentRow(slot, [])
+                    : null;
+                _rngBefore = RngPosition(entry.Player);
             }
             catch (Exception)
             {
@@ -85,11 +93,9 @@ internal static class BlitzShopAudit
         var prefix = Purchased.ToArray();
         if (!Purchased.Contains(slot)) Purchased.Add(slot);
 
-        var deckVerdict = BlitzShopPlanPanel.PanoramaPending
-            ? "recomputing"
-            : "no-row";
-        var preview = BlitzShopPlanPanel.CurrentRow(slot, prefix);
-        if (!BlitzShopPlanPanel.PanoramaPending && preview is not null && _deckBefore is not null)
+        var deckVerdict = "no-row-before-purchase";
+        var preview = _expected;
+        if (preview is not null && _deckBefore is not null)
         {
             deckVerdict = preview.Purchased
                 ? preview.NeedsCardPick && preview.TransformChoices.Count > 0
@@ -98,10 +104,18 @@ internal static class BlitzShopAudit
                 : "declined";
         }
         _deckBefore = null;
+        _expected = null;
 
         Entry.Logger.Info($"[BlitzAudit] slot={slot} {entry.MerchantEntryType} "
-            + $"prefix=[{string.Join(",", prefix)}] deck={deckVerdict}");
+            + $"prefix=[{string.Join(",", prefix)}] deck={deckVerdict} "
+            + $"rng={_rngBefore}->{RngPosition(entry.Player)} "
+            + $"expected={string.Join("/", preview?.UpgradedCards.Select(card => card.Id?.Entry) ?? [])}");
     }
+
+    private static string RngPosition(Player player) =>
+        $"S{player.PlayerRng.Shops.ToSerializable().counter},"
+        + $"R{player.PlayerRng.Rewards.ToSerializable().counter},"
+        + $"T{player.PlayerRng.Transformations.ToSerializable().counter}";
 
     /// <summary>
     /// The transform's real deck swap (removed source → added result) against
