@@ -21,7 +21,7 @@ $account = (Resolve-Path -LiteralPath $AccountDataRoot).Path
 $roaming = Join-Path $runtime 'Roaming'
 $local = Join-Path $runtime 'Local'
 
-function Resolve-ModSource([string]$Override, [string]$Id, [string]$WorkshopId) {
+function Resolve-ModSource([string]$Override, [string]$Id, [string]$WorkshopId, [switch]$Optional) {
     $steamApps = Split-Path -Parent (Split-Path -Parent $sourceGame)
     $candidates = if ($Override) { @($Override) } else {
         @((Join-Path $sourceGame "mods\$Id"), (Join-Path $steamApps "workshop\content\2868840\$WorkshopId"))
@@ -37,14 +37,16 @@ function Resolve-ModSource([string]$Override, [string]$Id, [string]$WorkshopId) 
             }
         }
     }
+    if ($Optional) { return $null }
     throw "Could not locate $Id. Supply its mod directory explicitly."
 }
 
 $mods = [ordered]@{
     'STS2-RitsuLib' = Resolve-ModSource $RitsuLibDir 'STS2-RitsuLib' '3747602295'
     'RandomForeseer' = Resolve-ModSource $RandomForeseerDir 'RandomForeseer' '3747531952'
-    'CombatSolver' = Resolve-ModSource $CombatSolverDir 'CombatSolver' '3790899961'
 }
+$combatSolver = Resolve-ModSource $CombatSolverDir 'CombatSolver' '3790899961' -Optional
+if ($combatSolver) { $mods['CombatSolver'] = $combatSolver }
 foreach ($name in @('SlayTheSpire2.exe', 'data_sts2_windows_x86_64\sts2.dll')) {
     if (-not (Test-Path -LiteralPath (Join-Path $sourceGame $name))) { throw "Missing game file: $name" }
 }
@@ -107,7 +109,7 @@ $settings | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath $settingsPath -E
 
 $modOutput = Join-Path $game 'mods\SeedOracle'
 $buildArgs = @('-c', 'Debug', "-p:Sts2Dir=$sourceGame", "-p:ModOutputDir=$modOutput")
-foreach ($dependency in @('STS2-RitsuLib', 'RandomForeseer', 'CombatSolver')) {
+foreach ($dependency in $mods.Keys) {
     $directory = Join-Path $game "mods\$dependency"
     $compatRoot = Join-Path $directory 'compat'
     $compatVersioned = Get-ChildItem -LiteralPath $compatRoot -Directory -ErrorAction SilentlyContinue |

@@ -73,12 +73,8 @@ internal sealed partial class RandomForeseerAdapter
 
         try
         {
-            // The ordinal-only PredictMerchant loop replays merchant generations
-            // back to back, but intervening combats and chests consume the same
-            // Rewards RNG and relic bags that later shops roll against, so the
-            // drift grows with route distance. Advance the real route rooms on
-            // the cloned state instead, exactly like combat and treasure
-            // predictions do.
+            // Earlier rooms can consume relics and cross a floor cutoff.
+            // Replay each room before generating this shop on the shadow run.
             var planning = new PlanningPredictionService();
             var state = planning.CreateState((RunState)player.RunState, player);
             using var isolation = ShadowIsolation.Enter(state.Player);

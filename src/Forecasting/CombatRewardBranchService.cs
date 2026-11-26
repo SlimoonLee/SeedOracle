@@ -1,6 +1,7 @@
 using System.Reflection;
 using System.Text.Json;
 using MegaCrit.Sts2.Core.Entities.Cards;
+using MegaCrit.Sts2.Core.Map;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Cards;
 using MegaCrit.Sts2.Core.Models.Relics;
@@ -43,7 +44,8 @@ internal static class CombatRewardBranchService
         RoomType roomType,
         EncounterModel encounter,
         CombatRewardDetails baseline,
-        Func<bool>? canContinue = null)
+        Func<bool>? canContinue = null,
+        MapPoint? mapPoint = null)
     {
         using var workSample = ForecastWorkProfile.Measure("reward.possibilities");
         var hasHunt = before.Run.Players.First(p => p.NetId == before.PlayerNetId)
@@ -66,7 +68,7 @@ internal static class CombatRewardBranchService
             var state = planning.Restore(seed?.State ?? before);
             using var scope = ShadowIsolation.Enter(state.Player, automateRewards: true);
             using var rewards = seed is null
-                ? planning.GenerateCombatRewards(state, roomType, encounter, assumedHuntTriggers: hunt)
+                ? planning.GenerateCombatRewards(state, roomType, encounter, assumedHuntTriggers: hunt, mapPoint: mapPoint)
                 : RestoreRewards(state, seed);
             if (order.Length == 0 && seed is null && CanRestoreRewards(rewards))
                 seeds[hunt] = new(planning.Capture(state), rewards.NativeCardRewards.Select(reward =>

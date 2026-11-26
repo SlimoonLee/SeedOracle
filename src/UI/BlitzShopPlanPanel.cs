@@ -1075,7 +1075,7 @@ internal sealed partial class BlitzShopPlanPanelControl : PanelContainer
             new Color(0.14f, 0.19f, 0.1f, 0.98f), StsColors.gold));
 
         button.MouseEntered += () => BlitzShopItemTip.Show(chip.Detail, button);
-        button.MouseExited += BlitzShopItemTip.Hide;
+        button.MouseExited += () => BlitzShopItemTip.Hide(button);
         if (clickable)
         {
             var slotCopy = slot;
@@ -1607,7 +1607,7 @@ internal static class BlitzShopPlanPanel
         }
     }
 
-    private static void ReportFailure(string operation, Exception exception)
+    internal static void ReportFailure(string operation, Exception exception)
     {
         var root = exception.GetBaseException();
         var key = $"{operation}:{root.GetType().FullName}:{root.Message}";
@@ -1625,6 +1625,7 @@ internal static class BlitzShopPlanPanel
 internal static class BlitzShopItemTip
 {
     private static PanelContainer? _panel;
+    private static Control? _anchor;
     private static Control? _host;
     private static CanvasLayer? _layer;
 
@@ -1637,6 +1638,13 @@ internal static class BlitzShopItemTip
     /// </summary>
     internal static void BindParent(Control host)
     {
+        if (!ReferenceEquals(_host, host))
+        {
+            Hide();
+            if (_layer is not null && GodotObject.IsInstanceValid(_layer))
+                _layer.QueueFree();
+            _layer = null;
+        }
         _host = host;
         if (_layer is null || !GodotObject.IsInstanceValid(_layer))
         {
@@ -1650,14 +1658,24 @@ internal static class BlitzShopItemTip
         try
         {
             if (_host is null || !GodotObject.IsInstanceValid(_host)
-                || _layer is null || !GodotObject.IsInstanceValid(_layer))
+                || _host.IsQueuedForDeletion()
+                || _layer is null || !GodotObject.IsInstanceValid(_layer)
+                || _layer.IsQueuedForDeletion()
+                || !GodotObject.IsInstanceValid(anchor) || anchor.IsQueuedForDeletion()
+                || (!ReferenceEquals(_host, anchor) && !_host.IsAncestorOf(anchor)))
                 return;
+            if (ReferenceEquals(_anchor, anchor) && _panel is not null
+                && GodotObject.IsInstanceValid(_panel) && !_panel.IsQueuedForDeletion())
+                return;
+            Hide();
             var content = Build(item, _host);
             if (content is null) return;
-            Hide();
             var panel = new PanelContainer
             {
-                MouseFilter = Control.MouseFilterEnum.Ignore
+                MouseFilter = Control.MouseFilterEnum.Ignore,
+                // Containers still receive input when only their parent ignores it.
+                // Exclude the whole tooltip from GUI mouse-over traversal.
+                MouseBehaviorRecursive = Control.MouseBehaviorRecursiveEnum.Disabled
             };
             panel.AddThemeStyleboxOverride("panel", PreCombatPanelStyles.CreatePanel(
                 new Color(0.02f, 0.05f, 0.06f, 0.98f), new Color(0.3f, 0.5f, 0.55f, 0.95f), 8));
@@ -1687,10 +1705,11 @@ internal static class BlitzShopItemTip
                 Mathf.Clamp(at.Y, 8f, MathF.Max(8f, viewport.Y - 320f)));
             _layer.AddChild(panel);
             _panel = panel;
+            _anchor = anchor;
         }
-        catch (Exception)
+        catch (Exception error)
         {
-            // A tooltip must never take the window down with it.
+            BlitzShopPlanPanel.ReportFailure("tooltip", error);
         }
     }
 
@@ -1698,9 +1717,17 @@ internal static class BlitzShopItemTip
     {
         var panel = _panel;
         _panel = null;
+        _anchor = null;
         if (panel is null || !GodotObject.IsInstanceValid(panel)) return;
-        panel.GetParent()?.RemoveChild(panel);
+        // MouseExited can run inside Godot's mouse-over traversal. Keep the
+        // node attached until the engine's deferred deletion at frame end.
+        panel.Hide();
         panel.QueueFree();
+    }
+
+    internal static void Hide(Control anchor)
+    {
+        if (ReferenceEquals(_anchor, anchor)) Hide();
     }
 
     private static Control? Build(ForecastItemDetails item, Control themeSource)

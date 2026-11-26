@@ -27,7 +27,7 @@ public static class Entry
 
     internal static IRandomForeseerAdapter RandomForeseer { get; private set; } = null!;
 
-    internal static ICombatSolverAdapter CombatSolver { get; private set; } = null!;
+    internal static ICombatSolverAdapter CombatSolver { get; } = new CombatSolverAdapter();
 
     public static void Initialize()
     {
@@ -58,16 +58,7 @@ public static class Entry
             RandomForeseer = new RandomForeseerUnavailableAdapter();
         }
 
-        var combatSolver = new CombatSolverAdapter();
-        CombatSolver = combatSolver;
         MapForecasts = new MapForecastService(RandomForeseer);
-
-        Logger.Info($"[Integration] {combatSolver.Status.Describe()}");
-        if (!combatSolver.SupportsPreCombatForecast)
-        {
-            Logger.Info(
-                "[Integration] Combat Solver pre-combat API v3 is unavailable; combat damage estimates remain disabled.");
-        }
 
         var assembly = Assembly.GetExecutingAssembly();
         new Harmony($"{ModId}.Harmony").PatchAll(assembly);

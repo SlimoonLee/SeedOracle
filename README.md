@@ -1,6 +1,6 @@
 # Seed Oracle / 种子先知
 
-Seed Oracle 是《Slay the Spire 2》`0.113.0` 的路线信息前瞻 Mod。它在地图节点 HoverTip 中显示当前跑局已经能够确定的信息，并为每一项结果标注“确定”“当前世界线”“路线相关”或“暂不支持”。
+Seed Oracle 是《Slay the Spire 2》`0.114.0` 的路线信息前瞻 Mod。它在地图节点 HoverTip 中显示当前跑局已经能够确定的信息，并为每一项结果标注“确定”“当前世界线”“路线相关”或“暂不支持”。
 
 当前版本实现：
 
@@ -27,8 +27,8 @@ Seed Oracle 是《Slay the Spire 2》`0.113.0` 的路线信息前瞻 Mod。它�
 - 使用游戏支持的 `[gold]`、`[green]`、`[orange]` 和 `[blue]` 富文本标签显示预测状态与价格；
 - 卡牌、遗物与药水名称按实际稀有度显示为普通白、罕见蓝、稀有金等颜色；Mod 设置页可改用原生卡图缩略图代替卡名，彩色菱形继续标出稀有度，升级牌保留“+”；
 - Mod 设置页可关闭非计划模式下的路线、标记和地图预测浮窗（默认开启）；打开计划面板仍显示规划信息，面板顶部固定提示“当前计划模式，点击房间不会进入，需要进入时请关闭计划面板”；
-- 地图顶部提供“战损与模拟”按钮和可见面板；打开面板与地图悬停都不会启动 worker。每个场景有独立“计算”按钮，未选择的路线不排队；相同跑局状态与搜索设置会直接恢复缓存结果；
-- 面板用与地图路线标记一致的彩色三角形、正方形、菱形等图形区分路线，悬停一行会在地图上高亮对应目标与路径；可选择单场搜索预算与并行度，并查看耗时、可信度和药水计划；
+- 地图顶部提供“战损与模拟”按钮和可见面板；地图悬停不会启动 worker，打开面板会在后台预热（保活策略选“自动关闭”时不预热），首次计算因此不必再等游戏进程冷启动。每个场景有独立“计算”按钮，未选择的路线不排队；相同跑局状态与搜索设置会直接恢复缓存结果；
+- 面板用与地图路线标记一致的彩色三角形、正方形、菱形等图形区分路线，悬停一行会在地图上高亮对应目标与路径；可选择单场搜索预算与并行度，并查看耗时、可信度和药水计划；计算进度按本次搜索预算计时，启动与载入阶段只显示已用时间。求解器搜完即返回，不会等满预算；180 秒只是超时上限，不是预期耗时；
 - 面板实时显示隔离 Combat Solver worker 的 PID、工作集、私有内存和静音状态；可选择保活 2、10、30 分钟、一直维持或任务结束后自动关闭，也可手动关闭及重启/预热；
 - Combat Solver 在主游戏初始化时钉住本次会话实际载入的 Mod 文件；Steam 运行中更新工坊目录时，隔离 worker 仍以主进程版本为准，不会因磁盘版本先行更新而误报 Mod 集合不一致；
 - “咱俩碰一碰”页可手动运行 0～10 个假设样本，对象包括当前幕随机弱怪池、强怪池、精英池、指定普通/精英怪组和当前 Boss；指定怪组及样本结果使用游戏当前语言的本地化遭遇名称，逐样本显示战损、终局生命、回合和用药，并汇总最低、平均与最高战损；
@@ -36,13 +36,21 @@ Seed Oracle 是《Slay the Spire 2》`0.113.0` 的路线信息前瞻 Mod。它�
 - 规划中的普通战、精英战、Boss、问号点战斗和事件选项战斗可从规划快照运行模拟，默认 3 次、可选 1～10 次；成功结果可作为该节点的生命与用药参照写回规划；
 - 手动计算覆盖每条当前可行路线上的第一场确定战斗。目标前允许经过不会直接消耗战斗序列的篝火、宝箱或商店，目标坐标和中间楼层历史会传入隔离进程；未决事件和中间战斗不跳过计算；
 - 若目标前有篝火，面板同时给出“沿途状态保持当前值”和“在前置篝火休息后入战”场景。休息分支在开战 Hook 前应用游戏当前规则算出的 HP，并明确标出尚未模拟的奖励、锻造与其他触发；
-- 探测 Random Foreseer 与 Combat Solver 的版本和可调用能力；
+- 探测 Random Foreseer 与可选 Combat Solver 的版本和可调用能力；
 - Debug 构建在每次地图预测前后比较 live state 指纹。
 
 远端路线预测只展开实际算出内容变化的选择分支：以一条具体选择链为参照，逐格列出其他选择造成的商品、价格或掉落变化。相同结果合并，未算出具体结果的情况不再追加泛泛提示。计算仍有预算和机制覆盖范围，分支列表不代表穷尽全部玩法。
 
-当前版本同时兼容 Combat Solver public API v5；检测到 API v6 时额外启用规划快照战斗模拟。v6 扩展通过独立 `SerializableRun` 把规划中的牌组、生命、药水、地图和事件状态交给 worker，支持问号点与事件战斗；旧的 v5 工坊版仍可使用确定路线和当前状态假设样本，规划模拟控件会明确标记为不可用。所有战斗都在独立 headless 游戏进程中初始化和求解，主进程调用前后核对完整跑局/RNG 状态令牌。远端确定路线数值仍是清楚标注的条件结果：沿途若拿牌、拿遗物、用药、购买、锻造或触发其他状态变化，应在实际选择后重新计算。
+Combat Solver 是战斗预测的可选依赖。未安装时，种子先知仍提供地图、事件、卡牌、遗物、药水和商店预测，战损计算、纯模拟战和规划战斗模拟会标记为不可用。检测到 Combat Solver public API v5 时启用战斗预测，检测到 API v6 时额外启用规划快照战斗模拟。v6 扩展通过独立 `SerializableRun` 把规划中的牌组、生命、药水、地图和事件状态交给 worker，支持问号点与事件战斗。所有战斗都在独立 headless 游戏进程中初始化和求解，主进程调用前后核对完整跑局/RNG 状态令牌。远端确定路线数值仍是清楚标注的条件结果：沿途若拿牌、拿遗物、用药、购买、锻造或触发其他状态变化，应在实际选择后重新计算。
 设计评估与验证边界见 [docs/combat-solver-precombat-assessment.md](docs/combat-solver-precombat-assessment.md)。
+
+## 0.1.66 游戏 v0.114.0 适配
+
+- 适配《杀戮尖塔 2》`v0.114.0`，依赖提升为 RitsuLib `0.6.16+`（`compat/0.114.0`）、Random Foreseer `0.17.0+`；`min_game_version` 改为 `0.114.0`。创意工坊暂不可用时，三者均可从各自 GitHub Release 获取。
+- 游戏把 HP 扣除拆成“扣格挡”和“扣血”两步：`Creature.LoseHpInternal(decimal, bool dryRun)` 不再接受 `ValueProp`，格挡交互改由 `DamageBlockInternal` 负责。影子击杀流程按新版 `CreatureCmd.Kill` 同步：直接扣血，并新增“正在行动中的生物死亡时不立即移除能力、正在攻击的玩家死亡时不停用 Hook”两个条件。
+- Harmony 补丁目标全部按新程序集重新解析：55 个补丁类、67 个补丁方法（含 11 处按字符串指定方法名与 3 个动态 `TargetMethods`）全部命中，无需改动。
+- Random Foreseer 桥接改用到的内部类型（`OutOfCombat.RunPredictionContext`、`MerchantRestockPrediction.PredictCard`、`OutOfCombat.Mirrors.HookMirrors.ModifyMerchantPrice`、`CardRewardPrediction.PredictCards`、`CombatEndEffectPrediction.FastForwardMonsterRoomCombatEndHooks`、`EventOptionPrediction`）与 0.16.1 相比逐行未变，签名与成员名保持一致。
+- Combat Solver 1.0.3 的战前 API 仍是 v6，超时约束（预算 + 10 秒 ≤ 180 秒）未变，反射绑定与结果映射全部通过；该版本把“最大求解时长”默认值上调到 30 秒、上限 600 秒，属游戏内求解设置，不影响战前预测的 5/8/12/20 秒搜索预算。
 
 ## 0.1.59 极速商店「全景与规划」窗口：回答整个六选三
 
@@ -324,15 +332,15 @@ Seed Oracle `0.1.46` 适配游戏 `v0.113.0`：`SeedOracle.json` 的 `min_game_v
 dotnet build .\SeedOracle.csproj -c Release
 ```
 
-`local.props` 中的 `CombatSolverDir` 应指向含所需 API 的 CombatSolver 构建目录；可以使用作者工坊条目 `2868840/3790899961`，或在审阅 v6 PR 时指向本地 Release 输出。不要把临时构建目录中的 SeedOracle 文件复制到 CombatSolver 目录。
+Seed Oracle 不引用 Combat Solver 程序集，`local.props` 无需 Combat Solver 路径：加载器初始化后从已加载的 Combat Solver Mod 中按签名反射绑定 `CombatSolver.Api`（要求 API v5+）。未安装或 API 过旧时仍可构建和运行种子先知，只是把战斗计算标记为不可用。不要把临时构建目录中的 SeedOracle 文件复制到 CombatSolver 目录。
 
 默认会把 `SeedOracle.dll`、PDB 和清单部署到游戏目录的 `mods/SeedOracle`。
 
 依赖：
 
-- STS2-RitsuLib `0.6.11+`（需含 `compat/0.113.0`）
-- Random Foreseer `0.14.0+`（`lib/0.14.0` 变体，适配游戏 0.113.0）
-- Combat Solver `>=0.51.3`（public API v5 最低门槛；更新的主 Mod 版本自动兼容）；规划战斗模拟需 API v6 扩展
+- STS2-RitsuLib `0.6.16+`（需含 `compat/0.114.0`）
+- Random Foreseer `0.17.0+`（适配游戏 0.114.0；0.17.0 起发布包是单个 `RandomForeseer.dll`，不再带 `lib/<版本>` 变体目录）
+- Combat Solver 可选，`>=0.51.3` 时启用战斗预测；规划战斗模拟需 API v6（上游 `0.51.9`、`1.0.0` 与 `1.0.3` 均已内置，`1.0.3` 的调用兼容性已验证）
 
 依赖能力审计见 [docs/capability-audit.md](docs/capability-audit.md)。
 

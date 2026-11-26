@@ -67,7 +67,7 @@ Mod 设置中可以切换卡牌名称 / 缩略图，也可以关闭非计划模�
 
 [h2]依赖与感谢[/h2]
 
-请订阅并启用以下依赖，建议保持工坊版本更新：
+请订阅并启用以下必需依赖，建议保持工坊版本更新。Combat Solver 为可选依赖，缺少时其他预测功能仍可使用：
 
 [list]
 [*][url=https://steamcommunity.com/sharedfiles/filedetails/?id=3747602295]STS2-RitsuLib[/url] — 感谢 OLC（BAKAOLC）与贡献者提供 Mod 框架和设置界面等基础支持。[url=https://github.com/BAKAOLC/STS2-RitsuLib]项目地址[/url]

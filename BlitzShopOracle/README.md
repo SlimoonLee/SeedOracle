@@ -1,4 +1,4 @@
-# Blitz Shop Oracle / 极速商店先知
+# 极速模式商店全预测 / BlitzShopOracle
 
 这是一个独立的极速模式商店预测 mod。它从当前跑局的原生存档状态建立只读影子副本，计算整组商店的购买组合、购买顺序、随机升级分支，以及拿牌、删牌、变牌和蛋类遗物带来的后续变化。
 
@@ -11,3 +11,5 @@ dotnet build .\BlitzShopOracle.csproj -c Release
 ```
 
 构建完成后会复制到游戏的 `mods/BlitzShopOracle` 目录。
+
+创意工坊上传工作区位于 [workshop](workshop/README.md)，包含封面、简介、上传配置和发布文件。

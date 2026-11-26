@@ -9,6 +9,7 @@ using MegaCrit.Sts2.Core.Commands;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Cards;
+using MegaCrit.Sts2.Core.Nodes;
 using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.addons.mega_text;
 using SeedOracle.Forecasting;
@@ -662,7 +663,7 @@ internal static class BlitzShopPlanRegressionTests
             .FirstOrDefault();
         if (sample is not null)
         {
-            var tree = panel.GetTree();
+            var tree = NGame.Instance?.GetTree();
             if (tree is not null)
             {
                 tree.Root.AddChild(panel);
@@ -673,7 +674,23 @@ internal static class BlitzShopPlanRegressionTests
                     Require(rich is null
                             || rich.HasThemeFontOverride(ThemeConstants.RichTextLabel.NormalFont),
                         "the item tip's rich text lacks the theme font override the game asserts");
-                    BlitzShopItemTip.Hide();
+                    var layer = panel.GetChildren().OfType<CanvasLayer>().Single();
+                    var tip = layer.GetChildren().OfType<PanelContainer>().Single();
+                    Require(tip.GetMouseFilterWithOverride() == Control.MouseFilterEnum.Ignore
+                            && tip.FindChildren("*", "Control", recursive: true, owned: false)
+                                .OfType<Control>().All(control =>
+                                    control.GetMouseFilterWithOverride() == Control.MouseFilterEnum.Ignore),
+                        "tooltip descendants intercept GUI mouse-over events");
+                    BlitzShopItemTip.Show(sample, panel);
+                    Require(layer.GetChildCount() == 1,
+                        "repeated enter events recreated the same tooltip");
+                    BlitzShopItemTip.Hide(panel.GetChildren().OfType<Control>().First());
+                    Require(tip.Visible && !tip.IsQueuedForDeletion(),
+                        "an old anchor's exit event closed the current tooltip");
+                    BlitzShopItemTip.Hide(panel);
+                    Require(!tip.Visible && tip.IsQueuedForDeletion()
+                            && ReferenceEquals(tip.GetParent(), layer),
+                        "tooltip removal mutated the scene tree synchronously during mouse exit");
                 }
                 finally
                 {

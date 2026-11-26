@@ -5,7 +5,6 @@ using MegaCrit.Sts2.Core.GameActions.Multiplayer;
 using MegaCrit.Sts2.Core.Hooks;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Events;
-using MegaCrit.Sts2.Core.ValueProps;
 
 namespace SeedOracle.Integration;
 
@@ -57,7 +56,7 @@ internal static class ShadowCreatureDeathPatch
                 var hp = creature.CurrentHp;
                 if (hp > 0)
                 {
-                    creature.LoseHpInternal(hp, ValueProp.Unblockable | ValueProp.Unpowered);
+                    creature.LoseHpInternal(hp);
                     await Hook.AfterCurrentHpChanged(run, null, creature, -hp);
                 }
                 await Hook.BeforeDeath(run, null, creature);
@@ -66,9 +65,14 @@ internal static class ShadowCreatureDeathPatch
                 {
                     creature.InvokeDiedEvent();
                     await Hook.AfterDeath(run, null, creature, cardSource, false, 0f);
-                    foreach (var power in creature.RemoveAllPowersAfterDeath())
-                        await power.AfterRemoved(creature);
-                    player.DeactivateHooks();
+                    // v0.114.0: a creature that dies while still performing a move or an
+                    // attack keeps its powers, and an attacking player keeps its hooks.
+                    var midAction = creature.Monster is { IsPerformingMove: true } || creature.IsAttacking;
+                    if (!midAction)
+                        foreach (var power in creature.RemoveAllPowersAfterDeath())
+                            await power.AfterRemoved(creature);
+                    if (!creature.IsAttacking)
+                        player.DeactivateHooks();
                     break;
                 }
                 if (recursion >= 10)

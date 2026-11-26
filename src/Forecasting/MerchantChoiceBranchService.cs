@@ -53,7 +53,7 @@ internal sealed class MerchantChoiceBranchService(
         MerchantInventoryForecast baseline)
     {
         var outcomes = PredictTargets(player, route,
-            (state, type) => type == RoomType.Shop ? planning.GenerateMerchant(state) : null,
+            (state, type, point) => type == RoomType.Shop ? planning.GenerateMerchant(state, point) : null,
             ForecastContentKey.Merchant);
         if (outcomes.Count == 0) return baseline;
         var reference = outcomes[0];
@@ -71,13 +71,13 @@ internal sealed class MerchantChoiceBranchService(
 
     internal CombatRewardDetails PredictRewards(Player player, RouteWorldline route, CombatRewardDetails baseline)
     {
-        var outcomes = PredictTargets(player, route, (state, type) =>
+        var outcomes = PredictTargets(player, route, (state, type, point) =>
         {
             if (!type.IsCombatRoom()) return null;
             var encounter = ResolveEncounter(state, type);
             var before = planning.Capture(state);
-            using var generated = planning.GenerateCombatRewards(state, type, encounter);
-            return CombatRewardBranchService.AddPossibilities(planning, before, type, encounter, generated.Detach(), () => HasBudget);
+            using var generated = planning.GenerateCombatRewards(state, type, encounter, mapPoint: point);
+            return CombatRewardBranchService.AddPossibilities(planning, before, type, encounter, generated.Detach(), () => HasBudget, point);
         }, ForecastContentKey.Combat);
         return outcomes.Count == 0 ? baseline : outcomes[0].Outcome with
         {
@@ -89,9 +89,8 @@ internal sealed class MerchantChoiceBranchService(
 
     internal TreasureRoomDetails PredictTreasure(Player player, RouteWorldline route, TreasureRoomDetails baseline)
     {
-        var target = route.Path.Steps.Count > 0 ? route.Path.Steps[^1].Point : null;
         var outcomes = PredictTargets(player, route,
-            (state, type) => type == RoomType.Treasure ? planning.GenerateTreasure(state, false, target) : null,
+            (state, type, point) => type == RoomType.Treasure ? planning.GenerateTreasure(state, false, point) : null,
             ForecastContentKey.Treasure);
         return outcomes.Count == 0 ? baseline : outcomes[0].Outcome with
         {
@@ -102,7 +101,7 @@ internal sealed class MerchantChoiceBranchService(
     }
 
     private IReadOnlyList<RewardChoiceBranch<T>> PredictTargets<T>(Player player, RouteWorldline route,
-        Func<PlanningPredictionService.State, RoomType, T?> generate, Func<T, string> key) where T : class
+        Func<PlanningPredictionService.State, RoomType, MapPoint, T?> generate, Func<T, string> key) where T : class
     {
         using var workSample = ForecastWorkProfile.Measure("choice.expand");
         if (route.Path.Length == 0 || route.Path.Length == 1 && currentEvent is null)
@@ -145,7 +144,7 @@ internal sealed class MerchantChoiceBranchService(
             {
                 if (current.Step == route.Path.Length - 1)
                 {
-                    if (type == route.TargetRoomType && generate(state, type) is { } outcome)
+                    if (type == route.TargetRoomType && generate(state, type, point) is { } outcome)
                         results.Add(new RewardChoiceBranch<T>(prefix, outcome)
                             { ChoicePaths = [new(prefix, OutcomeFacts(current.Branch.Facts, deckOnly))] });
                     continue;
@@ -154,7 +153,7 @@ internal sealed class MerchantChoiceBranchService(
                 if (type.IsCombatRoom())
                 {
                     var encounter = ResolveEncounter(state, type);
-                    branches = ExpandCombat(planning.Capture(state), type, encounter, floor);
+                    branches = ExpandCombat(planning.Capture(state), type, encounter, floor, point);
                 }
                 else
                 {
@@ -162,13 +161,14 @@ internal sealed class MerchantChoiceBranchService(
                         ? point.PointType == MapPointType.Ancient ? state.Run.Act._rooms.Ancient
                             : new EventQueueSimulation(state.Run, state.Run.IterateHookListeners(null).ToArray()).Consume()
                         : null;
-                    state.Run.AppendToMapPointHistory(point.PointType, type, model?.Id);
+                    if (type is not (RoomType.Treasure or RoomType.Shop or RoomType.RestSite))
+                        PlanningPredictionService.RecordMapRoom(state.Run, type, point, model?.Id);
                     branches = type switch
                     {
                         RoomType.Event when model is not null => ExpandEvent(planning.Capture(state), model, floor),
                         RoomType.Treasure => ExpandTreasure(state, floor, point),
-                        RoomType.Shop => ExpandShop(state, floor, IsImmediatelyBeforeFixedCombat(route, current.Step)),
-                        RoomType.RestSite => ExpandRest(state, floor),
+                        RoomType.Shop => ExpandShop(state, floor, point, IsImmediatelyBeforeFixedCombat(route, current.Step)),
+                        RoomType.RestSite => ExpandRest(state, floor, point),
                         _ => [new Branch(planning.Capture(state), floor + type)]
                     };
                 }
@@ -209,7 +209,7 @@ internal sealed class MerchantChoiceBranchService(
     }
 
     private RewardChoiceBranch<T>? FollowReference<T>(Branch root, RouteWorldline route,
-        Func<PlanningPredictionService.State, RoomType, T?> generate) where T : class
+        Func<PlanningPredictionService.State, RoomType, MapPoint, T?> generate) where T : class
     {
         var state = planning.Restore(root.State);
         var condition = root.Condition;
@@ -228,13 +228,13 @@ internal sealed class MerchantChoiceBranchService(
                     && !OrdinaryCardChoiceEquivalence.CanContinue(state, type, point, index == route.Path.Length - 1))
                     deckOnly.Clear();
                 if (index == route.Path.Length - 1)
-                    return type == route.TargetRoomType && generate(state, type) is { } outcome
+                    return type == route.TargetRoomType && generate(state, type, point) is { } outcome
                         ? new RewardChoiceBranch<T>(condition, outcome)
                             { ChoicePaths = [new(condition, OutcomeFacts(facts, deckOnly))] } : null;
                 var floor = $"{point.coord.row + 1}F ";
                 if (type.IsCombatRoom())
                 {
-                    using var rewards = planning.GenerateCombatRewards(state, type, ResolveEncounter(state, type));
+                    using var rewards = planning.GenerateCombatRewards(state, type, ResolveEncounter(state, type), mapPoint: point);
                     var deckOnlyReward = OrdinaryCardChoiceEquivalence.CanForgetPick(state, rewards);
                     var choice = new RoutePlanChoice.Combat(rewards.CardRewardGroups.Select((group, slot) =>
                         new RoutePlanChoice.CardReward(slot, [new CardRewardPick(AlternativeId: "Skip")])).ToArray(), null, false);
@@ -254,7 +254,8 @@ internal sealed class MerchantChoiceBranchService(
                         ? point.PointType == MapPointType.Ancient ? state.Run.Act._rooms.Ancient
                             : new EventQueueSimulation(state.Run, state.Run.IterateHookListeners(null).ToArray()).Consume()
                         : null;
-                    state.Run.AppendToMapPointHistory(point.PointType, type, model?.Id);
+                    if (type is not (RoomType.Treasure or RoomType.Shop or RoomType.RestSite))
+                        PlanningPredictionService.RecordMapRoom(state.Run, type, point, model?.Id);
                     if (type == RoomType.Event && model is not null)
                     {
                         var branch = ExpandEvent(planning.Capture(state), model, floor, firstOnly: true).FirstOrDefault();
@@ -272,7 +273,7 @@ internal sealed class MerchantChoiceBranchService(
                     }
                     else if (type == RoomType.Shop)
                     {
-                        var stock = planning.GenerateMerchant(state);
+                        var stock = planning.GenerateMerchant(state, point);
                         var scope = ShopPurchaseChoices.Describe(state, stock, FloorNumber(floor),
                             IsImmediatelyBeforeFixedCombat(route, index));
                         condition = Join(condition, floor + Text("不购买", "buy nothing"));
@@ -280,7 +281,7 @@ internal sealed class MerchantChoiceBranchService(
                     }
                     else if (type == RoomType.RestSite)
                     {
-                        planning.EnterRestSite(state);
+                        planning.EnterRestSite(state, point);
                         condition = Join(condition, floor + Text("不锻造", "no smith"));
                         facts.Add(ActionFact("rest", floor, "skip", Text("不锻造", "no smith")));
                     }
@@ -413,7 +414,7 @@ internal sealed class MerchantChoiceBranchService(
     }
 
     private IReadOnlyList<Branch> ExpandCombat(PlanningPredictionService.StateSnapshot input,
-        RoomType type, EncounterModel encounter, string floor)
+        RoomType type, EncounterModel encounter, string floor, MapPoint? point = null)
     {
         var pending = new Queue<RoutePlanChoice.Combat>();
         var initial = planning.Restore(input);
@@ -436,7 +437,7 @@ internal sealed class MerchantChoiceBranchService(
             try
             {
                 using var generated = planning.GenerateCombatRewards(state, type, encounter,
-                    assumedHuntTriggers: choice.HuntTriggers);
+                    assumedHuntTriggers: choice.HuntTriggers, mapPoint: point);
                 var deckOnlyReward = OrdinaryCardChoiceEquivalence.CanForgetPick(state, generated);
                 var result = RoutePlanForecastService.ApplyCombatRewards(state, generated, choice);
                 if (result.CardRewardGroups.Any(group => group.Steps.Any(step => step.RejectedChoice)))
@@ -521,10 +522,10 @@ internal sealed class MerchantChoiceBranchService(
     private static bool IsImmediatelyBeforeFixedCombat(RouteWorldline route, int step) => step == route.Path.Length - 2
         && route.Path.Steps[^1].Point.PointType == MapPointType.Monster && route.TargetRoomType == RoomType.Monster;
 
-    private IReadOnlyList<Branch> ExpandShop(PlanningPredictionService.State state, string floor, bool nextIsFixedCombat)
+    private IReadOnlyList<Branch> ExpandShop(PlanningPredictionService.State state, string floor, MapPoint point, bool nextIsFixedCombat)
     {
         var beforeGeneration = planning.Capture(state);
-        var stock = planning.GenerateMerchant(state);
+        var stock = planning.GenerateMerchant(state, point);
         var choices = ShopPurchaseChoices.Describe(state, stock, FloorNumber(floor), nextIsFixedCombat);
         var before = planning.Capture(state);
         var results = new List<Branch> { new(before, floor + Text("不购买", "buy nothing"))
@@ -541,7 +542,7 @@ internal sealed class MerchantChoiceBranchService(
             try
             {
                 var selector = new MerchantRewardSelector(purchase, FloorNumber(floor), nextIsFixedCombat, Chinese);
-                using (var shop = new PlanningMerchantSession(purchase))
+                using (var shop = planning.EnterMerchant(purchase, point))
                 {
                     if (!shop.TryPurchase(ShopPurchaseChoices.Pick(stock, offer.Slot), selector, selector.HandleRewardsAsync)) continue;
                 }
@@ -557,9 +558,9 @@ internal sealed class MerchantChoiceBranchService(
         return results;
     }
 
-    private IReadOnlyList<Branch> ExpandRest(PlanningPredictionService.State state, string floor)
+    private IReadOnlyList<Branch> ExpandRest(PlanningPredictionService.State state, string floor, MapPoint point)
     {
-        planning.EnterRestSite(state);
+        planning.EnterRestSite(state, point);
         var before = planning.Capture(state);
         var results = new List<Branch> { new(before, floor + Text("不锻造", "no smith"))
             { Facts = [ActionFact("rest", floor, "skip", Text("不锻造", "no smith"))] } };

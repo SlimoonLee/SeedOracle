@@ -22,6 +22,7 @@ using MegaCrit.Sts2.Core.Random;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Rewards;
 using MegaCrit.Sts2.Core.Runs;
+using MegaCrit.Sts2.Core.Runs.History;
 using MegaCrit.Sts2.Core.Saves;
 using MegaCrit.Sts2.Core.Saves.Runs;
 using SeedOracle.Api;
@@ -410,6 +411,26 @@ internal sealed class PlanningPredictionService
         return clone;
     }
 
+    // Relic eligibility uses TotalFloor, including the map point whose
+    // rewards or stock are about to be generated.
+    internal static void RecordMapRoom(RunState run, RoomType roomType,
+        MapPoint? point = null, ModelId? modelId = null)
+    {
+        if (point is not null)
+            run.ActFloor = point.coord.row + 1;
+        var pointType = point?.PointType ?? (roomType switch
+        {
+            RoomType.Monster => MapPointType.Monster,
+            RoomType.Elite => MapPointType.Elite,
+            RoomType.Boss => MapPointType.Boss,
+            RoomType.Shop => MapPointType.Shop,
+            RoomType.Treasure => MapPointType.Treasure,
+            RoomType.RestSite => MapPointType.RestSite,
+            _ => MapPointType.Unknown
+        });
+        run.AppendToMapPointHistory(pointType, roomType, modelId);
+    }
+
     internal void AdvanceRoomsBeforeTarget(
         State state,
         IReadOnlyList<RoomType> resolvedRooms,
@@ -435,8 +456,6 @@ internal sealed class PlanningPredictionService
                 };
                 visited[type] = offset + 1;
             }
-            // The point is only needed to recognise quest-marked chests; a
-            // caller that cannot supply coordinates keeps the old behaviour.
             var point = resolvedPoints is { } points && index < points.Count ? points[index] : null;
             AdvanceRoom(state, type, encounter, point);
         }
@@ -450,22 +469,26 @@ internal sealed class PlanningPredictionService
             case RoomType.Elite:
             case RoomType.Boss:
                 state.CombatsAdvanced++;
-                using (GenerateCombatRewards(state, roomType, encounter)) { }
+                using (GenerateCombatRewards(state, roomType, encounter, mapPoint: mapPoint)) { }
                 break;
             case RoomType.Shop:
-                _ = GenerateMerchant(state);
+                _ = GenerateMerchant(state, mapPoint);
                 break;
             case RoomType.Treasure:
                 _ = GenerateTreasure(state, isPriorRoom: true, mapPoint);
                 break;
             case RoomType.RestSite:
-                EnterRestSite(state);
+                EnterRestSite(state, mapPoint);
+                break;
+            default:
+                RecordMapRoom(state.Run, roomType, mapPoint);
                 break;
         }
     }
 
-    internal void EnterRestSite(State state)
+    internal void EnterRestSite(State state, MapPoint? mapPoint = null)
     {
+        RecordMapRoom(state.Run, RoomType.RestSite, mapPoint);
         using var isolation = ShadowIsolation.Enter(state.Player, automateRewards: true);
         var room = new RestSiteRoom();
         state.Run.PushRoom(room);
@@ -478,7 +501,8 @@ internal sealed class PlanningPredictionService
         RoomType roomType,
         EncounterModel? encounter,
         CombatRoom? eventCombatRoom = null,
-        int assumedHuntTriggers = 0)
+        int assumedHuntTriggers = 0,
+        MapPoint? mapPoint = null)
     {
         var player = state.Player;
         using var isolation = ShadowIsolation.Enter(player, automateRewards: true);
@@ -494,12 +518,11 @@ internal sealed class PlanningPredictionService
             throw new ArgumentOutOfRangeException(nameof(assumedHuntTriggers));
         for (var trigger = 0; trigger < assumedHuntTriggers; trigger++)
             room.AddExtraReward(player, new CardReward(CardCreationOptions.ForRoom(player, room.RoomType), 3, player));
-        state.Run.AppendToMapPointHistory(eventCombatRoom is not null ? MapPointType.Ancient : room.RoomType switch
-        {
-            RoomType.Elite => MapPointType.Elite,
-            RoomType.Boss => MapPointType.Boss,
-            _ => MapPointType.Monster
-        }, room.RoomType, encounter.Id);
+        if (eventCombatRoom is null)
+            RecordMapRoom(state.Run, room.RoomType, mapPoint, encounter.Id);
+        else
+            state.Run.CurrentMapPointHistoryEntry?.Rooms.Add(
+                new MapPointRoomHistoryEntry { RoomType = room.RoomType, ModelId = encounter.Id });
         state.Run.PushRoom(room);
         RewardsSet? rewards = null;
         CardReward[] originalCards = [];
@@ -609,6 +632,7 @@ internal sealed class PlanningPredictionService
 
     internal TreasureRoomDetails GenerateTreasure(State state, bool isPriorRoom, MapPoint? mapPoint = null)
     {
+        RecordMapRoom(state.Run, RoomType.Treasure, mapPoint);
         state.TreasureRoomsAdvanced++;
         var relics = new List<RewardItemDetails>();
         var localReceivesTreasure = false;
@@ -761,9 +785,15 @@ internal sealed class PlanningPredictionService
         return gold;
     }
 
-    internal MerchantInventoryForecast GenerateMerchant(State state)
+    internal PlanningMerchantSession EnterMerchant(State state, MapPoint? mapPoint = null)
     {
-        using var shop = new PlanningMerchantSession(state);
+        RecordMapRoom(state.Run, RoomType.Shop, mapPoint);
+        return new PlanningMerchantSession(state);
+    }
+
+    internal MerchantInventoryForecast GenerateMerchant(State state, MapPoint? mapPoint = null)
+    {
+        using var shop = EnterMerchant(state, mapPoint);
         return shop.Describe();
     }
 

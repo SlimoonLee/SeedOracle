@@ -119,11 +119,23 @@ internal sealed class RoutePlanForecastService(PlanningPredictionService plannin
                 var outcome = new PlanNodeOutcome();
                 state.Run.ActFloor = point.coord.row + 1;
                 chain.StatesBefore[entry.Coord] = planning.Capture(state);
+                EncounterModel? nodeEncounter = null;
+                if (roomType.IsCombatRoom() || point.PointType == MapPointType.Unknown)
+                {
+                    roomType = MerchantChoiceBranchService.ResolveRoom(state, point);
+                    if (roomType.IsCombatRoom())
+                        nodeEncounter = MerchantChoiceBranchService.ResolveEncounter(state, roomType);
+                }
+                if (roomType == RoomType.Event)
+                {
+                    // Event execution starts on the point, before choosing an option.
+                    var model = point.PointType == MapPointType.Ancient ? state.Run.Act._rooms.Ancient
+                        : new EventQueueSimulation(state.Run, state.Run.IterateHookListeners(null).ToArray()).Consume();
+                    PlanningPredictionService.RecordMapRoom(state.Run, roomType, point, model?.Id);
+                    chain.StatesBefore[entry.Coord] = planning.Capture(state);
+                }
 
-            // An event preview is executed against the state immediately
-            // before this node. Join its serialized result here so all later
-            // native reward rolls see cards, relics, potions, RNG and flags
-            // changed by that event.
+                // Carry completed event choices into the state for later rooms.
                 if (eventOutcomes?.TryGetValue(entry.Coord, out var eventOutcome) == true)
                 {
                     if (!eventOutcome.Finished)
@@ -160,17 +172,6 @@ internal sealed class RoutePlanForecastService(PlanningPredictionService plannin
 
                 potionMax = state.Player.MaxPotionCount;
 
-            // Resolve against the choice-modified graph, including any event
-            // effects on room odds and encounter queues.
-                EncounterModel? nodeEncounter = null;
-                if (roomType is RoomType.Monster or RoomType.Elite or RoomType.Boss
-                    || point.PointType == MapPointType.Unknown)
-                {
-                    roomType = MerchantChoiceBranchService.ResolveRoom(state, point);
-                    if (roomType.IsCombatRoom())
-                        nodeEncounter = MerchantChoiceBranchService.ResolveEncounter(state, roomType);
-                }
-
                 try
                 {
                 switch (roomType)
@@ -200,7 +201,7 @@ internal sealed class RoutePlanForecastService(PlanningPredictionService plannin
                     state.CombatsAdvanced++;
                     outcome.BeforeCombatRewards = planning.Capture(state);
                     using var generated = planning.GenerateCombatRewards(state, roomType, nodeEncounter,
-                        assumedHuntTriggers: combatChoice.HuntTriggers);
+                        assumedHuntTriggers: combatChoice.HuntTriggers, mapPoint: point);
                     var rewards = ApplyCombatRewards(state, generated, combatChoice, before);
                     var rooms = state.Run.Act._rooms;
                     if (roomType == RoomType.Monster) rooms.normalEncountersVisited++;
@@ -225,8 +226,7 @@ internal sealed class RoutePlanForecastService(PlanningPredictionService plannin
                 case RoomType.Shop:
                 {
                     var goldBeforeShop = state.Player.Gold;
-                    state.Run.AppendToMapPointHistory(MapPointType.Shop, RoomType.Shop, null);
-                    using var shop = new PlanningMerchantSession(state);
+                    using var shop = planning.EnterMerchant(state, point);
                     gold = state.Player.Gold;
                     var inventory = shop.Describe();
                     outcome.Merchant = Forecast<MerchantInventoryForecast>.Branch(
@@ -307,7 +307,7 @@ internal sealed class RoutePlanForecastService(PlanningPredictionService plannin
                 case RoomType.RestSite:
                 {
                     var goldBeforeRest = state.Player.Gold;
-                    planning.EnterRestSite(state);
+                    planning.EnterRestSite(state, point);
                     gold = state.Player.Gold;
                     ApplyRestChoice(chain, potionMax, entry.Choice, outcome, ref gold);
                     outcome.GoldDelta = gold - goldBeforeRest;

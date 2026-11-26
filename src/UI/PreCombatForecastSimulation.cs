@@ -1,4 +1,5 @@
 using Godot;
+using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Helpers;
 using MegaCrit.Sts2.Core.Localization.Fonts;
 using MegaCrit.Sts2.Core.Models;
@@ -58,6 +59,8 @@ internal sealed partial class PreCombatForecastPanelControl
     private string? _simulationResultStateToken;
     private double _workerStatusRefreshElapsed;
     private bool _workerLifecycleOperation;
+    private Task? _prewarmTask;
+    private DateTime _prewarmRetryAfterUtc;
     private CombatSolverProgressMonitor? _activeMonitor;
     private double _progressRefreshElapsed;
     private CombatSolverProgressMonitor? _simulationMonitor;
@@ -494,6 +497,13 @@ internal sealed partial class PreCombatForecastPanelControl
                 ForceRefresh = true,
                 CloseWorkerAfterRequest = false,
             };
+            // The background prewarm owns the worker until it finishes; a sample issued
+            // meanwhile would restart the worker underneath that request.
+            if (_prewarmTask is { IsCompleted: false } prewarm)
+            {
+                SetSimulationSummary("等待后台预热完成……", StsColors.gold);
+                await prewarm;
+            }
             for (var index = 0; index < samples.Count; index++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -510,7 +520,7 @@ internal sealed partial class PreCombatForecastPanelControl
                 var timeout = CombatSolverTimeoutPolicy.Choose(budget);
                 _simulationProgressPrefix =
                     $"正在运行 {index + 1}/{samples.Count}：{sample.PoolLabel} · {LocalizedEncounterTitle(sample.Encounter)}";
-                _simulationMonitor = new CombatSolverProgressMonitor(timeout);
+                _simulationMonitor = new CombatSolverProgressMonitor(timeout, budget);
                 SetSimulationSummary(
                     $"{_simulationProgressPrefix} · 启动求解进程",
                     StsColors.gold);
@@ -738,6 +748,10 @@ internal sealed partial class PreCombatForecastPanelControl
             || (manual && IsRunning)
             || !Entry.CombatSolver.SupportsPreCombatForecast)
             return;
+        // Let a background prewarm finish first: otherwise it would start a worker
+        // again right after this stop.
+        if (_prewarmTask is { IsCompleted: false } prewarm)
+            await prewarm;
         _workerLifecycleOperation = true;
         ApplyRunningState();
         _workerStatusLabel.Text = "后台：正在关闭……";
@@ -760,6 +774,60 @@ internal sealed partial class PreCombatForecastPanelControl
         }
     }
 
+    /// <summary>
+    /// Starts the reusable worker as soon as the panel is opened, so the multi-second
+    /// process cold start overlaps with reading the routes instead of following the
+    /// first click. Only runs when the worker would be kept alive anyway, and never
+    /// replaces a live worker: a request that reuses one is already fast.
+    /// </summary>
+    private void PrewarmWorkerOnOpen()
+    {
+        if (DateTime.UtcNow < _prewarmRetryAfterUtc)
+            return;
+        if (_prewarmTask is { IsCompleted: false })
+            return;
+        if (_workerLifecycleOperation || IsRunning || IsSimulationRunning)
+            return;
+        if (!KeepWorkerAlive || !Entry.CombatSolver.SupportsPreCombatForecast)
+            return;
+        if (CombatManager.Instance.IsInProgress)
+            return;
+        if (_screen is null || !GodotObject.IsInstanceValid(_screen))
+            return;
+        try
+        {
+            if (Entry.CombatSolver.GetPreCombatWorkerStatus().IsRunning)
+                return;
+        }
+        catch (Exception exception)
+        {
+            Entry.Logger.Error(
+                $"Reading the pre-combat worker status before a prewarm failed: {exception.GetBaseException()}");
+            return;
+        }
+        // The status probe and the request below run on the same frame, so no
+        // calculation can start a worker between them.
+        _prewarmTask = PrewarmWorkerAsync(_screen._runState);
+    }
+
+    private async Task PrewarmWorkerAsync(RunState run)
+    {
+        try
+        {
+            _workerStatusLabel.Text = "后台：正在预热，首次计算将直接进入搜索……";
+            RenderWorkerStatus(await Entry.CombatSolver.RestartPreCombatWorkerAsync(
+                run,
+                SelectedWorkerIdleTimeoutMilliseconds));
+        }
+        catch (Exception exception)
+        {
+            // Back off so a persistent failure cannot restart a process on every map refresh.
+            _prewarmRetryAfterUtc = DateTime.UtcNow.AddSeconds(60);
+            _workerStatusLabel.Text = $"后台预热失败：{ShortError(exception.GetBaseException().Message)}";
+            Entry.Logger.Error($"Prewarming the reusable pre-combat worker failed: {exception.GetBaseException()}");
+        }
+    }
+
     private async Task RestartWorkerAsync()
     {
         if (_workerLifecycleOperation
@@ -770,6 +838,8 @@ internal sealed partial class PreCombatForecastPanelControl
         {
             return;
         }
+        if (_prewarmTask is { IsCompleted: false } prewarm)
+            await prewarm;
         _workerLifecycleOperation = true;
         ApplyRunningState();
         _workerStatusLabel.Text = "后台：正在重启并预热……";

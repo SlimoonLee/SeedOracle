@@ -59,6 +59,7 @@ internal static class SmokeRunner
         && !SolverClimb.IsRequested
         && (!CardValueDemo.IsRequested || !CardValueDemo.IsCompleted)
         && (!DecisionLab.IsRequested || !DecisionLab.IsCompleted)
+        && Entry.CombatSolver.SupportsPlanningSimulation
         && !_planningSimulationReported;
 
     internal static Task WaitForPlanningSimulationAsync(CancellationToken cancellationToken)
@@ -156,6 +157,8 @@ internal static class SmokeRunner
             if (PlanningAuditOnly && _eventAuditDone
                 && (!Entry.CombatSolver.SupportsPlanningSimulation || _planningSimulationReported))
             {
+                _autoSlayer?.Stop();
+                _autoSlayer = null;
                 SmokeReport.Flush();
                 NGame.Instance?.GetTree()?.Quit();
                 return;
@@ -333,6 +336,7 @@ internal static class SmokeRunner
         }
         else
         {
+            SmokeReport.Add("planning-combat-simulation SKIP: Combat Solver unavailable");
             _planningSimulationReported = true;
             _planningSimulationGate.TrySetResult();
         }

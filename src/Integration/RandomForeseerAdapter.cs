@@ -13,6 +13,7 @@ using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.CardPools;
 using MegaCrit.Sts2.Core.Random;
 using MegaCrit.Sts2.Core.Rooms;
+using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.Core.Saves;
 using SeedOracle.Api;
 using SeedOracle.Forecasting;
@@ -281,9 +282,11 @@ internal sealed partial class RandomForeseerAdapter : IRandomForeseerAdapter
             var sharedRelicGrabBag = MegaCrit.Sts2.Core.Runs.RelicGrabBag.FromSerializable(
                 player.RunState.SharedRelicGrabBag.ToSerializable());
 
+            var route = new PlanningPredictionService().CreateState((RunState)player.RunState, player).Run;
             MerchantInventoryForecast? forecast = null;
             for (var visit = 1; visit <= futureVisitOrdinal; visit++)
             {
+                PlanningPredictionService.RecordMapRoom(route, RoomType.Shop);
                 forecast = PredictMerchantVisit(
                     context,
                     player,
@@ -291,18 +294,14 @@ internal sealed partial class RandomForeseerAdapter : IRandomForeseerAdapter
                     shops,
                     relicGrabBag,
                     sharedRelicGrabBag,
+                    route,
                     visit);
             }
 
-            return futureVisitOrdinal == 1
-                ? Forecast<MerchantInventoryForecast>.CurrentWorldline(
-                    forecast!,
-                    dependencies,
-                    "Uses Random Foreseer's cloned prediction context and hook mirrors.")
-                : Forecast<MerchantInventoryForecast>.Branch(
-                    forecast!,
-                    dependencies,
-                    "Assumes earlier merchant visits only generate their initial stock; purchases, restocks, removals, and unrelated reward RNG consumers are unchanged.");
+            return Forecast<MerchantInventoryForecast>.Branch(
+                forecast!,
+                dependencies,
+                "Assumes consecutive shop floors starting with the next floor, with only initial stock generated at each shop.");
         }
         catch (Exception exception)
         {
@@ -320,12 +319,13 @@ internal sealed partial class RandomForeseerAdapter : IRandomForeseerAdapter
         Rng shops,
         MegaCrit.Sts2.Core.Runs.RelicGrabBag relicGrabBag,
         MegaCrit.Sts2.Core.Runs.RelicGrabBag sharedRelicGrabBag,
+        IRunState route,
         int visit)
     {
         var inventory = new MerchantInventory(player);
         var characterCards = PredictCharacterCards(context, inventory, player, shops);
         var colorlessCards = PredictColorlessCards(context, inventory, player, shops);
-        var relics = PredictRelics(player, shops, relicGrabBag, sharedRelicGrabBag);
+        var relics = PredictRelics(player, shops, relicGrabBag, sharedRelicGrabBag, route);
         var potions = PredictPotions(player, shops);
         var removalCost = PredictRemovalCost(player);
         return new MerchantInventoryForecast(
@@ -430,7 +430,8 @@ internal sealed partial class RandomForeseerAdapter : IRandomForeseerAdapter
         Player player,
         Rng shops,
         MegaCrit.Sts2.Core.Runs.RelicGrabBag relicGrabBag,
-        MegaCrit.Sts2.Core.Runs.RelicGrabBag sharedRelicGrabBag)
+        MegaCrit.Sts2.Core.Runs.RelicGrabBag sharedRelicGrabBag,
+        IRunState route)
     {
         // The game rolls both shop-relic rarities from PlayerRng.Shops
         // (MerchantInventory.GetDefaultRelicEntries) — the Rewards stream here
@@ -449,7 +450,7 @@ internal sealed partial class RandomForeseerAdapter : IRandomForeseerAdapter
             var relic = relicGrabBag.PullFromBack(
                             rarity,
                             candidate => candidate.IsAllowedInShops,
-                            player.RunState)
+                            route)
                         ?? RelicFactory.FallbackRelic;
             sharedRelicGrabBag.Remove(relic);
             var cost = (int)Math.Round(relic.MerchantCost * shops.NextFloat(0.85f, 1.15f));

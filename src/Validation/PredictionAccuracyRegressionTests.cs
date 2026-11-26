@@ -59,6 +59,7 @@ internal static class PredictionAccuracyRegressionTests
                 using (ShadowIsolation.GenerateMerchantInventory())
                 {
                     Require(!LocalContext.IsMe(native.Player), "local UI ownership must stay closed outside pricing");
+                    native.Run.AppendToMapPointHistory(MapPointType.Shop, RoomType.Shop, null);
                     native.Run.PushRoom(new MerchantRoom());
                     try
                     {

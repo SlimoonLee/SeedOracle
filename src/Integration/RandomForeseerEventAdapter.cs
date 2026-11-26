@@ -57,6 +57,7 @@ internal sealed partial class RandomForeseerAdapter
             var state = planning.CreateState((RunState)player.RunState, player);
             using var isolation = ShadowIsolation.Enter(state.Player);
             planning.AdvanceRoomsBeforeTarget(state, resolvedRooms);
+            PlanningPredictionService.RecordMapRoom(state.Run, RoomType.Event, modelId: eventModel.Id);
             var context = _contextConstructor.Invoke([state.Player]);
             var details = PredictInitialEventContents(bridge, state.Player, eventModel);
             GC.KeepAlive(context);

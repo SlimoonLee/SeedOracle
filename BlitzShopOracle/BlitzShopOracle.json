@@ -1,9 +1,9 @@
 {
   "id": "BlitzShopOracle",
-  "name": "Blitz Shop Oracle / 极速商店先知",
+  "name": "极速模式商店全预测",
   "author": "slimoon",
-  "description": "独立预测极速商店的购买组合、随机升级分支和前置拿牌/删牌/变牌影响。无需 Combat Solver、Random Foreseer 或 RitsuLib。",
-  "version": "0.1.1",
+  "description": "提供极速模式下商店的完全预测，在mod面板里显示所有可能买到的物品，点选想要的项目后，下拉滚动面板即提供所有可能路径。\n\n顺带一提：对于每个商店，获取指定本职业金卡、蓝卡、白卡的概率约为30%、25%、34%。因此用本mod后几乎总是可以战添柴（",
+  "version": "0.1.2",
   "has_pck": false,
   "has_dll": true,
   "affects_gameplay": false,

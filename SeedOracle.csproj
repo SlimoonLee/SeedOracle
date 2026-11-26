@@ -9,12 +9,12 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <EnableDynamicLoading>true</EnableDynamicLoading>
     <RootNamespace>SeedOracle</RootNamespace>
-    <Version>0.1.65</Version>
+    <Version>0.1.66</Version>
     <Sts2Dir Condition="'$(Sts2Dir)' == ''">$(MSBuildProgramFiles32)\Steam\steamapps\common\Slay the Spire 2</Sts2Dir>
     <Sts2DataDir Condition="'$(Sts2DataDir)' == ''">$(Sts2Dir)\data_sts2_windows_x86_64</Sts2DataDir>
     <RitsuLibDir Condition="'$(RitsuLibDir)' == ''">$(Sts2Dir)\mods\STS2-RitsuLib</RitsuLibDir>
     <!-- RitsuLib 0.6+ ships one loader root plus API-specific compat assemblies. -->
-    <RitsuLibReferenceTarget Condition="'$(RitsuLibReferenceTarget)' == ''">0.111.0</RitsuLibReferenceTarget>
+    <RitsuLibReferenceTarget Condition="'$(RitsuLibReferenceTarget)' == ''">0.114.0</RitsuLibReferenceTarget>
     <RitsuLibRoot Condition="'$(RitsuLibRoot)' == '' and Exists('$(RitsuLibDir)\RitsuLib.References.props')">$(RitsuLibDir)</RitsuLibRoot>
     <RitsuLibRoot Condition="'$(RitsuLibRoot)' == '' and Exists('$(RitsuLibDir)\..\..\RitsuLib.References.props')">$(RitsuLibDir)\..\..</RitsuLibRoot>
     <RitsuLibCompileDir Condition="'$(RitsuLibCompileDir)' == '' and Exists('$(RitsuLibRoot)\compat\$(RitsuLibReferenceTarget)\STS2-RitsuLib.dll')">$(RitsuLibRoot)\compat\$(RitsuLibReferenceTarget)</RitsuLibCompileDir>
@@ -29,7 +29,6 @@
     <RandomForeseerRoot Condition="'$(RandomForeseerRoot)' == '' and Exists('$(RandomForeseerDir)\..\..\RandomForeseer.json')">$(RandomForeseerDir)\..\..</RandomForeseerRoot>
     <RandomForeseerReferencePath Condition="'$(RandomForeseerReferencePath)' == '' and Exists('$(RandomForeseerDir)\RandomForeseer.dll')">$(RandomForeseerDir)\RandomForeseer.dll</RandomForeseerReferencePath>
     <RandomForeseerReferencePath Condition="'$(RandomForeseerReferencePath)' == '' and Exists('$(RandomForeseerRoot)\RandomForeseer.dll')">$(RandomForeseerRoot)\RandomForeseer.dll</RandomForeseerReferencePath>
-    <CombatSolverDir Condition="'$(CombatSolverDir)' == ''">$(Sts2Dir)\mods\CombatSolver</CombatSolverDir>
     <ModOutputDir Condition="'$(ModOutputDir)' == ''">$(Sts2Dir)\mods\SeedOracle</ModOutputDir>
     <CopyModOnBuild Condition="'$(CopyModOnBuild)' == ''">true</CopyModOnBuild>
     <NoWarn>$(NoWarn);CS0436</NoWarn>
@@ -50,15 +49,14 @@
     <Reference Include="STS2-RitsuLib.Ui" HintPath="$(RitsuLibSharedDir)\STS2-RitsuLib.Ui.dll" Private="false" Condition="Exists('$(RitsuLibSharedDir)\STS2-RitsuLib.Ui.dll')" />
     <Reference Include="STS2-RitsuLib.Settings" HintPath="$(RitsuLibSharedDir)\STS2-RitsuLib.Settings.dll" Private="false" Condition="Exists('$(RitsuLibSharedDir)\STS2-RitsuLib.Settings.dll')" />
     <Reference Include="RandomForeseer" HintPath="$(RandomForeseerReferencePath)" Private="false" Condition="Exists('$(RandomForeseerReferencePath)')" />
-    <Reference Include="CombatSolver" HintPath="$(CombatSolverDir)\CombatSolver.dll" Private="false" />
   </ItemGroup>
 
   <ItemGroup>
     <!-- Sibling projects and Godot intermediates carry their own generated
          sources; without these removes a fresh build double-compiles them. -->
-    <Compile Remove=".reference/**;.tools/**;tests/**;TestResults/**;.godot/**;sts2-cli/**;turn-solver/**;seedsearch/**;.local/**;elite-route/**;BlitzShopOracle/**" />
-    <EmbeddedResource Remove=".reference/**;.tools/**;tests/**;TestResults/**;.godot/**;sts2-cli/**;turn-solver/**;seedsearch/**;.local/**;elite-route/**;BlitzShopOracle/**" />
-    <None Remove=".reference/**;.tools/**;tests/**;TestResults/**;.godot/**;sts2-cli/**;turn-solver/**;seedsearch/**;.local/**;elite-route/**;BlitzShopOracle/**" />
+    <Compile Remove=".reference/**;.tools/**;tests/**;TestResults/**;.godot/**;sts2-cli/**;turn-solver/**;seedsearch/**;.local/**;elite-route/**;BlitzShopOracle/**;STS2-CombatLab/**" />
+    <EmbeddedResource Remove=".reference/**;.tools/**;tests/**;TestResults/**;.godot/**;sts2-cli/**;turn-solver/**;seedsearch/**;.local/**;elite-route/**;BlitzShopOracle/**;STS2-CombatLab/**" />
+    <None Remove=".reference/**;.tools/**;tests/**;TestResults/**;.godot/**;sts2-cli/**;turn-solver/**;seedsearch/**;.local/**;elite-route/**;BlitzShopOracle/**;STS2-CombatLab/**" />
   </ItemGroup>
 
   <Target Name="ValidateLocalDependencies" BeforeTargets="ResolveAssemblyReferences">
@@ -67,7 +65,6 @@
     <Error Condition="'$(RitsuLibRoot)' != '' and !Exists('$(RitsuLibCompileDir)\STS2-RitsuLib.Runtime.dll')" Text="RitsuLib root was detected, but the $(RitsuLibReferenceTarget) compat runtime is missing under '$(RitsuLibCompileDir)'." />
     <Error Condition="'$(RitsuLibRoot)' != '' and !Exists('$(RitsuLibSharedDir)\STS2-RitsuLib.Shared.dll')" Text="RitsuLib 0.6+ shared assemblies are missing under '$(RitsuLibSharedDir)'. Use a complete RitsuLib installation." />
     <Error Condition="'$(RandomForeseerReferencePath)' == ''" Text="Could not find Random Foreseer under '$(RandomForeseerDir)' or its Workshop root." />
-    <Error Condition="!Exists('$(CombatSolverDir)\CombatSolver.dll')" Text="Could not find Combat Solver under '$(CombatSolverDir)'." />
   </Target>
 
   <Target Name="CopyMod" AfterTargets="Build" Condition="'$(CopyModOnBuild)' == 'true'">

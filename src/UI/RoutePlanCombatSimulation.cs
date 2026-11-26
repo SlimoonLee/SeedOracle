@@ -267,7 +267,7 @@ internal sealed partial class RoutePlanPanelControl
                 // cut short loses its whole result, which costs more than waiting.
                 const int budget = 5_000;
                 var timeout = CombatSolverTimeoutPolicy.Choose(budget);
-                monitor = new CombatSolverProgressMonitor(timeout);
+                monitor = new CombatSolverProgressMonitor(timeout, budget);
                 // The API captures Godot state synchronously. Every request,
                 // and all result rendering, starts on the dispatcher thread.
                 var pending = Entry.CombatSolver.SimulatePlanningAsync(

@@ -266,6 +266,7 @@ internal sealed partial class PreCombatForecastPanelControl : PanelContainer
     {
         PrepareTargets();
         Visible = true;
+        PrewarmWorkerOnOpen();
         PresentationChanged?.Invoke();
     }
 
@@ -558,7 +559,7 @@ internal sealed partial class PreCombatForecastPanelControl : PanelContainer
         var budget = options.SearchBudgetMilliseconds;
         var timeout = CombatSolverTimeoutPolicy.Choose(budget);
         options = options with { OverallTimeoutMilliseconds = timeout };
-        _activeMonitor = new CombatSolverProgressMonitor(timeout);
+        _activeMonitor = new CombatSolverProgressMonitor(timeout, budget);
         _progressRefreshElapsed = 0d;
         _ = RunSingleAsync(
             run,
@@ -584,6 +585,13 @@ internal sealed partial class PreCombatForecastPanelControl : PanelContainer
         CombatSolverForecastResult? result = null;
         try
         {
+            // Issuing a request while the background prewarm is still restarting the
+            // worker would restart it underneath that request.
+            if (_prewarmTask is { IsCompleted: false } prewarm)
+            {
+                SetSummary("等待后台预热完成……", StsColors.gold);
+                await prewarm;
+            }
             result = await PreCombatForecastCoordinator.CalculateAsync(
                 run,
                 target,

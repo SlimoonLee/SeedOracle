@@ -71,7 +71,7 @@ RF 的事件选项预测原本只服务于已经进入的事件。Seed Oracle �
 
 作者主线中的 `CombatSolver.Api.PreCombatForecastApi` v5 已在合并提交 `0552b33` 中可用。它没有尝试从未来 Encounter 手工拼装不完整 Root，而是把规范化完整跑局、Encounter、目标楼层/列坐标、节点类型和已确定的连续非战斗地图历史交给独立游戏进程；worker 精确恢复跑局、补记结构性路径历史并应用可选入战 HP 后，通过原生入口建立战斗，再复用上述内部 Root 与搜索管线。独立的 `SimulateAsync` 在精确恢复校验后才替换隔离战斗 RNG；状态接口只读返回 worker 进程、内存信息和可空空闲期限。
 
-`CombatSolverAdapter` 直接依赖该编译期契约，并在启动时检查 `ApiVersion >= 5` 与 `IsAvailable`；规划模拟再通过反射探测 v6 方法。`SeedOracle.json` 的 `min_version` 只表达 v5 最低门槛，更新的 Combat Solver 主 Mod 版本无需改 SeedOracle 清单；仅有旧无 API 构建时会保持不支持，不会退回到不安全的内部入口。本次编译验证使用作者工坊条目 `3790899961` 的 `0.31.2` DLL，属于验证样本而非精确依赖锁定。
+`CombatSolverAdapter` 不引用 Combat Solver 程序集，而是在加载器初始化后从已加载 Mod 中定位 `CombatSolver.Api.PreCombatForecastApi`，按签名反射绑定整份契约，并要求 `ApiVersion >= 5` 与 `IsAvailable`；存在 `SimulatePlanningAsync` 时才提供规划模拟。`SeedOracle.json` 不声明这个可选依赖，更新的 Combat Solver 主 Mod 版本无需改 SeedOracle 清单；仅有旧无 API 构建时会保持不支持，不会退回到不安全的内部入口。该契约自 `0.51.9` 到 `1.0.0`（`ApiVersion` 6）没有变化，绑定已在游戏内安装的 Combat Solver 1.0.x 与上游 `v1.0.0` 源码构建上离线验证通过，属于验证样本而非精确依赖锁定。
 
 ## 已确认的游戏行为
 

@@ -24,12 +24,27 @@ internal readonly record struct CombatSolverProgress(
     TimeSpan Elapsed,
     int LimitMilliseconds,
     long? WorkingSetBytes,
-    int? ProcessId)
+    int? ProcessId,
+    int SearchBudgetMilliseconds = 0)
 {
+    /// <summary>
+    /// Elapsed time against the search budget while searching, and on its own while the
+    /// worker is still starting. The wall-clock ceiling is a safety net, not the expected
+    /// duration, so showing it as a denominator reads like a countdown to a timeout.
+    /// </summary>
+    private string Amount(bool chinese)
+    {
+        var elapsed = Elapsed.TotalSeconds;
+        if (Phase == CombatSolverPhase.Searching && SearchBudgetMilliseconds > 0)
+        {
+            var budget = Math.Max(1, SearchBudgetMilliseconds) / 1000d;
+            return chinese ? $"{elapsed:0.0}/{budget:0} 秒" : $"{elapsed:0.0}/{budget:0}s";
+        }
+        return chinese ? $"{elapsed:0.0} 秒" : $"{elapsed:0.0}s";
+    }
+
     internal string Describe(bool chinese)
     {
-        var limit = Math.Max(1, LimitMilliseconds) / 1000d;
-        var elapsed = Elapsed.TotalSeconds;
         var phase = Phase switch
         {
             CombatSolverPhase.StartingWorker => chinese ? "启动求解进程" : "starting worker",
@@ -42,13 +57,12 @@ internal readonly record struct CombatSolverProgress(
                 : $" · {FormatBytes(resident)} resident"
             : string.Empty;
         return chinese
-            ? $"{elapsed:0.0}/{limit:0} 秒 · {phase}{memory}"
-            : $"{elapsed:0.0}/{limit:0}s · {phase}{memory}";
+            ? $"{Amount(true)} · {phase}{memory}"
+            : $"{Amount(false)} · {phase}{memory}";
     }
 
     internal string DescribeCompact(bool chinese)
     {
-        var limit = Math.Max(1, LimitMilliseconds) / 1000d;
         var phase = Phase switch
         {
             CombatSolverPhase.StartingWorker => chinese ? "启动中" : "starting",
@@ -59,8 +73,8 @@ internal readonly record struct CombatSolverProgress(
             ? $" · {FormatBytes(resident)}"
             : string.Empty;
         return chinese
-            ? $"计算中 {Elapsed.TotalSeconds:0.0}/{limit:0} 秒 · {phase}{memory}"
-            : $"Running {Elapsed.TotalSeconds:0.0}/{limit:0}s · {phase}{memory}";
+            ? $"计算中 {Amount(true)} · {phase}{memory}"
+            : $"Running {Amount(false)} · {phase}{memory}";
     }
 
     private static string FormatBytes(long bytes) => bytes >= 1024L * 1024 * 1024
@@ -76,10 +90,16 @@ internal sealed class CombatSolverProgressMonitor
 {
     private readonly Stopwatch _clock = Stopwatch.StartNew();
 
-    internal CombatSolverProgressMonitor(int limitMilliseconds) =>
+    internal CombatSolverProgressMonitor(int limitMilliseconds, int searchBudgetMilliseconds = 0)
+    {
         LimitMilliseconds = Math.Max(1, limitMilliseconds);
+        SearchBudgetMilliseconds = Math.Max(0, searchBudgetMilliseconds);
+    }
 
     internal int LimitMilliseconds { get; }
+
+    /// <summary>The search budget of the request in flight, used as the progress total.</summary>
+    internal int SearchBudgetMilliseconds { get; }
 
     internal TimeSpan Elapsed => _clock.Elapsed;
 
@@ -103,6 +123,6 @@ internal sealed class CombatSolverProgressMonitor
             _ => CombatSolverPhase.Preparing,
         };
         return new CombatSolverProgress(phase, _clock.Elapsed, LimitMilliseconds,
-            status?.WorkingSetBytes, status?.ProcessId);
+            status?.WorkingSetBytes, status?.ProcessId, SearchBudgetMilliseconds);
     }
 }
